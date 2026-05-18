@@ -15,14 +15,17 @@ struct PulseMark: View {
     @State private var phase: CGFloat = 0
 
     var body: some View {
-        ZStack {
+        let phaseD = Double(phase)
+        let middleD = (phaseD + 0.35).truncatingRemainder(dividingBy: 1)
+        let middleScale = CGFloat(0.5 + middleD * 0.45)
+        return ZStack {
             // Outer ring (fades + scales)
             ringView(scale: 0.6 + phase * 0.5,
-                     opacity: max(0, (1 - phase) * (pulsing ? 0.5 : 0.18)),
+                     opacity: max(0.0, (1.0 - phaseD) * (pulsing ? 0.5 : 0.18)),
                      thickness: pulsing ? 1.5 : 1)
             // Middle ring (offset phase for asymmetry)
-            ringView(scale: 0.5 + ((phase + 0.35).truncatingRemainder(dividingBy: 1)) * 0.45,
-                     opacity: max(0, (1 - ((phase + 0.35).truncatingRemainder(dividingBy: 1))) * (pulsing ? 0.6 : 0.22)),
+            ringView(scale: middleScale,
+                     opacity: max(0.0, (1.0 - middleD) * (pulsing ? 0.6 : 0.22)),
                      thickness: pulsing ? 2 : 1)
             // Inner halo (soft glow)
             Circle()
