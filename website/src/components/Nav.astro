@@ -1,0 +1,22 @@
+---
+import PulseMark from "./PulseMark.astro";
+---
+<nav class="sticky top-0 z-40 backdrop-blur supports-[backdrop-filter]:bg-ink-950/60 border-b border-white/[0.04]">
+  <div class="section flex h-16 items-center justify-between">
+    <a href="#top" class="flex items-center gap-2.5">
+      <PulseMark size={26} />
+      <span class="text-[19px] font-bold tracking-[-0.01em]">Page</span>
+    </a>
+    <div class="hidden md:flex items-center gap-8">
+      <a href="#how-it-works" class="text-sm font-medium text-mute-fg hover:text-white transition">How it works</a>
+      <a href="#kinds" class="text-sm font-medium text-mute-fg hover:text-white transition">What it pages on</a>
+      <a href="#agents" class="text-sm font-medium text-mute-fg hover:text-white transition">Agents</a>
+      <a
+        href="https://github.com/riot-io-pty-ltd/page"
+        class="inline-flex items-center gap-2 rounded-full gradient-bg px-4 py-2 text-[13px] font-bold tracking-[0.01em] text-ink-950"
+      >
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</nav>

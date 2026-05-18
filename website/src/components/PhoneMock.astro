@@ -1,0 +1,111 @@
+---
+import PulseMark from "./PulseMark.astro";
+
+// Three preview cards inside the iPhone, matching the inbox.pen design.
+const cards = [
+  {
+    project: "acme-web",
+    kind: "APPROVAL",
+    kindColor: "approval",
+    backend: "CLAUDE",
+    source: "Terminal",
+    brand: "claude",
+    heading: "Auth flow",
+    body: "Bash command needs approval: npm install bcrypt@5.1.1",
+    age: "PAGED 12S AGO",
+    dot: "approval",
+  },
+  {
+    project: "nova-firmware",
+    kind: "QUESTION",
+    kindColor: "question",
+    backend: "CLAUDE",
+    source: "VS Code",
+    brand: "claude",
+    heading: "Modem provisioning",
+    body: "Should I retry the cert at 9600 baud instead of 38400?",
+    age: "PAGED 2M AGO",
+    dot: "question",
+  },
+  {
+    project: "helix-mobile",
+    kind: "APPROVAL",
+    kindColor: "approval",
+    backend: "CODEX",
+    source: "CLI",
+    brand: "codex",
+    heading: "Cert pinning",
+    body: "Read /helix-mobile/certs/root.pem — confirm before continuing?",
+    age: "PAGED 38S AGO",
+    dot: "approval",
+  },
+] as const;
+
+const kindRingClass = {
+  approval: "text-kind-approval ring-kind-approval",
+  question: "text-kind-question ring-kind-question",
+  idle:     "text-kind-idle ring-kind-idle",
+  rate:     "text-kind-rate ring-kind-rate",
+} as const;
+const dotClass = {
+  approval: "bg-kind-approval",
+  question: "bg-kind-question",
+  idle:     "bg-kind-idle",
+  rate:     "bg-kind-rate",
+} as const;
+const brandClass = {
+  claude: { text: "text-brand-claude", ring: "ring-brand-claude/55", bg: "bg-brand-claude/15" },
+  codex:  { text: "text-brand-codex",  ring: "ring-brand-codex/55",  bg: "bg-brand-codex/15"  },
+} as const;
+---
+<div class="relative mx-auto w-[360px]">
+  <!-- Ambient glow -->
+  <div class="absolute -left-12 top-16 -z-10 h-[520px] w-[520px] rounded-full bg-cy-300/12 blur-3xl"></div>
+  <div class="absolute right-0 top-72 -z-10 h-[380px] w-[380px] rounded-full bg-cy-400/12 blur-3xl"></div>
+
+  <!-- Phone shell -->
+  <div class="relative aspect-[9/19] w-full overflow-hidden rounded-[56px] bg-ink-900 ring-[6px] ring-ink-800 shadow-2xl">
+    <!-- Notch -->
+    <div class="absolute left-1/2 top-3 z-10 h-7 w-28 -translate-x-1/2 rounded-2xl bg-black"></div>
+
+    <div class="flex h-full flex-col px-3 pt-12 pb-3">
+      <!-- Status bar -->
+      <div class="flex items-center justify-between px-3 pb-3 text-[12px] font-bold">
+        <span>9:41</span>
+        <div class="flex items-center gap-1.5 opacity-90">
+          <svg class="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M3 19h2v2H3zm4-3h2v5H7zm4-3h2v8h-2zm4-3h2v11h-2zm4-3h2v14h-2z"/></svg>
+          <svg class="h-3 w-3" viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C7.95 3 4.21 4.34 1.2 6.6L3 9c2.55-1.91 5.7-3 9-3s6.45 1.09 9 3l1.8-2.4C19.79 4.34 16.05 3 12 3zm0 6c-2.73 0-5.27.84-7.36 2.27L6.4 13.6C8.05 12.6 9.96 12 12 12s3.95.6 5.6 1.6l1.76-2.33C17.27 9.84 14.73 9 12 9zm0 6c-1.4 0-2.7.41-3.8 1.11L12 21l3.8-4.89C14.7 15.41 13.4 15 12 15z"/></svg>
+          <div class="h-3 w-5 rounded-sm border border-current/80 relative"><div class="absolute inset-0.5 rounded-[1px] bg-current"></div></div>
+        </div>
+      </div>
+      <!-- Header -->
+      <div class="flex items-center justify-between px-2 pt-1 pb-1">
+        <span class="text-2xl font-extrabold tracking-[-0.01em]">Page</span>
+        <PulseMark size={18} />
+      </div>
+      <p class="px-2 text-[10px] font-semibold tracking-[0.12em] text-mute-fg">3 PAGES WAITING</p>
+
+      <!-- Cards -->
+      <div class="mt-2 flex flex-col gap-2.5">
+        {cards.map((c) => (
+          <div class="rounded-2xl bg-ink-800 px-3.5 py-3 ring-1 ring-white/[0.06]">
+            <div class="font-mono text-[11px] text-mute-fg">{c.project}</div>
+            <div class="mt-1.5 flex items-center gap-1.5">
+              <span class:list={["chip-kind", kindRingClass[c.kindColor]]}>{c.kind}</span>
+              <span class:list={["pill-backend", brandClass[c.brand].text, brandClass[c.brand].ring, brandClass[c.brand].bg]}>
+                <span class="font-extrabold">{c.backend}</span>
+                <span class="font-medium opacity-90">{c.source}</span>
+              </span>
+            </div>
+            <p class="mt-2 text-[15px] font-semibold">{c.heading}</p>
+            <p class="mt-1 text-[12px] leading-snug text-white/70">{c.body}</p>
+            <div class="mt-2.5 flex items-center justify-between">
+              <span class="text-[10px] font-semibold tracking-[0.05em] text-mute-fg">{c.age}</span>
+              <span class:list={["h-2 w-2 rounded-full", dotClass[c.dot]]}></span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+</div>

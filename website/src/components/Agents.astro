@@ -1,0 +1,65 @@
+---
+const agents = [
+  { name: "CLAUDE",  status: "live", color: "claude",
+    title: "Anthropic Claude Code",
+    body: "Hook into Claude's PreToolUse / Notification events. Idle detection via transcript tail." },
+  { name: "CODEX",   status: "live", color: "codex",
+    title: "OpenAI Codex",
+    body: "CLI, VS Code, and Desktop. Talks to Codex's app-server protocol + rollout JSONL files for idle detection." },
+  { name: "CURSOR",  status: "soon",
+    title: "Cursor Agent",
+    body: "Coming next. Same hooks-based pattern as Claude with a Cursor-specific reply path." },
+  { name: "GEMINI",  status: "soon",
+    title: "Gemini CLI",
+    body: "Up next after Cursor. Process detection + transcript tailing on disk." },
+];
+const brand = {
+  claude: { ring: "ring-brand-claude/55", bg: "bg-brand-claude/15", text: "text-brand-claude" },
+  codex:  { ring: "ring-brand-codex/55",  bg: "bg-brand-codex/15",  text: "text-brand-codex" },
+} as const;
+---
+<section id="agents" class="section py-28 lg:py-32">
+  <span class="eyebrow ring-brand-codex/25">
+    <span class="eyebrow-dot bg-brand-codex"></span>
+    <span class="text-brand-codex">WORKS WITH</span>
+  </span>
+  <h2 class="heading-lg mt-5 max-w-[1100px]">Two agents today. More on the way.</h2>
+  <p class="mt-4 max-w-[840px] text-[17px] leading-[1.55] text-mute-fg">
+    Page treats every coding agent the same way. Each gets its own brand chip on the
+    card, so you always know who's calling.
+  </p>
+
+  <div class="mt-12 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+    {agents.map((a) => {
+      const isLive = a.status === "live";
+      const styles = isLive ? brand[a.color as "claude" | "codex"] : null;
+      return (
+        <div
+          class:list={[
+            "flex h-full flex-col rounded-3xl p-7",
+            isLive
+              ? `bg-ink-900 ring-1 ${styles!.ring.replace("55", "20")}`
+              : "bg-ink-950 ring-1 ring-mute-dim/40",
+          ]}
+          style={!isLive ? "background-image: repeating-linear-gradient(45deg, transparent 0 8px, rgba(255,255,255,0.015) 8px 9px);" : undefined}
+        >
+          <div class="flex items-center justify-between">
+            <span
+              class:list={[
+                "rounded-full px-3 py-1 text-[10px] font-extrabold tracking-[0.06em]",
+                isLive
+                  ? `${styles!.bg} ${styles!.text} ring-1 ${styles!.ring}`
+                  : "ring-1 ring-mute-dim text-mute-dim",
+              ]}
+            >{a.name}</span>
+            <span class:list={["text-lg", isLive ? "text-brand-codex" : "text-mute-dim"]}>
+              {isLive ? "✓" : "◴"}
+            </span>
+          </div>
+          <h3 class:list={["mt-5 text-[20px] font-bold tracking-tight", !isLive && "text-mute-fg"]}>{a.title}</h3>
+          <p class:list={["mt-3 text-[13px] leading-[1.55]", isLive ? "text-mute-fg" : "text-mute-dim"]}>{a.body}</p>
+        </div>
+      );
+    })}
+  </div>
+</section>

@@ -1,0 +1,34 @@
+---
+interface Props {
+  size?: number;
+  animate?: boolean;
+  className?: string;
+}
+const { size = 32, animate = true, className = "" } = Astro.props;
+---
+<span
+  class:list={["relative inline-block align-middle", className]}
+  style={`width:${size}px;height:${size}px;`}
+  aria-hidden="true"
+>
+  <span class="absolute inset-0 rounded-full bg-cy-300/10"></span>
+  <span
+    class:list={[
+      "absolute inset-[6%] rounded-full ring-1 ring-cy-300/40",
+      animate && "pulse-ring origin-center",
+    ]}
+  ></span>
+  <span
+    class:list={[
+      "absolute inset-[22%] rounded-full ring-1 ring-cy-400/55",
+      animate && "pulse-ring pulse-ring--delay origin-center",
+    ]}
+  ></span>
+  <span
+    class="absolute left-[28%] top-[28%] h-[44%] w-[44%] rounded-full gradient-bg"
+    style="box-shadow: 0 0 12px rgba(94,234,212,0.45);"
+  ></span>
+  <span
+    class="absolute left-[34%] top-[32%] h-[18%] w-[18%] rounded-full bg-white/45"
+  ></span>
+</span>
