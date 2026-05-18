@@ -1,0 +1,21 @@
+---
+const items = [
+  { color: "text-cy-300",     icon: "⚡", title: "Run overnight",      sub: "Walk away from the keyboard" },
+  { color: "text-cy-400",     icon: "📱", title: "Reply from anywhere", sub: "Push goes through 4G or wifi" },
+  { color: "text-kind-idle",  icon: "▦", title: "Multi-agent",         sub: "Claude, Codex, and friends" },
+  { color: "text-brand-claude", icon: "🔒", title: "Local-first",       sub: "Your prompts stay on-device" },
+];
+---
+<section class="border-y border-white/[0.04] bg-ink-900">
+  <div class="section flex flex-wrap items-center justify-between gap-y-6 py-8">
+    {items.map((it) => (
+      <div class="flex items-center gap-3.5">
+        <span class:list={["text-2xl leading-none", it.color]}>{it.icon}</span>
+        <div>
+          <p class="text-[14px] font-bold">{it.title}</p>
+          <p class="text-[12px] font-medium text-mute-fg">{it.sub}</p>
+        </div>
+      </div>
+    ))}
+  </div>
+</section>

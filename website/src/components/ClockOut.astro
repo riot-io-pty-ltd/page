@@ -1,0 +1,82 @@
+---
+const macFeatures = [
+  { icon: "🔔",  text: "Native macOS notifications when your agents go idle" },
+  { icon: "⚡",  text: "Keeps your Mac awake while agents are mid-turn" },
+  { icon: "🪫", text: "Battery-aware lockout with configurable thresholds" },
+  { icon: "⏰",  text: "Auto-wake + auto-resume on rate-limit reset" },
+  { icon: "🕘",  text: "Full history of every page in the menu bar dropdown" },
+];
+const phoneFeatures = [
+  { icon: "📲", text: "Push notifications anywhere there's 4G or wifi" },
+  { icon: "↩︎", text: "Reply with text — lands directly in the live session" },
+  { icon: "✓",  text: "Quick actions: Approve · Deny · Carry on" },
+  { icon: "▦",  text: "One inbox across Claude, Codex CLI, Codex Desktop, VS Code" },
+  { icon: "🔒", text: "End-to-end token pairing, no account required" },
+];
+---
+<section class="section py-28 lg:py-32">
+  <div>
+    <span class="eyebrow ring-brand-claude/25">
+      <span class="eyebrow-dot bg-brand-claude"></span>
+      <span class="text-brand-claude">ALWAYS ON</span>
+    </span>
+    <h2 class="heading-lg mt-5 max-w-[1100px]">
+      Your agents don't clock out.
+    </h2>
+    <p class="mt-4 max-w-[840px] text-[17px] leading-[1.55] text-mute-fg">
+      Combine the Mac's power management with on-call replies from your phone and your AI
+      agents become a 24/7 workforce — keeping themselves awake, weathering rate limits,
+      and tagging you in only when they truly need a human.
+    </p>
+  </div>
+
+  <div class="mt-12 grid gap-5 md:grid-cols-2">
+    <!-- Mac tier -->
+    <div class="glass-card p-8 ring-cy-300/10">
+      <span class="inline-flex items-center rounded-full bg-cy-300/10 px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-[0.08em] text-cy-300 ring-1 ring-cy-300/40">
+        Mac, always alert
+      </span>
+      <h3 class="mt-6 text-[26px] font-bold tracking-tight">
+        While you sleep, the Mac stays at the wheel.
+      </h3>
+      <p class="mt-4 text-[14px] leading-[1.55] text-mute-fg">
+        A quiet menu-bar daemon. Holds your Mac awake during turns, watches the battery,
+        auto-resumes after rate limits, and pops a native notification the moment an
+        agent needs you.
+      </p>
+      <ul class="mt-6 space-y-3">
+        {macFeatures.map((f) => (
+          <li class="flex items-center gap-3">
+            <span class="text-cy-300">{f.icon}</span>
+            <span class="text-[14px] font-medium">{f.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+
+    <!-- Phone tier -->
+    <div
+      class="glass-card p-8 ring-cy-400/30"
+      style="background: radial-gradient(120% 120% at 50% 0%, #1A2A35 0%, #0E1014 70%);"
+    >
+      <span class="inline-flex items-center rounded-full gradient-bg px-3 py-1.5 text-[10px] font-extrabold uppercase tracking-[0.08em] text-ink-950">
+        + The iOS app — Phone, always on-call
+      </span>
+      <h3 class="mt-6 text-[26px] font-bold tracking-tight">
+        While you're out, your phone is the dispatcher.
+      </h3>
+      <p class="mt-4 text-[14px] leading-[1.55] text-mute-fg">
+        Pair your iPhone and pages land on a screen you actually carry. Reply with text,
+        tap a quick action — your agents pick up where they were and keep moving.
+      </p>
+      <ul class="mt-6 space-y-3">
+        {phoneFeatures.map((f) => (
+          <li class="flex items-center gap-3">
+            <span class="text-cy-400">{f.icon}</span>
+            <span class="text-[14px] font-medium">{f.text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </div>
+</section>

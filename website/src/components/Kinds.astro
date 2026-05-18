@@ -1,0 +1,63 @@
+---
+const kinds = [
+  {
+    chip: "APPROVAL",
+    color: "approval",
+    heading: "Run this command?",
+    body: "Bash, edits, file changes outside the workspace. Approve, deny, or carry on — your choice goes straight back to the prompt.",
+  },
+  {
+    chip: "QUESTION",
+    color: "question",
+    heading: "Your input?",
+    body: "The agent hit a fork in the road and wants you to pick. Reply with text, the answer flows back into its context.",
+  },
+  {
+    chip: "IDLE",
+    color: "idle",
+    heading: "Session is waiting",
+    body: "Turn finished, model's done thinking, no follow-up from you. After 90 seconds we ping you so the agent doesn't sit there spinning.",
+  },
+  {
+    chip: "RATE LIMIT",
+    color: "rate",
+    heading: "Quota reached",
+    body: "Hit a 5-hour window or daily cap. Page tracks the reset time and (optionally) auto-resumes the moment your quota refills.",
+  },
+] as const;
+const ringClass = {
+  approval: "text-kind-approval ring-kind-approval",
+  question: "text-kind-question ring-kind-question",
+  idle:     "text-kind-idle ring-kind-idle",
+  rate:     "text-kind-rate ring-kind-rate",
+} as const;
+const cardRing = {
+  approval: "ring-kind-approval/15",
+  question: "ring-kind-question/15",
+  idle:     "ring-kind-idle/15",
+  rate:     "ring-kind-rate/15",
+} as const;
+---
+<section id="kinds" class="bg-ink-900 py-28 lg:py-32">
+  <div class="section">
+    <span class="eyebrow ring-kind-idle/25">
+      <span class="eyebrow-dot bg-kind-idle"></span>
+      <span class="text-kind-idle">WHAT IT PAGES ON</span>
+    </span>
+    <h2 class="heading-lg mt-5 max-w-[1100px]">Only the moments that need you.</h2>
+    <p class="mt-4 max-w-[760px] text-[17px] leading-[1.55] text-mute-fg">
+      Page color-codes every kind of interruption so you can tell at a glance how urgent
+      it is before you even open it.
+    </p>
+
+    <div class="mt-12 grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {kinds.map((k) => (
+        <div class:list={["glass-card flex h-full flex-col p-6", cardRing[k.color]]}>
+          <span class:list={["chip-kind w-fit", ringClass[k.color]]}>{k.chip}</span>
+          <h3 class="mt-4 text-[20px] font-bold tracking-tight">{k.heading}</h3>
+          <p class="mt-3 text-[13px] leading-[1.55] text-mute-fg">{k.body}</p>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
