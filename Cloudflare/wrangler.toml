@@ -1,0 +1,23 @@
+name = "page-relay"
+main = "src/index.ts"
+compatibility_date = "2025-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable Object — one instance per relay token (= one per paired Mac/phone pair).
+[[durable_objects.bindings]]
+name = "USERS"
+class_name = "UserRelay"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserRelay"]
+
+# Non-secret config. Real secrets go via `wrangler secret put`.
+[vars]
+APNS_ENV = "development"             # change to "production" for App Store builds
+APNS_BUNDLE_ID = "app.page.Page"
+
+# Required secrets (set once each, post-deploy):
+#   wrangler secret put APNS_KEY_P8         # paste full -----BEGIN PRIVATE KEY----- ... contents
+#   wrangler secret put APNS_KEY_ID         # 10-char identifier shown on developer.apple.com
+#   wrangler secret put APNS_TEAM_ID        # 10-char team identifier

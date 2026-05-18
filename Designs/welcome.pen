@@ -1,0 +1,1046 @@
+{
+  "version": "2.11",
+  "children": [
+    {
+      "type": "frame",
+      "id": "kVVoU",
+      "x": 0,
+      "y": 0,
+      "name": "Welcome — Dark",
+      "clip": true,
+      "width": 393,
+      "height": 852,
+      "fill": "#0E1014",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "qouNI",
+          "name": "dSB",
+          "width": "fill_container",
+          "height": 62,
+          "padding": [
+            0,
+            28
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "J0fq30",
+              "fill": "#E8EAED",
+              "content": "9:41",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "600"
+            },
+            {
+              "type": "frame",
+              "id": "FVZiR",
+              "name": "dSBR",
+              "gap": 5,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon_font",
+                  "id": "c7qoWp",
+                  "width": 16,
+                  "height": 16,
+                  "iconFontName": "signal",
+                  "iconFontFamily": "lucide",
+                  "fill": "#E8EAED"
+                },
+                {
+                  "type": "icon_font",
+                  "id": "nRaS7",
+                  "width": 16,
+                  "height": 16,
+                  "iconFontName": "wifi",
+                  "iconFontFamily": "lucide",
+                  "fill": "#E8EAED"
+                },
+                {
+                  "type": "icon_font",
+                  "id": "Ad8Qh",
+                  "width": 20,
+                  "height": 16,
+                  "iconFontName": "battery-full",
+                  "iconFontFamily": "lucide",
+                  "fill": "#E8EAED"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "fOjGe",
+          "name": "dContent",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "padding": [
+            60,
+            24,
+            34,
+            24
+          ],
+          "justifyContent": "space_between",
+          "children": [
+            {
+              "type": "frame",
+              "id": "FE9n6",
+              "name": "dHero",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 24,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "uWgiX",
+                  "name": "dPulse",
+                  "width": 128,
+                  "height": 128,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "ellipse",
+                      "id": "lV2iU",
+                      "x": 3,
+                      "y": 9,
+                      "width": 120,
+                      "height": 112,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 0.75,
+                        "fill": "#5EEAD428"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "FQEet",
+                      "x": 18,
+                      "y": 22,
+                      "width": 90,
+                      "height": 86,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 1.5,
+                        "fill": "#5EEAD44A"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "HqpLo",
+                      "x": 34,
+                      "y": 31,
+                      "width": 60,
+                      "height": 64,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 2.5,
+                        "fill": "#5EEAD488"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "jxbpa",
+                      "x": 24,
+                      "y": 24,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#5EEAD440",
+                            "position": 0
+                          },
+                          {
+                            "color": "#5EEAD415",
+                            "position": 0.6
+                          },
+                          {
+                            "color": "#5EEAD400",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 80,
+                      "height": 80
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "ho355",
+                      "x": 53,
+                      "y": 53,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#7AEEE0",
+                            "position": 0
+                          },
+                          {
+                            "color": "#5EEAD4",
+                            "position": 0.5
+                          },
+                          {
+                            "color": "#38BDF8",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 22,
+                      "height": 22,
+                      "effect": [
+                        {
+                          "type": "shadow",
+                          "shadowType": "outer",
+                          "color": "#5EEAD480",
+                          "blur": 32,
+                          "spread": 10
+                        },
+                        {
+                          "type": "shadow",
+                          "shadowType": "outer",
+                          "color": "#38BDF850",
+                          "blur": 64,
+                          "spread": 6
+                        }
+                      ]
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "f3oIar",
+                      "x": 14,
+                      "y": 14,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#5EEAD41A",
+                            "position": 0
+                          },
+                          {
+                            "color": "#5EEAD40D",
+                            "position": 0.5
+                          },
+                          {
+                            "color": "#5EEAD400",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 100,
+                      "height": 100
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "CzMHw",
+                  "name": "dTitleGrp",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 6,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "fSkVp",
+                      "fill": "#E8EAED",
+                      "content": "Page",
+                      "fontFamily": "Inter",
+                      "fontSize": 36,
+                      "fontWeight": "700",
+                      "letterSpacing": -0.5
+                    },
+                    {
+                      "type": "text",
+                      "id": "ObSgx",
+                      "fill": "#8B92A1",
+                      "content": "The on-call interface for AI agents",
+                      "fontFamily": "Inter",
+                      "fontSize": 17,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "EThiL",
+              "name": "dBottom",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 20,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "oQKje",
+                  "name": "dAuthGrp",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 8,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "lAGDh",
+                      "name": "dApple",
+                      "width": "fill_container",
+                      "height": 52,
+                      "fill": "#000000",
+                      "cornerRadius": 12,
+                      "gap": 8,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "path",
+                          "id": "Z7SQ7D",
+                          "geometry": "M14.94 5.19c-0.73 0.85-1.87 1.51-2.99 1.42-0.15-1.15 0.41-2.35 1.05-3.11 0.73-0.83 1.94-1.46 2.94-1.5 0.13 1.17-0.34 2.35-1.04 3.19z m0.98 1.65c0.65 0.03 2.47 0.26 3.64 1.98-0.09 0.06-2.17 1.28-2.15 3.81 0.03 3.02 2.65 4.03 2.68 4.04-0.03 0.07-0.42 1.44-1.38 2.83-0.83 1.24-1.71 2.45-3.05 2.47-1.34 0.03-1.77-0.79-3.29-0.79-1.53 0-2 0.77-3.27 0.82-1.31 0.05-2.3-1.32-3.14-2.53-1.71-2.47-3.02-7.02-1.26-10.08 0.87-1.52 2.43-2.48 4.12-2.51 1.28-0.02 2.5 0.87 3.29 0.87 0.78 0 2.26-1.07 3.81-0.91z",
+                          "viewBox": [
+                            4,
+                            2,
+                            16,
+                            20
+                          ],
+                          "fill": "#FFFFFF",
+                          "width": 14,
+                          "height": 17
+                        },
+                        {
+                          "type": "text",
+                          "id": "h6Y9Q",
+                          "fill": "#FFFFFF",
+                          "content": "Sign in with Apple",
+                          "fontFamily": "Inter",
+                          "fontSize": 17,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "Tdqai",
+                      "name": "dGoogle",
+                      "width": "fill_container",
+                      "height": 52,
+                      "fill": "#1F1F1F",
+                      "cornerRadius": 12,
+                      "stroke": {
+                        "align": "inside",
+                        "thickness": 1,
+                        "fill": "#3A3A3A"
+                      },
+                      "gap": 8,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "MgAKM",
+                          "name": "dGIcon",
+                          "width": 18,
+                          "height": 18,
+                          "layout": "none",
+                          "children": [
+                            {
+                              "type": "path",
+                              "id": "aIgzx",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M22.56 12.25c0-0.78-0.07-1.53-0.2-2.25h-10.36v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#4285F4",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "BfF8x",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M12 23c2.97 0 5.46-0.98 7.28-2.66l-3.57-2.77c-0.98 0.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53h-3.66v2.84c1.81 3.59 5.52 6.06 9.82 6.06z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#34A853",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "ZSVNu",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M5.84 14.09c-0.22-0.66-0.35-1.36-0.35-2.09s0.13-1.43 0.35-2.09v-2.84h-3.66c-0.75 1.48-1.18 3.15-1.18 4.93s0.43 3.45 1.18 4.93l2.85-2.22 0.81-0.62z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#FBBC05",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "PcfP3",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M12 5.38c1.62 0 3.06 0.56 4.21 1.64l3.15-3.15c-1.91-1.78-4.39-2.87-7.36-2.87-4.3 0-8.01 2.47-9.82 6.07l3.66 2.84c0.87-2.6 3.3-4.53 6.16-4.53z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#EA4335",
+                              "width": 18,
+                              "height": 18
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "k4nYXj",
+                          "fill": "#FFFFFF",
+                          "content": "Continue with Google",
+                          "fontFamily": "Inter",
+                          "fontSize": 17,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "h8yGZp",
+                  "name": "dLegal",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "bIvdi",
+                      "fill": "#8B92A1",
+                      "content": "By continuing, you agree to the",
+                      "lineHeight": 1.4,
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "u714f",
+                      "name": "dLegalL2",
+                      "justifyContent": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "H58TQ",
+                          "fill": "#8B92A1",
+                          "content": "Terms",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "E8zxh",
+                          "fill": "#8B92A1",
+                          "content": " and ",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "fo1Bq",
+                          "fill": "#8B92A1",
+                          "content": "Privacy Policy",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "t5h3N",
+                          "fill": "#8B92A1",
+                          "content": ".",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "frame",
+      "id": "Qux95",
+      "x": 493,
+      "y": 0,
+      "name": "Welcome — Light",
+      "clip": true,
+      "width": 393,
+      "height": 852,
+      "fill": "#FAF8F4",
+      "layout": "vertical",
+      "children": [
+        {
+          "type": "frame",
+          "id": "m6lWxQ",
+          "name": "lSB",
+          "width": "fill_container",
+          "height": 62,
+          "padding": [
+            0,
+            28
+          ],
+          "justifyContent": "space_between",
+          "alignItems": "center",
+          "children": [
+            {
+              "type": "text",
+              "id": "X85aHI",
+              "fill": "#15171A",
+              "content": "9:41",
+              "fontFamily": "Inter",
+              "fontSize": 16,
+              "fontWeight": "600"
+            },
+            {
+              "type": "frame",
+              "id": "hUa3S",
+              "name": "lSBR",
+              "gap": 5,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "icon_font",
+                  "id": "Q8EFGZ",
+                  "width": 16,
+                  "height": 16,
+                  "iconFontName": "signal",
+                  "iconFontFamily": "lucide",
+                  "fill": "#15171A"
+                },
+                {
+                  "type": "icon_font",
+                  "id": "l45U9y",
+                  "width": 16,
+                  "height": 16,
+                  "iconFontName": "wifi",
+                  "iconFontFamily": "lucide",
+                  "fill": "#15171A"
+                },
+                {
+                  "type": "icon_font",
+                  "id": "mfjZE",
+                  "width": 20,
+                  "height": 16,
+                  "iconFontName": "battery-full",
+                  "iconFontFamily": "lucide",
+                  "fill": "#15171A"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "id": "xQDln",
+          "name": "lContent",
+          "width": "fill_container",
+          "height": "fill_container",
+          "layout": "vertical",
+          "padding": [
+            60,
+            24,
+            34,
+            24
+          ],
+          "justifyContent": "space_between",
+          "children": [
+            {
+              "type": "frame",
+              "id": "MOO2a",
+              "name": "lHero",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 24,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "O1c9et",
+                  "name": "lPulse",
+                  "width": 128,
+                  "height": 128,
+                  "layout": "none",
+                  "children": [
+                    {
+                      "type": "ellipse",
+                      "id": "Zl1q3",
+                      "x": 3,
+                      "y": 9,
+                      "width": 120,
+                      "height": 112,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 0.75,
+                        "fill": "#C4960F28"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "cf35Y",
+                      "x": 18,
+                      "y": 22,
+                      "width": 90,
+                      "height": 86,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 1.5,
+                        "fill": "#C4960F45"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "Q9EgTq",
+                      "x": 34,
+                      "y": 31,
+                      "width": 60,
+                      "height": 64,
+                      "stroke": {
+                        "align": "center",
+                        "thickness": 2.5,
+                        "fill": "#C4960F70"
+                      }
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "b65f4J",
+                      "x": 24,
+                      "y": 24,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#F2C94C38",
+                            "position": 0
+                          },
+                          {
+                            "color": "#F2C94C12",
+                            "position": 0.6
+                          },
+                          {
+                            "color": "#F2C94C00",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 80,
+                      "height": 80
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "dDqu2",
+                      "x": 53,
+                      "y": 53,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#F7DC6F",
+                            "position": 0
+                          },
+                          {
+                            "color": "#F2C94C",
+                            "position": 0.5
+                          },
+                          {
+                            "color": "#C9E265",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 22,
+                      "height": 22,
+                      "effect": [
+                        {
+                          "type": "shadow",
+                          "shadowType": "outer",
+                          "color": "#F2C94C70",
+                          "blur": 32,
+                          "spread": 10
+                        },
+                        {
+                          "type": "shadow",
+                          "shadowType": "outer",
+                          "color": "#C9E26545",
+                          "blur": 64,
+                          "spread": 6
+                        }
+                      ]
+                    },
+                    {
+                      "type": "ellipse",
+                      "id": "yg2wq",
+                      "x": 14,
+                      "y": 14,
+                      "fill": {
+                        "type": "gradient",
+                        "gradientType": "radial",
+                        "enabled": true,
+                        "rotation": 0,
+                        "size": {
+                          "width": 1,
+                          "height": 1
+                        },
+                        "colors": [
+                          {
+                            "color": "#F2C94C15",
+                            "position": 0
+                          },
+                          {
+                            "color": "#F2C94C08",
+                            "position": 0.5
+                          },
+                          {
+                            "color": "#F2C94C00",
+                            "position": 1
+                          }
+                        ]
+                      },
+                      "width": 100,
+                      "height": 100
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "u8yD5",
+                  "name": "lTitleGrp",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 6,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "ozk2H",
+                      "fill": "#15171A",
+                      "content": "Page",
+                      "fontFamily": "Inter",
+                      "fontSize": 36,
+                      "fontWeight": "700",
+                      "letterSpacing": -0.5
+                    },
+                    {
+                      "type": "text",
+                      "id": "E2yUDC",
+                      "fill": "#6B7280",
+                      "content": "The on-call interface for AI agents",
+                      "fontFamily": "Inter",
+                      "fontSize": 17,
+                      "fontWeight": "normal"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "frame",
+              "id": "dNUbk",
+              "name": "lBottom",
+              "width": "fill_container",
+              "layout": "vertical",
+              "gap": 20,
+              "alignItems": "center",
+              "children": [
+                {
+                  "type": "frame",
+                  "id": "PaTgM",
+                  "name": "lAuthGrp",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 8,
+                  "children": [
+                    {
+                      "type": "frame",
+                      "id": "WrE7P",
+                      "name": "lApple",
+                      "width": "fill_container",
+                      "height": 52,
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 12,
+                      "stroke": {
+                        "align": "inside",
+                        "thickness": 1,
+                        "fill": "#D1D5DB"
+                      },
+                      "gap": 8,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "path",
+                          "id": "ZTWDE",
+                          "geometry": "M14.94 5.19c-0.73 0.85-1.87 1.51-2.99 1.42-0.15-1.15 0.41-2.35 1.05-3.11 0.73-0.83 1.94-1.46 2.94-1.5 0.13 1.17-0.34 2.35-1.04 3.19z m0.98 1.65c0.65 0.03 2.47 0.26 3.64 1.98-0.09 0.06-2.17 1.28-2.15 3.81 0.03 3.02 2.65 4.03 2.68 4.04-0.03 0.07-0.42 1.44-1.38 2.83-0.83 1.24-1.71 2.45-3.05 2.47-1.34 0.03-1.77-0.79-3.29-0.79-1.53 0-2 0.77-3.27 0.82-1.31 0.05-2.3-1.32-3.14-2.53-1.71-2.47-3.02-7.02-1.26-10.08 0.87-1.52 2.43-2.48 4.12-2.51 1.28-0.02 2.5 0.87 3.29 0.87 0.78 0 2.26-1.07 3.81-0.91z",
+                          "viewBox": [
+                            4,
+                            2,
+                            16,
+                            20
+                          ],
+                          "fill": "#000000",
+                          "width": 14,
+                          "height": 17
+                        },
+                        {
+                          "type": "text",
+                          "id": "DsfNd",
+                          "fill": "#000000",
+                          "content": "Sign in with Apple",
+                          "fontFamily": "Inter",
+                          "fontSize": 17,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "frame",
+                      "id": "GdNC8",
+                      "name": "lGoogle",
+                      "width": "fill_container",
+                      "height": 52,
+                      "fill": "#FFFFFF",
+                      "cornerRadius": 12,
+                      "stroke": {
+                        "align": "inside",
+                        "thickness": 1,
+                        "fill": "#D1D5DB"
+                      },
+                      "gap": 8,
+                      "justifyContent": "center",
+                      "alignItems": "center",
+                      "children": [
+                        {
+                          "type": "frame",
+                          "id": "art7U",
+                          "name": "lGIcon",
+                          "width": 18,
+                          "height": 18,
+                          "layout": "none",
+                          "children": [
+                            {
+                              "type": "path",
+                              "id": "GwZFA",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M22.56 12.25c0-0.78-0.07-1.53-0.2-2.25h-10.36v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#4285F4",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "TmckO",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M12 23c2.97 0 5.46-0.98 7.28-2.66l-3.57-2.77c-0.98 0.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53h-3.66v2.84c1.81 3.59 5.52 6.06 9.82 6.06z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#34A853",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "zZ0JA",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M5.84 14.09c-0.22-0.66-0.35-1.36-0.35-2.09s0.13-1.43 0.35-2.09v-2.84h-3.66c-0.75 1.48-1.18 3.15-1.18 4.93s0.43 3.45 1.18 4.93l2.85-2.22 0.81-0.62z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#FBBC05",
+                              "width": 18,
+                              "height": 18
+                            },
+                            {
+                              "type": "path",
+                              "id": "Qtf7A",
+                              "x": 0,
+                              "y": 0,
+                              "geometry": "M12 5.38c1.62 0 3.06 0.56 4.21 1.64l3.15-3.15c-1.91-1.78-4.39-2.87-7.36-2.87-4.3 0-8.01 2.47-9.82 6.07l3.66 2.84c0.87-2.6 3.3-4.53 6.16-4.53z",
+                              "viewBox": [
+                                1,
+                                1,
+                                22,
+                                22
+                              ],
+                              "fill": "#EA4335",
+                              "width": 18,
+                              "height": 18
+                            }
+                          ]
+                        },
+                        {
+                          "type": "text",
+                          "id": "e3MaEN",
+                          "fill": "#1F1F1F",
+                          "content": "Continue with Google",
+                          "fontFamily": "Inter",
+                          "fontSize": 17,
+                          "fontWeight": "500"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "frame",
+                  "id": "BmIIa",
+                  "name": "lLegal",
+                  "width": "fill_container",
+                  "layout": "vertical",
+                  "gap": 2,
+                  "alignItems": "center",
+                  "children": [
+                    {
+                      "type": "text",
+                      "id": "AFZYd",
+                      "fill": "#6B7280",
+                      "content": "By continuing, you agree to the",
+                      "lineHeight": 1.4,
+                      "fontFamily": "Inter",
+                      "fontSize": 12,
+                      "fontWeight": "normal"
+                    },
+                    {
+                      "type": "frame",
+                      "id": "ucrrd",
+                      "name": "lLegalL2",
+                      "justifyContent": "center",
+                      "children": [
+                        {
+                          "type": "text",
+                          "id": "C1zfJ",
+                          "fill": "#6B7280",
+                          "content": "Terms",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "HGGyq",
+                          "fill": "#6B7280",
+                          "content": " and ",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "KBbLe",
+                          "fill": "#6B7280",
+                          "content": "Privacy Policy",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        },
+                        {
+                          "type": "text",
+                          "id": "IYMqo",
+                          "fill": "#6B7280",
+                          "content": ".",
+                          "fontFamily": "Inter",
+                          "fontSize": 12,
+                          "fontWeight": "normal"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

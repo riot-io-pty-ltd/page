@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-build:
+    name: swift build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Build (debug)
+        run: swift build -c debug
+      - name: Build (release)
+        run: swift build -c release
+
+  ios-build:
+    name: iOS build (simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Regenerate project
+        working-directory: iOS
+        run: xcodegen generate
+      - name: Build iOS app
+        working-directory: iOS
+        run: |
+          xcodebuild \
+            -project Page.xcodeproj \
+            -scheme Page \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  worker-typecheck:
+    name: Worker typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: Cloudflare/package-lock.json
+      - name: Install deps
+        working-directory: Cloudflare
+        run: npm ci
+      - name: Type-check
+        working-directory: Cloudflare
+        run: npx tsc --noEmit

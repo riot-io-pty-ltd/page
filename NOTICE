@@ -1,0 +1,22 @@
+Page — an on-call interface for AI coding agents.
+Copyright 2026 Roy Sinclair and Page contributors.
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Trademark notice:
+"Page" is the name of this project. The Apache License does not grant
+permission to use that name, or any Page logos or branding (including the
+Pulse mark), to identify forks or derivative works without prior written
+permission. Use of the name to describe the origin of code or to discuss
+Page is permitted.
+
+This product includes software developed by third parties under their own
+licenses:
+
+- Apple SDKs (AppKit, Foundation, SwiftUI, UIKit, IOKit) — Apple SDK
+  Agreement; only standard system APIs are used.
+- Cloudflare Workers runtime and types — © Cloudflare, used per the
+  Cloudflare Developer Terms.
+- Inter typeface — © Rasmus Andersson, SIL Open Font License 1.1.
+- JetBrains Mono typeface — © JetBrains, SIL Open Font License 1.1.
+- Lucide icon glyph names — © Lucide contributors, ISC License.

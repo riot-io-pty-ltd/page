@@ -1,0 +1,6 @@
+# Code owners — auto-requested as reviewers on every PR that touches their
+# patterns. Lines later in the file take precedence.
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-security/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+*           @roy-riotio

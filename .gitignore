@@ -1,0 +1,32 @@
+# macOS
+.DS_Store
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+ClaudePowerMode.app/
+Page.app/
+PageAI.app/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+iOS/build/
+
+# Cloudflare / Node
+Cloudflare/node_modules/
+Cloudflare/.wrangler/
+Cloudflare/.dev.vars
+Cloudflare/.dev.vars.*
+
+# Pencil sim screenshots — local working captures, regenerated on demand
+Designs/sim-screenshots/
+
+# Logs / local state
+*.log
+
+# Local-only Claude Code settings (contains absolute paths)
+.claude/settings.local.json
