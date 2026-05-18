@@ -1,0 +1,101 @@
+---
+const features = [
+  { icon: "⚡",  color: "text-cy-300",     ring: "ring-cy-300/15",     bg: "bg-cy-300/15",
+    title: "No-sleep while busy",
+    body: "From the first keystroke to the last token, Page holds a no-sleep assertion. The moment every agent goes idle, the assertion releases and your Mac can rest." },
+  { icon: "🪫", color: "text-kind-idle",  ring: "ring-kind-idle/20",  bg: "bg-kind-idle/15",
+    title: "Battery-aware lockout",
+    body: "Set a cutoff (default 10%) and a recovery threshold (default 25% on AC). Below the cutoff Page steps aside so your laptop survives the night." },
+  { icon: "⏰",  color: "text-cy-400",     ring: "ring-cy-400/15",     bg: "bg-cy-400/15",
+    title: "Wake for the reset",
+    body: "Hit a 5-hour wall? Page schedules a system wake 30 seconds before your quota refills. No more setting alarms or waking up to a stalled session." },
+  { icon: "↻",  color: "text-brand-claude", ring: "ring-brand-claude/20", bg: "bg-brand-claude/15",
+    title: "Auto-resume",
+    body: "Optional. When the rate-limit wall lifts, Page resumes the conversation with the prompt you set. You can wake up to your agent already back at it." },
+];
+---
+<section class="bg-ink-900 py-28 lg:py-32">
+  <div class="section grid gap-16 lg:grid-cols-2 lg:items-center">
+    <div>
+      <span class="eyebrow ring-cy-300/25">
+        <span class="eyebrow-dot bg-cy-300"></span>
+        <span class="text-cy-300">BUILT FOR THE LONG RUN</span>
+      </span>
+      <h2 class="heading-lg mt-5">Run agents while you're not at your desk.</h2>
+      <p class="mt-4 text-[17px] leading-[1.55] text-mute-fg">
+        Page keeps your Mac awake while agents are working, watches your battery, and
+        gets out of the way the moment things change.
+      </p>
+
+      <div class="mt-10 space-y-6">
+        {features.map((f) => (
+          <div class="flex items-start gap-4">
+            <span class:list={["inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-lg", f.bg, f.color]}>{f.icon}</span>
+            <div>
+              <p class="text-[17px] font-bold tracking-tight">{f.title}</p>
+              <p class="mt-1.5 text-[14px] leading-[1.55] text-mute-fg">{f.body}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <!-- Mac visual: native notification toast + menubar dropdown -->
+    <div class="space-y-6 lg:justify-self-end">
+      <div class="ml-auto flex max-w-[480px] items-start gap-4 rounded-2xl bg-[#1F2128] p-4 ring-1 ring-white/10">
+        <span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl gradient-bg">
+          <span class="block h-3 w-3 rounded-full bg-white"></span>
+        </span>
+        <div class="flex-1">
+          <div class="flex items-center justify-between">
+            <p class="text-[13px] font-bold">Page</p>
+            <p class="text-[11px] font-medium text-mute-fg">now</p>
+          </div>
+          <p class="mt-1 text-[13px] font-semibold">acme-web — Codex is waiting</p>
+          <p class="mt-0.5 text-[12px] leading-snug text-mute-fg">
+            Should I retry the cert at 9600 baud instead?
+          </p>
+        </div>
+      </div>
+
+      <div class="ml-auto w-[340px] overflow-hidden rounded-2xl bg-[#1A1D24] ring-1 ring-white/10">
+        <div class="flex items-center justify-between border-b border-white/[0.04] px-4 py-3">
+          <div class="flex items-center gap-2">
+            <span class="relative inline-block h-3.5 w-3.5">
+              <span class="absolute inset-0 rounded-full bg-cy-300/20"></span>
+              <span class="absolute inset-1 rounded-full gradient-bg"></span>
+            </span>
+            <span class="text-[13px] font-bold">Page</span>
+          </div>
+          <span class="rounded-full bg-cy-300/15 px-2 py-0.5 text-[9px] font-extrabold tracking-[0.06em] text-cy-300">BOOSTING</span>
+        </div>
+        <dl class="px-1 py-2 text-[12px]">
+          {[
+            ["Status", "Boosting (2 active)"],
+            ["Battery", "87% (charging)"],
+            ["Claude", "active (3s since last output)"],
+            ["Codex", "2 threads, 1 active"],
+          ].map(([k, v]) => (
+            <div class="flex items-center justify-between px-3 py-2">
+              <dt class="text-mute-fg font-medium">{k}</dt>
+              <dd class="font-semibold">{v}</dd>
+            </div>
+          ))}
+          <div class="my-1 border-t border-white/[0.04]"></div>
+          {[
+            ["Cutoff", "<10% · Recovery ≥25% on AC"],
+          ].map(([k, v]) => (
+            <div class="flex items-center justify-between px-3 py-2">
+              <dt class="text-mute-fg font-medium">{k}</dt>
+              <dd class="font-semibold">{v}</dd>
+            </div>
+          ))}
+          <div class="flex items-center justify-between px-3 py-2">
+            <dt class="text-mute-fg font-medium">Relay</dt>
+            <dd class="font-semibold text-brand-codex">connected · 1 phone</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  </div>
+</section>

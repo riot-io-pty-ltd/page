@@ -1,0 +1,44 @@
+---
+import PhoneMock from "./PhoneMock.astro";
+---
+<section id="top" class="section pt-14 pb-28 lg:grid lg:grid-cols-[1fr_440px] lg:gap-16 lg:items-center">
+  <div class="max-w-[680px]">
+    <span class="eyebrow ring-cy-300/20">
+      <span class="eyebrow-dot bg-cy-300"></span>
+      <span class="text-cy-300">ON-CALL FOR YOUR AGENTS</span>
+    </span>
+    <h1 class="heading-xl mt-6">
+      An always-on workforce.<br />
+      <span class="gradient-text">A part-time you.</span>
+    </h1>
+    <p class="mt-7 max-w-[640px] text-[19px] leading-[1.55] text-mute-fg">
+      Run Claude or Codex on anything that matters. The moment they go idle, hit an
+      approval prompt, or burn through a rate limit, your phone lights up. Reply
+      from the couch.
+    </p>
+    <div class="mt-8 flex flex-wrap items-center gap-3.5">
+      <a
+        href="https://github.com/riot-io-pty-ltd/page"
+        class="inline-flex items-center gap-2 rounded-full gradient-bg px-7 py-3.5 text-[15px] font-extrabold tracking-[0.01em] text-ink-950"
+      >
+        Get started <span aria-hidden="true">→</span>
+      </a>
+      <a
+        href="https://github.com/riot-io-pty-ltd/page"
+        class="inline-flex items-center gap-2 rounded-full px-7 py-3.5 text-[15px] font-semibold ring-1 ring-white/20 hover:ring-white/40 transition"
+      >
+        <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.4.5 0 5.9 0 12.5c0 5.3 3.4 9.8 8.2 11.4.6.1.8-.3.8-.6v-2.1c-3.3.7-4-1.6-4-1.6-.5-1.4-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.4-1.3-5.4-5.9 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.2 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.6 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6 4.8-1.6 8.2-6.1 8.2-11.4C24 5.9 18.6.5 12 .5z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+    <div class="mt-8 flex flex-wrap items-center gap-x-5 gap-y-2">
+      <span class="text-[11px] font-bold tracking-[0.12em] text-mute-dim">WORKS WITH</span>
+      <span class="text-[13px] font-semibold text-mute-fg">
+        Claude Code &middot; Codex CLI &middot; Codex Desktop &middot; VS Code
+      </span>
+    </div>
+  </div>
+  <div class="mt-16 lg:mt-0">
+    <PhoneMock />
+  </div>
+</section>

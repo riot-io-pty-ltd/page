@@ -1,0 +1,84 @@
+---
+const steps = [
+  { num: "01", color: "text-cy-300", ring: "ring-cy-300/15", heading: "Install on your Mac" },
+  { num: "02", color: "text-cy-400", ring: "ring-cy-400/20", heading: "Scan the QR" },
+  { num: "03", color: "text-kind-idle", ring: "ring-kind-idle/20", heading: "Walk away" },
+];
+---
+<section class="bg-ink-900 py-28 lg:py-32">
+  <div class="section">
+    <span class="eyebrow ring-cy-400/25">
+      <span class="eyebrow-dot bg-cy-400"></span>
+      <span class="text-cy-400">60-SECOND SETUP</span>
+    </span>
+    <h2 class="heading-lg mt-5 max-w-[1100px]">One installer. One QR. You're paired.</h2>
+    <p class="mt-4 max-w-[840px] text-[17px] leading-[1.55] text-mute-fg">
+      Page signs itself with your Apple Developer cert, asks for the permissions it
+      actually needs, and gets out of the way. No account. No cloud sync. Your tokens
+      live on your devices.
+    </p>
+
+    <div class="mt-12 grid gap-5 md:grid-cols-3">
+      <!-- Step 1: install.sh -->
+      <div class="glass-card p-7 ring-cy-300/15">
+        <span class="text-[13px] font-extrabold tracking-[0.15em] text-cy-300">01</span>
+        <h3 class="mt-1 text-[20px] font-bold tracking-tight">Install on your Mac</h3>
+        <div class="mt-5 rounded-xl bg-black p-4 ring-1 ring-white/5">
+          <code class="font-mono text-[13px] text-cy-300">$ ./install.sh</code>
+        </div>
+        <p class="mt-5 text-[13px] leading-[1.55] text-mute-fg">
+          Build, sign with your Apple Developer cert, install the menu bar app and
+          LaunchAgent, set up the system permissions. Idempotent — re-run any time.
+        </p>
+      </div>
+
+      <!-- Step 2: QR -->
+      <div class="glass-card p-7 ring-cy-400/20">
+        <span class="text-[13px] font-extrabold tracking-[0.15em] text-cy-400">02</span>
+        <h3 class="mt-1 text-[20px] font-bold tracking-tight">Scan the QR</h3>
+        <div class="mt-5 grid h-32 w-32 place-items-center rounded-xl bg-white p-3 mx-auto">
+          <!-- Stylised QR — purely decorative -->
+          <svg viewBox="0 0 110 110" class="h-full w-full" aria-hidden="true">
+            <rect x="0" y="0" width="32" height="32" fill="#000"/>
+            <rect x="6" y="6" width="20" height="20" fill="#fff"/>
+            <rect x="12" y="12" width="8" height="8" fill="#000"/>
+            <rect x="78" y="0" width="32" height="32" fill="#000"/>
+            <rect x="84" y="6" width="20" height="20" fill="#fff"/>
+            <rect x="90" y="12" width="8" height="8" fill="#000"/>
+            <rect x="0" y="78" width="32" height="32" fill="#000"/>
+            <rect x="6" y="84" width="20" height="20" fill="#fff"/>
+            <rect x="12" y="90" width="8" height="8" fill="#000"/>
+            {/* random dots */}
+            {[[45,15],[60,30],[42,50],[68,58],[40,68],[54,75],[68,82],[80,55],[50,90]].map(([x,y]) => (
+              <rect x={x} y={y} width="8" height="8" fill="#000"/>
+            ))}
+          </svg>
+        </div>
+        <p class="mt-5 text-[13px] leading-[1.55] text-mute-fg">
+          Click the menu bar icon → Pair phone. Open Page on iPhone and point the
+          camera at the QR. Pairing token never leaves your network.
+        </p>
+      </div>
+
+      <!-- Step 3: walk away -->
+      <div class="glass-card p-7 ring-kind-idle/20">
+        <span class="text-[13px] font-extrabold tracking-[0.15em] text-kind-idle">03</span>
+        <h3 class="mt-1 text-[20px] font-bold tracking-tight">Walk away</h3>
+        <div class="mt-5 rounded-xl bg-ink-800 p-3.5">
+          <div class="font-mono text-[10px] text-mute-fg">mac-on-claude-code</div>
+          <div class="mt-1.5 flex items-center gap-1.5">
+            <span class="chip-kind text-kind-approval ring-kind-approval">APPROVAL</span>
+            <span class="pill-backend text-brand-codex ring-brand-codex/55 bg-brand-codex/15">
+              <span class="font-extrabold">CODEX</span><span class="font-medium opacity-90">CLI</span>
+            </span>
+          </div>
+          <p class="mt-2 text-[11px] font-bold">Run this command?</p>
+        </div>
+        <p class="mt-5 text-[13px] leading-[1.55] text-mute-fg">
+          Start your agent and step out. The moment something needs a human, your phone
+          lights up. Reply with the same intent you'd type at the keyboard.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>

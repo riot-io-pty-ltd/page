@@ -1,0 +1,53 @@
+---
+const steps = [
+  {
+    num: "01",
+    color: "text-cy-300",
+    ring: "ring-cy-300/10",
+    icon: "💻",
+    bg: "bg-cy-300/12",
+    heading: "Run your agent",
+    body: "Page lives in your menu bar as a quiet daemon. Spin up Claude or Codex in any terminal, IDE, or app — Page watches without getting in the way.",
+  },
+  {
+    num: "02",
+    color: "text-cy-400",
+    ring: "ring-cy-400/15",
+    icon: "📡",
+    bg: "bg-cy-400/15",
+    heading: "Get paged",
+    body: "The moment your agent stops with a question, an approval prompt, or a rate-limit wall — your phone vibrates. The card shows which agent, which project, and exactly what it's waiting on.",
+  },
+  {
+    num: "03",
+    color: "text-kind-idle",
+    ring: "ring-kind-idle/15",
+    icon: "↩︎",
+    bg: "bg-kind-idle/15",
+    heading: "Reply, anywhere",
+    body: "Type from the couch. Tap a quick action. Your reply lands directly in the live terminal session — or the Codex Desktop thread, or the VS Code panel. Then the page disappears.",
+  },
+];
+---
+<section id="how-it-works" class="section py-28 lg:py-32">
+  <span class="eyebrow ring-cy-400/25">
+    <span class="eyebrow-dot bg-cy-400"></span>
+    <span class="text-cy-400">HOW IT WORKS</span>
+  </span>
+  <h2 class="heading-lg mt-5 max-w-[1100px]">Three pieces. They get out of your way.</h2>
+  <p class="mt-4 max-w-[760px] text-[17px] leading-[1.55] text-mute-fg">
+    Page sits between your AI agent and your phone. It only speaks up when the agent is
+    actually waiting on you — never to nag, never to summarise, never to add another tab.
+  </p>
+
+  <div class="mt-12 grid gap-5 md:grid-cols-3">
+    {steps.map((s) => (
+      <div class:list={["glass-card flex h-full flex-col p-7", s.ring]}>
+        <span class:list={["inline-flex h-11 w-11 items-center justify-center rounded-full text-lg", s.bg]}>{s.icon}</span>
+        <span class:list={["mt-5 text-[13px] font-extrabold tracking-[0.15em]", s.color]}>{s.num}</span>
+        <h3 class="mt-2 text-[22px] font-bold tracking-tight">{s.heading}</h3>
+        <p class="mt-4 text-[14px] leading-[1.55] text-mute-fg">{s.body}</p>
+      </div>
+    ))}
+  </div>
+</section>
