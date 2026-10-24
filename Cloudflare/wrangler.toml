@@ -1,23 +1,38 @@
 name = "page-relay"
 main = "src/index.ts"
 compatibility_date = "2025-10-01"
-compatibility_flags = ["nodejs_compat"]
+# No compatibility_flags: the Worker uses only Web APIs (fetch, WebCrypto,
+# atob/btoa), so nodejs_compat would just add polyfill weight.
+
+# Persist Worker logs (APNs failures, refused replies, migrations) so a past
+# failure can be investigated without having had `wrangler tail` running.
+# The code logs ids, sizes and outcomes only — never reply text or Mac output.
+[observability]
+enabled = true
 
 # Durable Object — one instance per relay token (= one per paired Mac/phone pair).
 [[durable_objects.bindings]]
 name = "USERS"
 class_name = "UserRelay"
 
+# Migrations are append-only: never edit or rename "v1" or the class. Adding a
+# new Durable Object class later needs a new [[migrations]] block with a new tag.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["UserRelay"]
 
 # Non-secret config. Real secrets go via `wrangler secret put`.
 [vars]
-APNS_ENV = "development"             # change to "production" for App Store builds
+# Default APNs host for phones that don't say which one their token belongs to.
+# "development" = Xcode debug builds; "production" = TestFlight, Ad Hoc and App
+# Store builds. Current phones send their own `apnsEnv` at registration, which
+# wins over this.
+APNS_ENV = "development"
 APNS_BUNDLE_ID = "app.page.Page"
 
-# Required secrets (set once each, post-deploy):
-#   wrangler secret put APNS_KEY_P8         # paste full -----BEGIN PRIVATE KEY----- ... contents
-#   wrangler secret put APNS_KEY_ID         # 10-char identifier shown on developer.apple.com
-#   wrangler secret put APNS_TEAM_ID        # 10-char team identifier
+# Secrets (optional — without them the relay works, it just can't push to a
+# backgrounded phone). Pipe the .p8 file rather than pasting it: an
+# interactive paste can keep only the first line.
+#   cat AuthKey_XXXXXXXXXX.p8 | npx wrangler secret put APNS_KEY_P8
+#   npx wrangler secret put APNS_KEY_ID     # 10-char Key ID from developer.apple.com
+#   npx wrangler secret put APNS_TEAM_ID    # 10-char Team ID
