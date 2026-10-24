@@ -72,7 +72,9 @@ final class LoopbackHTTP: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        config.httpMaximumConnectionsPerHost = 2
+        // Every probe goes to 127.0.0.1: a low per-host limit would queue them
+        // past the poll budget instead of running them concurrently.
+        config.httpMaximumConnectionsPerHost = 16
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 1
         queue.name = "ClaudePowerMode.loopbackHTTP"

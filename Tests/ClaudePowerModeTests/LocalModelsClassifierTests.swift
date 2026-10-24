@@ -53,7 +53,7 @@ final class LocalModelsClassifierTests: XCTestCase {
                                        ["llama-server", "-m", "m.gguf", "--port", "8081", "--host", "0.0.0.0"], ppid: 77))
         XCTAssertEqual(p.kind, .llamaServer)
         XCTAssertEqual(p.declaredPort, 8081)
-        XCTAssertEqual(p.host, "0.0.0.0")
+        XCTAssertTrue(p.loopbackHost)
         XCTAssertFalse(p.hasAPIKey)
         XCTAssertFalse(p.noSlots)
         XCTAssertTrue(LocalProcessClassifier.shouldProbeSlots(p))
@@ -70,7 +70,8 @@ final class LocalModelsClassifierTests: XCTestCase {
         let env = try XCTUnwrap(classify("/usr/local/bin/llama-server", ["llama-server"],
                                          env: ["LLAMA_ARG_PORT": "9000", "LLAMA_ARG_HOST": "192.168.1.5", "LLAMA_ARG_NO_SLOTS": "1"]))
         XCTAssertEqual(env.declaredPort, 9000)
-        XCTAssertEqual(env.host, "192.168.1.5")
+        XCTAssertFalse(env.loopbackHost)
+        XCTAssertFalse(String(describing: env).contains("192.168"), "only the verdict is kept")
         XCTAssertTrue(env.noSlots)
         XCTAssertFalse(LocalProcessClassifier.shouldProbeSlots(env))
 
@@ -195,5 +196,8 @@ final class LocalModelsClassifierTests: XCTestCase {
         XCTAssertEqual(LocalProcessClassifier.candidacy(execPath: "/opt/homebrew/bin/llama-cli", home: home), .pathOnly)
         XCTAssertEqual(LocalProcessClassifier.candidacy(execPath: "/opt/homebrew/bin/aider", home: home), .pathOnly)
         XCTAssertEqual(LocalProcessClassifier.candidacy(execPath: "/Applications/LM Studio.app/Contents/MacOS/LM Studio", home: home), .pathOnly)
+        // A llama-server inside LM Studio's dirs still needs its argv (port, flags).
+        XCTAssertEqual(LocalProcessClassifier.candidacy(execPath: home + "/.lmstudio/bin/llama-server", home: home), .needsArgv)
+        XCTAssertEqual(LocalProcessClassifier.candidacy(execPath: "/Applications/LM Studio.app/Contents/Resources/ollama", home: home), .needsArgv)
     }
 }

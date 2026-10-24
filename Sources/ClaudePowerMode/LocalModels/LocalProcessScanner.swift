@@ -207,8 +207,12 @@ final class LocalProcessScanner {
             guard let f = facts[pid], let key = keys[pid] else { continue }
             let verdict = LocalProcessClassifier.classify(f, parentOf: { facts[$0] }, home: home)
             // An argv read can fail transiently (process just exec'd); don't
-            // cache a "not ours" verdict built without the argv it needed.
-            if verdict != nil || !f.argv.isEmpty || LocalProcessClassifier.candidacy(execPath: f.execPath, home: home) == .pathOnly {
+            // cache any verdict built without the argv it needed — a
+            // llama-server classified without it would keep no port and
+            // miss --api-key / --no-slots / --host for its whole life.
+            let candidacy = livePaths[key]?.candidacy ?? .none
+            let argvNeeded = candidacy == .needsArgv || (candidacy == .needsArgvIfTTY && f.ttyName != nil)
+            if !argvNeeded || !f.argv.isEmpty {
                 classified[key] = .some(verdict)
             }
             if let verdict { result.append(verdict) }

@@ -153,6 +153,50 @@ final class LocalModelsSignalTests: XCTestCase {
         wait(for: [done], timeout: 5)
     }
 
+    /// The real client against an in-process loopback server: status and
+    /// body mapping, the 1 MB cap, a refused redirect and a real timeout.
+    func testSlotsAgainstLoopbackServer() throws {
+        let target = try LoopbackServer { _ in .respond("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]") }
+        defer { target.stop() }
+        let big = "[" + String(repeating: #"{"is_processing":false},"#, count: 50_000) + #"{"is_processing":false}]"#
+        let busy = busyFixture, idle = idleFixture
+        let server = try LoopbackServer { path in
+            func ok(_ body: String) -> LoopbackServer.Reply {
+                .respond("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n" + body)
+            }
+            switch path {
+            case "/busy/slots": return ok(busy)
+            case "/idle/slots": return ok(idle)
+            case "/big/slots": return ok(big)
+            case "/missing/slots": return .respond("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            case "/loading/slots": return .respond("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            case "/redirect/slots":
+                return .respond("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:\(target.port)/slots\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            default: return .hang
+            }
+        }
+        defer { server.stop() }
+        let http = LoopbackHTTP(timeout: 1)
+        defer { http.invalidate() }
+
+        func state(_ prefix: String) -> SlotsState? {
+            let done = expectation(description: prefix)
+            var result: SlotsState?
+            guard let url = LoopbackHTTP.url(port: server.port, path: prefix + "/slots") else { XCTFail("url"); return nil }
+            http.get(url) { status, body in result = SlotsDecoder.state(status: status, body: body); done.fulfill() }
+            wait(for: [done], timeout: 5)
+            return result
+        }
+        XCTAssertEqual(state("/busy"), .busy)
+        XCTAssertEqual(state("/idle"), .idle)
+        XCTAssertEqual(state("/big"), .unavailable, "bodies over 1 MB are dropped")
+        XCTAssertEqual(state("/missing"), .unavailable)
+        XCTAssertEqual(state("/loading"), .noObservation)
+        XCTAssertEqual(state("/redirect"), .noObservation, "redirects are refused")
+        XCTAssertEqual(target.accepted, 0, "the redirect target was never contacted")
+        XCTAssertEqual(state("/hang"), .noObservation, "a timeout is never idle")
+    }
+
     /// Binds and closes a loopback socket to get a port nothing listens on.
     private func closedLoopbackPort() throws -> Int {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
@@ -167,5 +211,71 @@ final class LocalModelsSignalTests: XCTestCase {
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
         _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
         return Int(UInt16(bigEndian: addr.sin_port))
+    }
+}
+
+/// A tiny blocking HTTP/1.1 responder on 127.0.0.1 for client tests.
+private final class LoopbackServer: @unchecked Sendable {
+    enum Reply { case respond(String), hang }
+
+    let port: Int
+    private let fd: Int32
+    private let lock = NSLock()
+    private var held: [Int32] = []
+    private var count = 0
+    private var stopped = false
+
+    var accepted: Int { lock.lock(); defer { lock.unlock() }; return count }
+
+    init(_ handler: @escaping @Sendable (String) -> Reply) throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        guard listener >= 0 else { throw XCTSkip("no socket") }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_port = 0
+        let bound = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        guard bound == 0, listen(listener, 8) == 0 else { close(listener); throw XCTSkip("bind/listen failed") }
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listener, $0, &len) } }
+        fd = listener
+        port = Int(UInt16(bigEndian: addr.sin_port))
+        Thread.detachNewThread { [self] in
+            while true {
+                let c = accept(listener, nil, nil)
+                guard c >= 0 else { return }
+                var buf = [UInt8](repeating: 0, count: 8192)
+                let n = read(c, &buf, buf.count)
+                let request = n > 0 ? String(decoding: buf.prefix(n), as: UTF8.self) : ""
+                let path = request.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
+                lock.lock(); count += 1; lock.unlock()
+                switch handler(path) {
+                case .respond(let text):
+                    let bytes = Array(text.utf8)
+                    var off = 0
+                    while off < bytes.count {
+                        let w = bytes.withUnsafeBytes { write(c, $0.baseAddress! + off, $0.count - off) }
+                        if w <= 0 { break }
+                        off += w
+                    }
+                    close(c)
+                case .hang:
+                    lock.lock()
+                    if stopped { close(c) } else { held.append(c) }
+                    lock.unlock()
+                }
+            }
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        stopped = true
+        let fds = held
+        held = []
+        lock.unlock()
+        fds.forEach { close($0) }
+        shutdown(fd, SHUT_RDWR)
+        close(fd)
     }
 }

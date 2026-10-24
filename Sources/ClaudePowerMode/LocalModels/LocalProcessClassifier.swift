@@ -58,9 +58,10 @@ struct LocalProcess: Equatable {
     /// From argv `--port` / env LLAMA_ARG_PORT. A hint only: discovery
     /// prefers ports the process actually listens on.
     var declaredPort: Int? = nil
-    /// llama-server `--host` / LLAMA_ARG_HOST, nil when not given (its
-    /// default is 127.0.0.1).
-    var host: String? = nil
+    /// llama-server answers on 127.0.0.1: its `--host` / LLAMA_ARG_HOST is
+    /// loopback, unspecified or not given (the default is 127.0.0.1). Only
+    /// this verdict is kept, never the host value itself.
+    var loopbackHost: Bool = true
     /// llama-server started with an API key: its /slots needs auth, so
     /// Page doesn't probe it (and never learns the key).
     var hasAPIKey: Bool = false
@@ -114,11 +115,12 @@ enum LocalProcessClassifier {
     static func candidacy(execPath: String, home: String) -> Candidacy {
         let lower = basename(execPath).lowercased()
         if lower == "lms" { return .needsArgvIfTTY }
-        if isLMStudioPath(execPath, home: home) { return .pathOnly }
+        // Same order as `classify`: these are decided by argv wherever they live.
         switch lower {
         case "ollama", "llama-server", "ollama_llama_server": return .needsArgv
         default: break
         }
+        if isLMStudioPath(execPath, home: home) { return .pathOnly }
         if lower.hasPrefix("python") { return .needsArgv }
         if isMLXExecutable(lower) || isLlamaCLI(lower) || terminalAgentNames.contains(lower) { return .pathOnly }
         if scriptHosts.contains(lower) { return .needsArgvIfTTY }
@@ -231,7 +233,7 @@ enum LocalProcessClassifier {
     static func shouldProbeSlots(_ p: LocalProcess) -> Bool {
         switch p.kind {
         case .ollamaRunner: return true
-        case .llamaServer: return isLoopbackOrUnspecified(p.host) && !p.hasAPIKey && !p.noSlots
+        case .llamaServer: return p.loopbackHost && !p.hasAPIKey && !p.noSlots
         default: return false
         }
     }
@@ -243,7 +245,7 @@ enum LocalProcessClassifier {
         return LocalProcess(
             kind: .llamaServer, pid: p.pid, name: "llama.cpp server",
             declaredPort: port(flagValue(p.argv, "--port")) ?? port(p.env["LLAMA_ARG_PORT"]),
-            host: flagValue(p.argv, "--host") ?? p.env["LLAMA_ARG_HOST"],
+            loopbackHost: isLoopbackOrUnspecified(flagValue(p.argv, "--host") ?? p.env["LLAMA_ARG_HOST"]),
             hasAPIKey: hasFlag(p.argv, "--api-key") || hasFlag(p.argv, "--api-key-file") || apiKeyEnv,
             noSlots: hasFlag(p.argv, "--no-slots") || truthy(p.env["LLAMA_ARG_NO_SLOTS"]))
     }

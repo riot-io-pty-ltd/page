@@ -85,6 +85,17 @@ enum LocalActivityPolicy {
 
     static func apply(_ observation: LocalObservation?, to state: inout State, now: Date, pollInterval: TimeInterval) -> Verdict {
         if let o = observation {
+            // A gap without readings (the Mac slept, polling stopped) or a
+            // wall clock set backwards breaks continuity: a run that was busy
+            // before the gap must not hit its cap the moment the Mac wakes.
+            if let prev = state.last {
+                let gap = o.at.timeIntervalSince(prev.at)
+                if gap < 0 || gap > staleAfter(pollInterval: pollInterval) {
+                    state.streakSince = nil
+                    state.streakSignal = nil
+                    if gap < 0 { state.lastBusyAt = nil; state.lastBusy = nil }
+                }
+            }
             state.last = o
             if o.busy {
                 state.lastBusyAt = o.at
@@ -112,14 +123,15 @@ enum LocalActivityPolicy {
             }
         }
 
-        guard let last = state.last, now.timeIntervalSince(last.at) <= staleAfter(pollInterval: pollInterval) else {
+        // A reading "from the future" (clock set backwards) is as good as none.
+        guard let last = state.last, (0...staleAfter(pollInterval: pollInterval)).contains(now.timeIntervalSince(last.at)) else {
             if !state.capped { state.streakSince = nil; state.streakSignal = nil }
             return Verdict(busy: false, signal: .none, detail: state.last == nil ? "no signal yet" : "no signal")
         }
 
         let lingering: Bool = {
             guard let lastBusyAt = state.lastBusyAt, !state.lingerEnded else { return false }
-            return now.timeIntervalSince(lastBusyAt) <= linger
+            return (0...linger).contains(now.timeIntervalSince(lastBusyAt))
         }()
         guard lingering, let busyObs = state.lastBusy else {
             if !state.capped { state.streakSince = nil; state.streakSignal = nil }
@@ -199,10 +211,15 @@ enum LocalActivityAggregator {
             out.append(LocalActivityGroup(id: "lmstudio", displayName: "LM Studio", kind: .app, family: .lmStudio, processes: lms))
         }
         var agentsSeen = Set<String>()
+        var serverPorts = Set<Int>()
         for p in processes.sorted(by: { $0.pid < $1.pid }) {
             switch p.kind {
             case .llamaServer:
-                let port = ports[p.pid]?.first ?? p.declaredPort
+                // Two servers can claim one port (one still loading or
+                // failed to bind with the same --port); ids must stay unique
+                // or they'd share policy state.
+                var port = ports[p.pid]?.first ?? p.declaredPort
+                if let claimed = port, !serverPorts.insert(claimed).inserted { port = nil }
                 out.append(LocalActivityGroup(
                     id: port.map { "llamacpp:\($0)" } ?? "llamacpp:pid\(p.pid)",
                     displayName: port.map { "llama.cpp server :\($0)" } ?? "llama.cpp server",

@@ -101,7 +101,7 @@ final class LocalModelsMonitorTests: XCTestCase {
         w.processes = [
             LocalProcess(kind: .llamaServer, pid: 30, name: "llama.cpp server"),                              // no port anywhere
             LocalProcess(kind: .llamaServer, pid: 31, name: "llama.cpp server", declaredPort: 9000, hasAPIKey: true),
-            LocalProcess(kind: .llamaServer, pid: 32, name: "llama.cpp server", declaredPort: 9100, host: "192.168.1.9"),
+            LocalProcess(kind: .llamaServer, pid: 32, name: "llama.cpp server", declaredPort: 9100, loopbackHost: false),
         ]
         w.listening = [30: [], 31: [9000], 32: [9100]]
         w.gpu = .utilization([:])

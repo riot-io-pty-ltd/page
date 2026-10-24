@@ -105,9 +105,40 @@ final class LocalModelsPolicyTests: XCTestCase {
 
     func testExactReadingLiftsAGPUCap() {
         var s = LocalActivityPolicy.State()
-        _ = step(obs(true, .gpu, at: 0, gpu: 1), &s, at: 0)
+        var t: TimeInterval = 0
+        while t <= 3 * 3600 { _ = step(obs(true, .gpu, at: t, gpu: 1), &s, at: t); t += 10 }
         XCTAssertFalse(step(obs(true, .gpu, at: 3 * 3600 + 1, gpu: 1), &s, at: 3 * 3600 + 1).busy)
         XCTAssertTrue(step(obs(true, .exact, at: 3 * 3600 + 11), &s, at: 3 * 3600 + 11).busy)
+    }
+
+    /// A job busy before a 3 h sleep is still busy right after wake: the
+    /// gap without readings restarts the cap clock.
+    func testSleepGapDoesNotCapOnWake() {
+        var s = LocalActivityPolicy.State()
+        XCTAssertTrue(step(obs(true, .gpu, at: 0, gpu: 0.9), &s, at: 0).busy)
+        XCTAssertTrue(step(obs(true, .gpu, at: 10, gpu: 0.9), &s, at: 10).busy)
+        let wake: TimeInterval = 4 * 3600
+        let v = step(obs(true, .gpu, at: wake, gpu: 0.9), &s, at: wake)
+        XCTAssertTrue(v.busy, v.detail)
+        XCTAssertEqual(v.detail, "GPU 90%")
+        // …and the cap still applies to the new run.
+        var t = wake + 10
+        while t <= wake + 3 * 3600 { _ = step(obs(true, .gpu, at: t, gpu: 0.9), &s, at: t); t += 10 }
+        XCTAssertEqual(step(obs(true, .gpu, at: t, gpu: 0.9), &s, at: t).detail, "capped after 3 h")
+    }
+
+    /// A wall clock set backwards must not stretch the linger (or freshness)
+    /// by the size of the jump.
+    func testClockSetBackwardsDoesNotKeepBusy() {
+        var s = LocalActivityPolicy.State()
+        XCTAssertTrue(step(obs(true, .gpu, at: 3600, gpu: 0.9), &s, at: 3600).busy)
+        XCTAssertFalse(step(obs(false, .gpu, at: 0), &s, at: 0).busy, "busy reading is 'in the future'")
+        XCTAssertFalse(step(nil, &s, at: 10).busy)
+
+        var t = LocalActivityPolicy.State()
+        XCTAssertTrue(step(obs(true, .exact, at: 3600), &t, at: 3600).busy)
+        XCTAssertFalse(step(nil, &t, at: 0).busy, "a reading from the future is no reading")
+        XCTAssertTrue(step(obs(true, .exact, at: 10), &t, at: 10).busy, "a fresh busy reading still counts")
     }
 
     func testPercentRounding() {
@@ -163,6 +194,14 @@ final class LocalModelsPolicyTests: XCTestCase {
         XCTAssertEqual(groups.first { $0.id == "lmstudio" }?.kind, .app)
         XCTAssertEqual(groups.first { $0.id == "agent:opencode:60" }?.kind, .terminalTool)
         XCTAssertEqual(LocalActivityAggregator.groups([proc(.llamaServer, 7)]).first?.id, "llamacpp:pid7")
+    }
+
+    /// Two servers declaring one port (one failed to bind) must not share an
+    /// id, or they'd share policy state.
+    func testServerIdsStayUniqueOnSharedPort() {
+        let groups = LocalActivityAggregator.groups([proc(.llamaServer, 30, port: 8080), proc(.llamaServer, 31, port: 8080)],
+                                                    ports: [30: [8080], 31: [8080]])
+        XCTAssertEqual(groups.map(\.id), ["llamacpp:8080", "llamacpp:pid31"])
     }
 
     private func observe(_ procs: [LocalProcess], _ signals: [Int32: LocalProcessSignals]) -> LocalObservation? {
