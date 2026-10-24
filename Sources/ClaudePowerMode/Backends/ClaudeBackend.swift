@@ -166,11 +166,13 @@ final class ClaudeBackend: AgentBackend {
         let prime = needsRateLimitPrime && cfg.rateLimitWatcherEnabled
         needsRateLimitPrime = false
         lock.unlock()
-        if prime { rateWatcher.primeWithExistingEvents(transcriptDirectory: cfg.transcriptDirectory) }
 
         // One process-table snapshot for the whole tick.
         let table = ProcessRunner.processTable()
         let sessions = registry.refresh(processTable: table)
+        // After the registry has recorded live sessions' providers: the
+        // index classifies (and caches) limits against them on first read.
+        if prime { rateWatcher.primeWithExistingEvents(transcriptDirectory: cfg.transcriptDirectory) }
         // A battery-paused session that's busy again was resumed by someone
         // (the user, or a phone reply) — its idle pages are fair game again.
         let busyIds = Set(sessions.filter { $0.status == .busy }.map(\.sessionId))
