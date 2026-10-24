@@ -30,3 +30,6 @@ Designs/sim-screenshots/
 
 # Local-only Claude Code settings (contains absolute paths)
 .claude/settings.local.json
+
+# Python bytecode (hooks/page-extract-context.py)
+__pycache__/

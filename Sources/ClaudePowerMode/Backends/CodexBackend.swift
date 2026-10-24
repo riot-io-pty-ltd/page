@@ -1,650 +1,1123 @@
 import Foundation
 
-/// Codex backend (Phase 2 read-only + Phase 3 power-mode).
+/// Codex backend: watches Codex sessions (CLI, Desktop, VS Code), keeps the
+/// Mac awake while they work, pages the phone when one finishes a turn and
+/// sits waiting, and delivers the phone's replies.
 ///
-/// Responsibilities:
-///   - Launch and own a `codex app-server` child process.
-///   - Discover Codex threads via `thread/list` and subscribe via
-///     `thread/read`, cross-referenced against live `codex` PIDs.
-///   - Track per-thread state from `turn/started`, `turn/completed`,
-///     and `thread/status/changed` notifications.
-///   - Surface watched threads as `AgentSession`s and claim the
-///     no-sleep assertion when any of them is active or waiting.
+/// How it sees sessions, and why it works this way:
+///   - Discovery: a `codex app-server` child (`AppServerClient`) lists
+///     threads (`thread/list`, newest first, a few pages) with their cwd,
+///     source and rollout path.
+///   - Live state: every Codex surface embeds its *own* app-server, so our
+///     child never receives turn/approval notifications for the user's
+///     sessions. The rollout JSONL that each session appends to is the one
+///     signal all surfaces share, so state is re-derived from its tail on
+///     every tick (`CodexRollout`): mid-turn → active, turn ended → idle,
+///     ended and quiet for `idlePageDelaySeconds` while the user is away →
+///     an idle page.
+///   - Approval prompts of CLI/Desktop/VS Code sessions are NOT detected:
+///     Codex doesn't write approval requests to the rollout. A session
+///     blocked on one just looks mid-turn (active, until it's been quiet
+///     for `stalledTurnSeconds`). Approval requests that do reach our own
+///     child (only if a turn ever runs against it) are paged and answered
+///     natively with a JSON-RPC decision.
+///   - Rate limits: the `rate_limits` snapshot in rollout `token_count`
+///     events and `account/rateLimits/updated`. Account-level, tagged
+///     `.codex`; never resumable with `claude --resume`.
+///   - Replies: `CodexInjector`, and only once the thread's latest turn has
+///     ended — while a turn runs an approval overlay may be up, and it
+///     treats typed letters as hotkeys.
 ///
-/// Still NOT in this phase:
-///   - No reply path. Phase 5.
-///   - No relay client — Codex pages don't reach the phone yet. Phase 4.
-///   - No rate-limit handling. Phase 4 via the generic `RateLimitAware`
-///     capability described in the spec.
-final class CodexBackend: AgentBackend {
+/// Threading: all shared state lives behind `lock`. One refresh cycle runs
+/// at a time (`cycleInFlight`); its blocking file/process work runs on
+/// `scanQueue`, which also owns the rollout cache. Replies are serialised
+/// on `replyQueue`, which only ever does short keystroke work (it is shared
+/// with the low-battery pause and resume). A background `codex exec resume`
+/// runs a whole agent turn, so it runs on `execQueue`, at most one per
+/// thread (`execGate`).
+final class CodexBackend: AgentBackend, @unchecked Sendable {
+    typealias ThreadSummary = AppServerProtocol.ThreadSummary
+    typealias JSON = AppServerProtocol.JSON
 
     let id: AgentBackendID = .codex
     let displayName = "Codex"
 
-    /// Mirror of `ClaudeBackend`'s callback — Coordinator can wire this up
-    /// to push Codex rate-limit events into the unified pipeline.
-    var onNewRateLimit: ((RateLimitEvent) -> Void)?
+    var relay: RelaySink? {
+        get { locked { _relay } }
+        set { locked { _relay = newValue } }
+    }
+    var onNewIntervention: ((InterventionEvent) -> Void)? {
+        get { locked { _onNewIntervention } }
+        set { locked { _onNewIntervention = newValue } }
+    }
+    var onNewRateLimit: ((RateLimitEvent) -> Void)? {
+        get { locked { _onNewRateLimit } }
+        set { locked { _onNewRateLimit = newValue } }
+    }
 
-    private(set) var config: Config
+    // MARK: Tunables
+
+    /// Threads updated this recently are watched even without a live
+    /// process in their directory (Desktop / VS Code run from cwd `/`).
+    static let recentThreadWindow: TimeInterval = 30 * 60
+    /// Idle pages older than this auto-resolve instead of re-paging after
+    /// every Mac restart.
+    static let maxIdlePageAge: TimeInterval = 4 * 3600
+    /// A turn with no rollout writes for this long is treated as stalled
+    /// (crashed TUI, or a long-unanswered approval) and stops holding power.
+    static let stalledTurnSeconds: TimeInterval = 15 * 60
+    static let listPageSize = 50
+    static let maxListPages = 4
+    /// Rate-limit snapshots older than this aren't trusted to describe now.
+    static let rateLimitLookback: TimeInterval = 6 * 3600
+
+    // MARK: State (all behind `lock`)
+
     private let client: AppServerClient
+    private let lock = NSLock()
+    private var _config: Config
+    private var _relay: RelaySink?
+    private var _onNewIntervention: ((InterventionEvent) -> Void)?
+    private var _onNewRateLimit: ((RateLimitEvent) -> Void)?
 
-    private let stateLock = NSLock()
-    private var threads: [String: AppServerProtocol.ThreadSummary] = [:]
+    private var started = false
+    /// Bumped by start/stop: a cycle that started under an older generation
+    /// throws its results away instead of resurrecting a disabled backend.
+    private var generation = 0
+    private var cycleInFlight = false
+    private var startFailures = 0
+    private var nextStartAttempt = Date.distantPast
+    private var lastStartError: String?
+    private var lastListError: String?
+    private var readySince: Date?
+    private var listSupportsSort = true
+    private var _hasCompletedFirstScan = false
+
+    private var threads: [String: ThreadSummary] = [:]
     private var watchedThreadIDs: Set<String> = []
     private var threadStates: [String: AgentSessionState] = [:]
-    private var threadFlags: [String: [String]] = [:]
-    private var pendingInterventions: [String: InterventionEvent] = [:]   // interventionId → event
-    private var interventionByServerRequest: [String: String] = [:]       // serverRequestId → interventionId
+    private var threadActivity: [String: Date] = [:]
+    /// State reported by app-server notifications (only for turns our own
+    /// child drives). Wins while it's newer than the rollout's last write.
+    private var statusHints: [String: (state: AgentSessionState, at: Date)] = [:]
+    private var pendingInterventions: [String: InterventionEvent] = [:]
+    /// Threads paused for low battery; their idle page is held back until
+    /// resumed so it can't replace the Coordinator's low-battery page.
+    private var batteryPausedIds = Set<String>()
+    /// Approval pages backed by a live server request (interventionId → request).
+    private var serverRequests: [String: AppServerClient.ServerRequest] = [:]
+    /// Idle pages answered from the phone: don't re-open them while the
+    /// rollout still shows the same finished turn.
+    private var suppressedIdleIds: Set<String> = []
+    private var lastRolloutRateLimit: CodexRateLimitSnapshot?
+    private var pushedRateLimit: CodexRateLimitSnapshot?
     private var currentRateLimit: RateLimitEvent?
-    private var relayClient: RelayClient?
-    private let idleDetector = CodexIdleDetector()
+    private var rateLimitFirstSeen: [String: Date] = [:]
+    private var notifiedRateLimitKeys: Set<String> = []
+    private var loggedUnhandledMethods: Set<String> = []
     private var lastSnapshot: AgentBackendSnapshot
-    private var started = false
-    private var initializing = false
 
-    init(config: Config = Config.load(), client: AppServerClient = AppServerClient()) {
-        self.config = config
-        self.client = client
-        self.lastSnapshot = AgentBackendSnapshot(
-            backendID: .codex,
-            displayName: "Codex",
-            sessions: [],
-            wantsPowerAssertion: false,
-            pendingInterventions: [],
-            currentRateLimit: nil
-        )
+    // MARK: Queue-confined
+
+    private let scanQueue = DispatchQueue(label: "ClaudePowerMode.codex.scan", qos: .utility)
+    private let replyQueue = DispatchQueue(label: "ClaudePowerMode.codex.replies", qos: .userInitiated)
+    /// Background `codex exec resume` runs (up to 15 min each). Concurrent:
+    /// different threads don't wait on each other; `execGate` keeps it to
+    /// one run per thread.
+    private let execQueue = DispatchQueue(label: "ClaudePowerMode.codex.exec", qos: .utility, attributes: .concurrent)
+    private let execGate = CodexExecResumeGate()
+    /// scanQueue only.
+    private var rolloutCache: [String: CachedRollout] = [:]
+    /// scanQueue only. Thread cwd → canonical path (realpath is disk I/O).
+    private var canonicalCwds: [String: String] = [:]
+
+    private struct CachedRollout {
+        let mtime: Date
+        let size: UInt64
+        let summary: CodexRollout.Summary
     }
 
-    var currentSnapshot: AgentBackendSnapshot {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return lastSnapshot
-    }
-
-    func start() {
-        guard config.codexBackendEnabled else {
-            Logger.shared.log("CodexBackend disabled in config — skipping start")
-            return
-        }
-        guard !started else { return }
-        started = true
-        Logger.shared.log("CodexBackend starting (codexPath=\(config.codexPath))")
-        client.onNotification = { [weak self] method, params in
+    init(config: Config, client: AppServerClient? = nil) {
+        self._config = config
+        self.client = client ?? AppServerClient(codexPath: config.codexPath)
+        self.lastSnapshot = Self.emptySnapshot
+        // Wired once: the client may call back from its own queue at any time.
+        self.client.onNotification = { [weak self] method, params in
             self?.handleNotification(method: method, params: params)
         }
-        client.onUnexpectedExit = { [weak self] in
-            Logger.shared.log("CodexBackend: app-server exited unexpectedly — will retry on next refresh")
-            self?.started = false
+        self.client.onServerRequest = { [weak self] request in
+            self?.handleServerRequest(request) ?? false
         }
-        idleDetector.onNewEvent = { [weak self] event in
-            self?.handleNewIdleIntervention(event)
+        self.client.onUnexpectedExit = { [weak self] in
+            self?.handleClientExit()
         }
-        idleDetector.onResolved = { [weak self] id in
-            self?.handleResolvedIdleIntervention(id)
-        }
-        configureRelayClient()
-        Task { await self.bringUp() }
     }
 
-    private func configureRelayClient() {
-        relayClient?.stop()
-        relayClient = nil
-        guard config.relayEnabled, let wsURL = RelayClient.wsURL(from: config.relayURL) else {
+    private static let emptySnapshot = AgentBackendSnapshot(
+        backendID: .codex,
+        displayName: "Codex",
+        sessions: [],
+        wantsPowerAssertion: false,
+        pendingInterventions: [],
+        currentRateLimit: nil
+    )
+
+    var currentSnapshot: AgentBackendSnapshot {
+        locked { lastSnapshot }
+    }
+
+    func openInterventionIds() -> [String] {
+        locked { Array(pendingInterventions.keys) }
+    }
+
+    /// False until the first rollout scan since `start()` has finished.
+    /// Before that `openInterventionIds()` is empty because nothing has been
+    /// looked at yet, not because every Codex page was resolved.
+    var hasCompletedFirstScan: Bool {
+        locked { _hasCompletedFirstScan }
+    }
+
+    // MARK: Lifecycle
+
+    func start() {
+        let cfg = locked { _config }
+        guard cfg.codexBackendEnabled else {
+            Logger.shared.log("CodexBackend disabled in config — not starting")
             return
         }
-        let client = RelayClient(url: wsURL, token: PairingTokenManager.currentToken())
-        client.onReply = { [weak self] reply in
-            self?.handleRelayReply(reply)
-        }
-        client.start()
-        relayClient = client
-    }
-
-    private func handleRelayReply(_ reply: RelayClient.RelayReply) {
-        // Both ClaudeBackend and CodexBackend keep their own RelayClient
-        // and the Worker broadcasts replies to every mac socket. Each
-        // backend must claim only the ids it owns; otherwise Codex would
-        // swallow Claude replies (and vice versa). Codex intervention ids
-        // are always prefixed `codex-` (see CodexIdleDetector).
-        guard reply.interventionId.hasPrefix("codex-") else { return }
-
-        // Resolve the target cwd and threadId. Prefer the live intervention
-        // (we stored both when we opened the page); fall back to whatever
-        // the Worker echoed back in the reply payload.
-        let (cwd, threadId): (String, String) = {
-            if let pending = stateLock.withLock({ pendingInterventions[reply.interventionId] }) {
-                return (pending.cwd, pending.sessionId)
-            }
-            return (reply.cwd ?? "", reply.sessionId ?? "")
-        }()
-        let projectName = cwd.isEmpty ? "codex" : InterventionDetector.projectName(forCwd: cwd)
-        let text = reply.text.isEmpty ? mapActionToPhrase(reply.action) : reply.text
-
-        Logger.shared.log("CodexBackend: reply for \(reply.interventionId) — project=\(projectName) thread=\(threadId.prefix(8)) text=\(text.prefix(60))")
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = InjectionExecutor.injectCodex(text: text, cwd: cwd, threadId: threadId)
-            Logger.shared.log("CodexBackend.injection method=\(result.method.rawValue) success=\(result.success) for \(projectName)")
-            self?.relayClient?.sendReplyInjected(
-                interventionId: reply.interventionId,
-                method: result.method.rawValue,
-                success: result.success,
-                output: result.output
-            )
-            // Close the intervention on the Worker so the iOS inbox clears.
-            // Without this the page sticks around until something else
-            // resolves it. Closing on success only — on failure the user
-            // can retry from the phone.
-            if result.success {
-                self?.relayClient?.sendInterventionClosed(id: reply.interventionId, reason: "replied")
-                self?.stateLock.withLock {
-                    self?.pendingInterventions[reply.interventionId] = nil
-                    self?.rebuildSnapshot()
-                }
-            }
-        }
-    }
-
-    private func mapActionToPhrase(_ action: String?) -> String {
-        switch action {
-        case "approve": return "yes, proceed"
-        case "deny":    return "no, stop"
-        case "carry_on": return "carry on"
-        default:        return "carry on"
-        }
-    }
-
-    func refresh() {
-        guard config.codexBackendEnabled else { return }
-        // If the child died and we cleared `started`, try again. The
-        // bringUp() path is idempotent against a still-running client.
-        if !started {
+        let fresh: Bool = locked {
+            guard !started else { return false }
             started = true
-            Task { await self.bringUp() }
-            return
+            generation += 1
+            startFailures = 0
+            nextStartAttempt = .distantPast
+            lastStartError = nil
+            return true
         }
-        Task {
-            await self.reconcileWatchedThreads()
-            self.scanIdle()
-        }
-    }
-
-    private func scanIdle() {
-        let watched: [CodexIdleDetector.WatchedThread] = stateLock.withLock {
-            watchedThreadIDs.compactMap { id -> CodexIdleDetector.WatchedThread? in
-                guard let t = threads[id], let path = t.path, !path.isEmpty,
-                      let cwd = t.cwd, !cwd.isEmpty else { return nil }
-                return CodexIdleDetector.WatchedThread(
-                    threadId: id,
-                    rolloutPath: path,
-                    cwd: cwd,
-                    source: mapSource(t.source)
-                )
-            }
-        }
-        idleDetector.scan(threads: watched)
-    }
-
-    private func handleNewIdleIntervention(_ event: InterventionEvent) {
-        stateLock.withLock {
-            pendingInterventions[event.id] = event
-            rebuildSnapshot()
-        }
-        relayClient?.sendInterventionOpened(event)
-    }
-
-    private func handleResolvedIdleIntervention(_ id: String) {
-        stateLock.withLock {
-            pendingInterventions[id] = nil
-            rebuildSnapshot()
-        }
-        relayClient?.sendInterventionClosed(id: id, reason: "session_resolved")
-    }
-
-    func reloadConfig(_ config: Config) {
-        let wasEnabled = self.config.codexBackendEnabled
-        let wasRelayEnabled = self.config.relayEnabled
-        let wasRelayURL = self.config.relayURL
-        self.config = config
-        if wasEnabled && !config.codexBackendEnabled {
-            Logger.shared.log("CodexBackend disabled via config — shutting down child")
-            shutdown()
-        } else if !wasEnabled && config.codexBackendEnabled {
-            Logger.shared.log("CodexBackend enabled via config — starting up")
-            start()
-        } else if started, (config.relayEnabled != wasRelayEnabled || config.relayURL != wasRelayURL) {
-            Logger.shared.log("CodexBackend: relay config changed — reconfiguring relay client")
-            configureRelayClient()
-        }
+        guard fresh else { return }
+        client.codexPath = cfg.codexPath
+        Logger.shared.log("CodexBackend starting (codexPath=\(cfg.codexPath.isEmpty ? "auto" : cfg.codexPath))")
+        refresh()
     }
 
     func shutdown() {
-        client.shutdown()
-        relayClient?.stop()
-        relayClient = nil
-        started = false
-        stateLock.lock()
-        threads.removeAll()
-        watchedThreadIDs.removeAll()
-        threadStates.removeAll()
-        threadFlags.removeAll()
-        pendingInterventions.removeAll()
-        interventionByServerRequest.removeAll()
-        currentRateLimit = nil
-        lastSnapshot = AgentBackendSnapshot(
-            backendID: .codex,
-            displayName: displayName,
-            sessions: [],
-            wantsPowerAssertion: false,
-            pendingInterventions: [],
-            currentRateLimit: nil
-        )
-        stateLock.unlock()
+        stop(closingPages: false)
     }
 
-    // MARK: Bring-up
+    func reloadConfig(_ config: Config) {
+        let old: Config = locked {
+            let o = _config
+            _config = config
+            return o
+        }
+        client.codexPath = config.codexPath
+        if old.codexBackendEnabled && !config.codexBackendEnabled {
+            Logger.shared.log("CodexBackend disabled via config — shutting down")
+            stop(closingPages: true)
+        } else if !old.codexBackendEnabled && config.codexBackendEnabled {
+            Logger.shared.log("CodexBackend enabled via config — starting")
+            start()
+        } else if config.codexBackendEnabled && old.codexPath != config.codexPath {
+            Logger.shared.log("CodexBackend: codexPath changed — restarting app-server")
+            let closed: (ids: [String], relay: RelaySink?) = locked {
+                startFailures = 0
+                nextStartAttempt = .distantPast
+                lastStartError = nil
+                readySince = nil
+                let ids = dropServerRequestsLocked()
+                rebuildSnapshotLocked()
+                return (ids, _relay)
+            }
+            client.shutdown()   // the next cycle respawns with the new path
+            for id in closed.ids { closed.relay?.sendInterventionClosed(id: id, reason: "session_resolved") }
+        } else {
+            locked { rebuildSnapshotLocked() }
+        }
+    }
 
-    private func bringUp() async {
-        guard !initializing else { return }
-        initializing = true
-        defer { initializing = false }
-
-        do {
-            _ = try await client.start(clientName: "ClaudePowerMode", clientVersion: "0.1")
-        } catch {
-            Logger.shared.log("CodexBackend: handshake failed — \(error). Will retry on next refresh.")
+    /// `closingPages`: tell the phone the pages are gone (the user turned
+    /// Codex off). On app quit they stay — the next launch re-syncs them.
+    private func stop(closingPages: Bool) {
+        let (ids, relay): ([String], RelaySink?) = locked {
             started = false
-            return
+            generation += 1
+            let ids = Array(pendingInterventions.keys)
+            threads.removeAll()
+            watchedThreadIDs.removeAll()
+            threadStates.removeAll()
+            threadActivity.removeAll()
+            statusHints.removeAll()
+            pendingInterventions.removeAll()
+            serverRequests.removeAll()
+            suppressedIdleIds.removeAll()
+            lastRolloutRateLimit = nil
+            pushedRateLimit = nil
+            currentRateLimit = nil
+            readySince = nil
+            _hasCompletedFirstScan = false
+            lastSnapshot = Self.emptySnapshot
+            return (ids, _relay)
         }
-
-        do {
-            let account: AppServerProtocol.AccountReadResult = try await client.call(
-                method: "account/read",
-                params: AppServerProtocol.AccountReadParams(refreshToken: false)
-            )
-            if let acc = account.account {
-                Logger.shared.log("CodexBackend: account=\(acc.email ?? "?") plan=\(acc.planType ?? "?")")
-            }
-        } catch {
-            Logger.shared.log("CodexBackend: account/read failed — \(error)")
+        client.shutdown()
+        scanQueue.async { [weak self] in
+            self?.rolloutCache.removeAll()
+            self?.canonicalCwds.removeAll()
         }
-
-        await reconcileWatchedThreads()
+        if closingPages {
+            for id in ids { relay?.sendInterventionClosed(id: id, reason: "stale") }
+        }
     }
 
-    // MARK: Thread reconciliation
+    private func isCurrent(_ gen: Int) -> Bool {
+        locked { started && generation == gen }
+    }
 
-    private func reconcileWatchedThreads() async {
-        guard client.isRunning else { return }
+    // MARK: Refresh cycle
 
-        let listResult: AppServerProtocol.ThreadListResult
-        do {
-            listResult = try await client.call(
-                method: "thread/list",
-                params: AppServerProtocol.ThreadListParams(limit: 50)
-            )
-        } catch {
-            Logger.shared.log("CodexBackend: thread/list failed — \(error)")
-            return
+    /// Called every tick. Starts one async cycle unless one is still running
+    /// (a slow app-server must not stack up overlapping cycles).
+    func refresh() {
+        let job: (Config, Int)? = locked {
+            guard _config.codexBackendEnabled, started, !cycleInFlight else { return nil }
+            cycleInFlight = true
+            return (_config, generation)
         }
-
-        let liveCwds = CodexProcessMonitor.liveCodexCwds()
-        // Threads we've already paged the user about — keep watching them
-        // regardless of staleness so the page stays visible on the phone
-        // until the user acts on it. Without this, Codex Desktop pages
-        // disappear ~5 min after they open because Desktop's app-server
-        // process has cwd=/ (no per-project cwd to match liveCwds) and
-        // the rollout's updatedAt naturally goes stale while waiting on
-        // the user. The 4h ceiling in CodexIdleDetector still auto-resolves
-        // truly abandoned ones.
-        let stickyThreadIds: Set<String> = stateLock.withLock {
-            Set(pendingInterventions.values.map(\.sessionId))
+        guard let (cfg, gen) = job else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            await self.runCycle(config: cfg, generation: gen)
+            self.locked { self.cycleInFlight = false }
         }
-        let watched = listResult.data.filter { thread in
-            guard let cwd = thread.cwd else { return false }
-            if stickyThreadIds.contains(thread.id) { return true }
-            // Cwd match: the user has a running `codex` CLI in this dir.
-            if liveCwds.contains(cwd) { return true }
-            // Recency fallback: 30 min covers Codex Desktop / VS Code
-            // sessions where the app-server's own cwd is `/` and isn't a
-            // useful liveness signal. Original 5 min was too aggressive —
-            // pages dropped before the user had time to react.
-            if let updated = thread.updatedAt {
-                let ageSeconds = Double(Int(Date().timeIntervalSince1970) - updated)
-                if ageSeconds < 1800 { return true }
+    }
+
+    private func runCycle(config cfg: Config, generation gen: Int) async {
+        if !client.isReady {
+            await bringUpIfDue(generation: gen)
+        } else {
+            locked {
+                // Survived a minute: a later crash is a fresh failure, not
+                // part of a crash loop.
+                if let since = readySince, Date().timeIntervalSince(since) > 60 { startFailures = 0 }
             }
-            return false
         }
-
-        let previousWatched = stateLock.withLock { watchedThreadIDs }
-        let liveSet = liveCwds
-        let newWatched = Set(watched.map(\.id))
-        let added = newWatched.subtracting(previousWatched)
-        let removed = previousWatched.subtracting(newWatched)
-
-        if !added.isEmpty {
-            Logger.shared.log("CodexBackend: now watching \(added.count) thread(s): \(added.map { String($0.prefix(8)) }.joined(separator: ", "))")
+        // Without the app-server we keep tracking the threads we already know.
+        let listed: [ThreadSummary]? = client.isReady ? await listThreads(now: Date()) : nil
+        guard isCurrent(gen) else { return }
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            scanQueue.async {
+                self.scan(listed: listed, config: cfg, generation: gen)
+                cont.resume()
+            }
         }
-        if !removed.isEmpty {
-            Logger.shared.log("CodexBackend: dropped \(removed.count) thread(s): \(removed.map { String($0.prefix(8)) }.joined(separator: ", "))")
-        }
+    }
 
-        // Subscribe to newly-watched threads so we start receiving
-        // notifications about them. `notLoaded` -> attached transition
-        // happens server-side once we call `thread/read`.
-        for id in added {
+    /// Exponential restart backoff: 15s, 30s, 60s, … capped at 5 minutes.
+    static func restartDelay(afterFailures failures: Int) -> TimeInterval {
+        guard failures > 0 else { return 0 }
+        return min(15 * pow(2, Double(min(failures, 10) - 1)), 300)
+    }
+
+    private func bringUpIfDue(generation gen: Int) async {
+        let due = locked { Date() >= nextStartAttempt }
+        guard due, isCurrent(gen) else { return }
+        do {
+            _ = try await client.start(clientName: "Page", clientVersion: Self.clientVersion)
+            guard isCurrent(gen) else {
+                // Disabled while we were handshaking — don't leave it running.
+                client.shutdown()
+                return
+            }
+            locked {
+                readySince = Date()
+                lastStartError = nil
+            }
+        } catch {
+            let (delay, firstOfKind): (TimeInterval, Bool) = locked {
+                startFailures += 1
+                let d = Self.restartDelay(afterFailures: startFailures)
+                nextStartAttempt = Date().addingTimeInterval(d)
+                let message = "\(error)"
+                let changed = message != lastStartError
+                lastStartError = message
+                return (d, changed)
+            }
+            if firstOfKind {
+                Logger.shared.log("CodexBackend: app-server unavailable — \(error). Retrying in \(Int(delay))s, backing off to 5 min (repeats of this error aren't logged).")
+            }
+        }
+    }
+
+    private static var clientVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+    }
+
+    private func handleClientExit() {
+        let (closed, delay, relay): ([String], TimeInterval, RelaySink?) = locked {
+            let uptime = readySince.map { Date().timeIntervalSince($0) } ?? 0
+            readySince = nil
+            startFailures = uptime >= 60 ? 0 : startFailures + 1
+            let d = Self.restartDelay(afterFailures: startFailures)
+            nextStartAttempt = Date().addingTimeInterval(d)
+            let ids = dropServerRequestsLocked()
+            rebuildSnapshotLocked()
+            return (ids, d, _relay)
+        }
+        Logger.shared.log("CodexBackend: app-server exited unexpectedly — restarting in \(Int(delay))s")
+        // Requests from the dead child can never be answered now.
+        for id in closed { relay?.sendInterventionClosed(id: id, reason: "session_resolved") }
+    }
+
+    /// Caller holds `lock`. Returns the closed intervention ids.
+    private func dropServerRequestsLocked() -> [String] {
+        let ids = Array(serverRequests.keys)
+        for id in ids {
+            serverRequests[id] = nil
+            pendingInterventions[id] = nil
+        }
+        return ids
+    }
+
+    // MARK: Discovery
+
+    private func listThreads(now: Date) async -> [ThreadSummary]? {
+        var pages: [[ThreadSummary]] = []
+        var cursor: String?
+        var attempts = 0
+        while pages.count < Self.maxListPages, attempts <= Self.maxListPages {
+            attempts += 1
+            let sorted = locked { listSupportsSort }
+            let params = AppServerProtocol.ThreadListParams(
+                limit: Self.listPageSize,
+                cursor: cursor,
+                sortKey: sorted ? "updated_at" : nil,
+                sortDirection: sorted ? "desc" : nil
+            )
+            let page: AppServerProtocol.ThreadListResult
             do {
-                let _: AppServerProtocol.JSON = try await client.call(
-                    method: "thread/read",
-                    params: AppServerProtocol.ThreadReadParams(threadId: id)
-                )
+                page = try await client.call(method: "thread/list", params: params)
+            } catch AppServerClient.ClientError.rpcFailed(let e) where sorted && cursor == nil {
+                Logger.shared.log("CodexBackend: thread/list rejected sortKey (rpc \(e.code)) — listing unsorted from now on")
+                locked { listSupportsSort = false }
+                continue
             } catch {
-                Logger.shared.log("CodexBackend: thread/read failed for \(id.prefix(8)) — \(error)")
+                let message = "\(error)"
+                let firstOfKind: Bool = locked {
+                    defer { lastListError = message }
+                    return lastListError != message
+                }
+                if firstOfKind { Logger.shared.log("CodexBackend: thread/list failed — \(error)") }
+                return pages.isEmpty ? nil : Self.mergeThreadPages(pages)
             }
+            locked { lastListError = nil }
+            pages.append(page.data)
+            guard let next = page.nextCursor, !next.isEmpty, next != cursor else { break }
+            cursor = next
+            // Newest-first: once a page ends past the oldest thing we'd page
+            // about, later pages can't matter (only trusted if the page
+            // really is in descending order).
+            if sorted, Self.pageEnds(page.data, olderThan: now.addingTimeInterval(-Self.maxIdlePageAge)) { break }
+        }
+        return Self.mergeThreadPages(pages)
+    }
+
+    /// Dedupe across pages (a thread can move between pages while we page
+    /// through), keeping the most recently updated copy, in first-seen order.
+    static func mergeThreadPages(_ pages: [[ThreadSummary]]) -> [ThreadSummary] {
+        var order: [String] = []
+        var byId: [String: ThreadSummary] = [:]
+        for thread in pages.joined() {
+            if let existing = byId[thread.id] {
+                if (thread.updatedAt ?? 0) > (existing.updatedAt ?? 0) { byId[thread.id] = thread }
+            } else {
+                order.append(thread.id)
+                byId[thread.id] = thread
+            }
+        }
+        return order.compactMap { byId[$0] }
+    }
+
+    static func pageEnds(_ page: [ThreadSummary], olderThan cutoff: Date) -> Bool {
+        let stamps = page.compactMap { $0.updatedAt.map(epochSeconds) }
+        guard stamps.count == page.count, let last = stamps.last else { return false }
+        let descending = zip(stamps, stamps.dropFirst()).allSatisfy { $0 >= $1 }
+        return descending && last < cutoff.timeIntervalSince1970
+    }
+
+    /// `updatedAt` is unix seconds; tolerate milliseconds.
+    static func epochSeconds(_ raw: Int) -> TimeInterval {
+        raw > 10_000_000_000 ? TimeInterval(raw) / 1000 : TimeInterval(raw)
+    }
+
+    /// Which threads to watch: recently updated ones, ones whose rollout we
+    /// saw written recently (`updatedAt` may only move at turn boundaries,
+    /// and freezes while the app-server is down — a long Desktop turn must
+    /// not drop out mid-turn), ones with an open page, and — per directory
+    /// with a live `codex` — that directory's newest thread (an open TUI,
+    /// even if idle for hours). Older threads in the same directory are
+    /// history, not sessions.
+    static func selectWatched(threads: [ThreadSummary],
+                              liveCwds: Set<String>,
+                              sticky: Set<String>,
+                              recentlyWritten: Set<String> = [],
+                              now: Date,
+                              canonical: (String) -> String = { $0 }) -> Set<String> {
+        var watched = Set<String>()
+        var newestPerLiveCwd: [String: ThreadSummary] = [:]
+        for t in threads where !t.isSubAgent {
+            guard let cwd = t.cwd, !cwd.isEmpty, let path = t.path, !path.isEmpty else { continue }
+            if sticky.contains(t.id) || recentlyWritten.contains(t.id) { watched.insert(t.id) }
+            if let u = t.updatedAt, now.timeIntervalSince1970 - epochSeconds(u) < recentThreadWindow {
+                watched.insert(t.id)
+            }
+            let key = canonical(cwd)
+            guard liveCwds.contains(key) else { continue }
+            if let current = newestPerLiveCwd[key], (current.updatedAt ?? 0) >= (t.updatedAt ?? 0) { continue }
+            newestPerLiveCwd[key] = t
+        }
+        watched.formUnion(newestPerLiveCwd.values.map(\.id))
+        return watched
+    }
+
+    // MARK: Scan (scanQueue)
+
+    private struct ScanEffects {
+        var opened: [InterventionEvent] = []
+        var closed: [String] = []
+        var rateLimit: RateLimitEvent?
+        var relay: RelaySink?
+        var onNewIntervention: ((InterventionEvent) -> Void)?
+        var onNewRateLimit: ((RateLimitEvent) -> Void)?
+    }
+
+    private func scan(listed: [ThreadSummary]?, config cfg: Config, generation gen: Int) {
+        let now = Date()
+        let processes = CodexProcessScanner.liveSessions()
+        let liveCwds = Set(processes.compactMap(\.cwd))
+        let (known, sticky, recentlyWritten, hints): ([String: ThreadSummary], Set<String>, Set<String>, [String: (state: AgentSessionState, at: Date)]) = locked {
+            let stickyIds = Set(pendingInterventions.values.filter { $0.kind == .idle }.map(\.sessionId))
+            let written = Set(threadActivity.filter { now.timeIntervalSince($0.value) < Self.recentThreadWindow }.keys)
+            return (threads, stickyIds, written, statusHints)
         }
 
-        stateLock.withLock {
-            threads = Dictionary(uniqueKeysWithValues: listResult.data.map { ($0.id, $0) })
-            watchedThreadIDs = newWatched
-            // Drop state for threads we no longer watch.
-            for id in removed {
-                threadStates[id] = nil
-                threadFlags[id] = nil
+        var all = known
+        if let listed {
+            var fresh = Dictionary(listed.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            // A thread with an open page that fell off the capped listing
+            // keeps its last known record rather than silently resolving.
+            for id in sticky.union(recentlyWritten) where fresh[id] == nil { fresh[id] = known[id] }
+            all = fresh
+        }
+        let watched = Self.selectWatched(threads: Array(all.values), liveCwds: liveCwds, sticky: sticky,
+                                         recentlyWritten: recentlyWritten, now: now, canonical: canonicalCwd)
+
+        var states: [String: AgentSessionState] = [:]
+        var activity: [String: Date] = [:]
+        var idleCandidates: [String: InterventionEvent] = [:]
+        var newestRateLimit: CodexRateLimitSnapshot?
+        var scannedPaths = Set<String>()
+        for id in watched {
+            guard let t = all[id], let path = t.path, !path.isEmpty else { continue }
+            scannedPaths.insert(path)
+            guard let rollout = rolloutState(path: path) else {
+                states[id] = .idle
+                continue
+            }
+            activity[id] = rollout.mtime
+            var state = Self.deriveState(summary: rollout.summary,
+                                         rolloutAge: now.timeIntervalSince(rollout.mtime),
+                                         activeWindow: cfg.transcriptActivityWindowSeconds)
+            if let hint = hints[id], hint.at > rollout.mtime { state = hint.state }
+            states[id] = state
+            if let page = Self.idlePage(thread: t, summary: rollout.summary, rolloutMtime: rollout.mtime,
+                                        now: now, idleDelay: cfg.idlePageDelaySeconds),
+               Self.shouldPageIdle(source: Self.mapSource(t.source), ownerAlive: {
+                   guard let cwd = t.cwd else { return false }
+                   return CodexInjector.resolveTarget(cwd: canonicalCwd(cwd), rolloutPath: path, processes: processes,
+                                                      cwdFallback: .forSource(Self.mapSource(t.source))) != .none
+               }) {
+                idleCandidates[page.id] = page
+            }
+            if let rl = rollout.summary.rateLimit, now.timeIntervalSince(rl.observedAt) < Self.rateLimitLookback,
+               rl.observedAt > (newestRateLimit?.observedAt ?? .distantPast) {
+                newestRateLimit = rl
             }
         }
-        // Clean up idle interventions for threads we no longer watch.
-        idleDetector.dropThreads(notIn: newWatched)
-        stateLock.withLock {
-            // Seed newly-watched threads. If their cwd has a live codex
-            // process, default to .active (notifications will refine it).
-            // Otherwise the thread was promoted by the "recent updatedAt"
-            // fallback — default to .idle.
-            for id in added {
-                guard let t = threads[id] else { continue }
-                let hasLive = t.cwd.map(liveSet.contains) ?? false
-                threadStates[id] = hasLive ? .active : .idle
+        rolloutCache = rolloutCache.filter { scannedPaths.contains($0.key) }
+
+        // Idle pages wait until the user has walked away from the Mac (they
+        // can see the terminal themselves). Approvals never wait.
+        let hasNewCandidate = locked {
+            idleCandidates.keys.contains { pendingInterventions[$0] == nil && !suppressedIdleIds.contains($0) }
+        }
+        let userActive = hasNewCandidate && cfg.idlePageOnlyWhenAwaySeconds > 0
+            && UserPresence.isActive(within: cfg.idlePageOnlyWhenAwaySeconds)
+
+        let effects: ScanEffects? = locked {
+            guard started, generation == gen else { return nil }
+            threads = all
+            watchedThreadIDs = watched
+            threadStates = states
+            threadActivity = activity
+            statusHints = statusHints.filter { watched.contains($0.key) }
+            _hasCompletedFirstScan = true
+
+            var fx = ScanEffects(relay: _relay, onNewIntervention: _onNewIntervention, onNewRateLimit: _onNewRateLimit)
+            for (pid, event) in pendingInterventions where event.kind == .idle && idleCandidates[pid] == nil {
+                fx.closed.append(pid)
             }
-            rebuildSnapshot()
+            for pid in fx.closed { pendingInterventions[pid] = nil }
+            suppressedIdleIds.formIntersection(idleCandidates.keys)
+            if !userActive {
+                for (cid, event) in idleCandidates.sorted(by: { $0.key < $1.key })
+                where pendingInterventions[cid] == nil && !suppressedIdleIds.contains(cid) {
+                    pendingInterventions[cid] = event
+                    fx.opened.append(event)
+                }
+            }
+            // Only a newer snapshot replaces the last one: the thread that hit
+            // the wall may stop being watched while the account is still
+            // blocked (no turn succeeds, so nothing newer gets written).
+            if let fresh = newestRateLimit, fresh.observedAt > (lastRolloutRateLimit?.observedAt ?? .distantPast) {
+                lastRolloutRateLimit = fresh
+            }
+            fx.rateLimit = applyRateLimitLocked(now: now)
+            rebuildSnapshotLocked(now: now)
+            return fx
+        }
+        guard let effects else { return }
+
+        for id in effects.closed {
+            Logger.shared.log("CodexBackend: RESOLVED idle \(id.prefix(48))")
+            effects.relay?.sendInterventionClosed(id: id, reason: "session_resolved")
+        }
+        let held = effects.opened.isEmpty ? [] : HookHoldMarkers.heldSessions(in: HookHoldMarkers.defaultDirectory)
+        let paused = locked { batteryPausedIds }
+        for event in effects.opened {
+            // A Page hook holding this thread already paged it (Codex Stop /
+            // PermissionRequest hook); a battery-paused thread keeps the
+            // Coordinator's low-battery page instead (one page per session).
+            if held.contains(event.sessionId) || paused.contains(event.sessionId) {
+                Logger.shared.log("CodexBackend: idle in \(event.projectName) not paged (\(held.contains(event.sessionId) ? "hook holds it" : "battery-paused"))")
+                continue
+            }
+            Logger.shared.log("CodexBackend: OPENED idle in \(event.projectName) (thread \(event.sessionId.prefix(8)))")
+            effects.relay?.sendInterventionOpened(event)
+            effects.onNewIntervention?(event)
+        }
+        if let rl = effects.rateLimit { effects.onNewRateLimit?(rl) }
+    }
+
+    /// scanQueue only.
+    private func canonicalCwd(_ cwd: String) -> String {
+        if let c = canonicalCwds[cwd] { return c }
+        let c = CodexProcessScanner.canonicalPath(cwd)
+        if canonicalCwds.count > 2000 { canonicalCwds.removeAll() }
+        canonicalCwds[cwd] = c
+        return c
+    }
+
+    /// scanQueue only. Re-reads the tail only when the file changed.
+    private func rolloutState(path: String) -> (mtime: Date, summary: CodexRollout.Summary)? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              (attrs[.type] as? FileAttributeType) == .typeRegular,
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
+            rolloutCache[path] = nil
+            return nil
+        }
+        if let cached = rolloutCache[path], cached.mtime == mtime, cached.size == size {
+            return (mtime, cached.summary)
+        }
+        let summary = CodexRollout.summarizeTail(of: URL(fileURLWithPath: path))
+        rolloutCache[path] = CachedRollout(mtime: mtime, size: size, summary: summary)
+        return (mtime, summary)
+    }
+
+    // MARK: State derivation (pure)
+
+    static func deriveState(summary: CodexRollout.Summary,
+                            rolloutAge: TimeInterval,
+                            activeWindow: TimeInterval) -> AgentSessionState {
+        if let request = summary.pendingRequest, rolloutAge < maxIdlePageAge {
+            switch request {
+            case .approval: return .waitingOnApproval
+            case .userInput: return .waitingOnUser
+            }
+        }
+        switch summary.phase {
+        case .inTurn:
+            return rolloutAge <= stalledTurnSeconds ? .active : .interrupted
+        case .unknown:
+            // No turn markers in view (brand-new session, or a giant tool
+            // output filled the tail): fall back to plain write recency.
+            return rolloutAge <= max(activeWindow, 30) ? .active : .idle
+        case .completed, .aborted:
+            return .idle
         }
     }
 
-    // MARK: Notifications
+    static func idleInterventionId(threadId: String, endedAt: Date) -> String {
+        "codex-idle-\(threadId)-\(Int(endedAt.timeIntervalSince1970))"
+    }
 
-    private func handleNotification(method: String, params: AppServerProtocol.JSON) {
+    /// An idle page for a thread whose last turn completed (not aborted —
+    /// the user interrupted it, so they're at the keyboard) at least
+    /// `idleDelay` ago. The id is keyed on the turn's end, not the file's
+    /// mtime: housekeeping lines (`thread_settings_applied`, …) can land
+    /// after `task_complete` without starting a new turn.
+    static func idlePage(thread t: ThreadSummary,
+                         summary: CodexRollout.Summary,
+                         rolloutMtime: Date,
+                         now: Date,
+                         idleDelay: TimeInterval) -> InterventionEvent? {
+        guard summary.phase == .completed, summary.pendingRequest == nil,
+              let cwd = t.cwd, !cwd.isEmpty else { return nil }
+        let endedAt = summary.turnEndedAt ?? rolloutMtime
+        let age = now.timeIntervalSince(endedAt)
+        guard age >= max(idleDelay, 10), age <= maxIdlePageAge else { return nil }
+        let context = summary.lastAgentMessage.map { String($0.prefix(280)) }
+        return InterventionEvent(
+            id: idleInterventionId(threadId: t.id, endedAt: endedAt),
+            sessionId: t.id,
+            cwd: cwd,
+            projectName: CodexInjector.projectName(forCwd: cwd),
+            kind: .idle,
+            openedAt: endedAt,
+            context: (context?.isEmpty == false) ? context! : "Codex finished a turn — waiting for input",
+            transcriptPath: t.path ?? "",
+            backend: .codex,
+            source: mapSource(t.source)
+        )
+    }
+
+    /// Whether a finished turn is worth a page. A terminal session whose
+    /// `codex` has exited was closed on purpose; `codex exec` threads are
+    /// scripts, not someone waiting. Desktop / VS Code expose no per-thread
+    /// process, so they page on the rollout alone.
+    static func shouldPageIdle(source: AgentSessionSource, ownerAlive: () -> Bool) -> Bool {
+        switch source {
+        case .exec: return false
+        case .terminal: return ownerAlive()
+        case .desktop, .vscode, .remote, .unknown: return true
+        }
+    }
+
+    /// State hint from an app-server notification, if it carries one.
+    /// `thread/status/changed` nests the flags: `{threadId, status: {type,
+    /// activeFlags}}` (top-level `activeFlags` accepted for older builds).
+    static func statusHint(method: String, params: JSON) -> (threadId: String, state: AgentSessionState)? {
         switch method {
         case "thread/status/changed":
-            let id = params["threadId"].stringValue ?? params["id"].stringValue
-            let flags = params["activeFlags"].arrayValue?.compactMap(\.stringValue) ?? []
-            Logger.shared.log("Codex thread/status/changed id=\(id?.prefix(8) ?? "?") flags=\(flags.joined(separator: ","))")
-            if let id = id, stateLock.withLock({ watchedThreadIDs.contains(id) }) {
-                updateThreadState(id: id, from: flags)
+            guard let id = params["threadId"].stringValue ?? params["id"].stringValue else { return nil }
+            let status = params["status"]
+            let flags = (status["activeFlags"].arrayValue ?? params["activeFlags"].arrayValue ?? [])
+                .compactMap(\.stringValue)
+            if flags.contains("waitingOnApproval") { return (id, .waitingOnApproval) }
+            if flags.contains(where: { $0.hasPrefix("waitingOn") }) { return (id, .waitingOnUser) }
+            switch status["type"].stringValue ?? status.stringValue {
+            case "active": return (id, .active)
+            case "idle", "notLoaded": return (id, .idle)
+            case "systemError": return (id, .failed)
+            default: return nil   // unknown: keep the rollout-derived state
             }
         case "turn/started":
-            let id = params["threadId"].stringValue
-            Logger.shared.log("Codex turn/started thread=\(id?.prefix(8) ?? "?")")
-            if let id = id { setState(id: id, to: .active) }
+            return params["threadId"].stringValue.map { ($0, .active) }
         case "turn/completed":
-            let id = params["threadId"].stringValue
-            Logger.shared.log("Codex turn/completed thread=\(id?.prefix(8) ?? "?")")
-            if let id = id {
-                // If a waiting flag is currently set, leave it — the server
-                // sometimes emits turn/completed before the matching
-                // thread/status/changed. Otherwise go idle.
-                let currentFlags = stateLock.withLock { threadFlags[id] ?? [] }
-                let stillWaiting = currentFlags.contains(where: isWaitingFlag)
-                if !stillWaiting { setState(id: id, to: .idle) }
-            }
-        case "account/rateLimits/updated":
-            handleRateLimitUpdate(params: params)
-        case "item/commandExecution/requestApproval":
-            openApprovalIntervention(params: params, kind: .permission, subtype: "command")
-        case "item/fileChange/requestApproval":
-            openApprovalIntervention(params: params, kind: .permission, subtype: "fileChange")
-        case "tool/requestUserInput":
-            openApprovalIntervention(params: params, kind: .question, subtype: nil)
-        case "serverRequest/resolved":
-            closeInterventionForServerRequest(params: params)
+            return params["threadId"].stringValue.map { ($0, .idle) }
         default:
-            // Useful for spec amendments — capture unknown methods so we
-            // can decide whether to type them.
-            Logger.shared.log("Codex notification (unhandled): \(method)")
+            return nil
         }
     }
 
-    // MARK: Approval / input → InterventionEvent
+    // MARK: Notifications & server requests (client callback queue)
 
-    /// Build an InterventionEvent from a server-side approval or user-input
-    /// request. We pluck whatever context the protocol gives us (command,
-    /// file path, prompt text, reason) using the permissive JSON tree —
-    /// any missing field just gets a sensible default. The server request
-    /// id is captured so we can close the matching page when the server
-    /// reports resolution.
-    private func openApprovalIntervention(params: AppServerProtocol.JSON, kind: InterventionKind, subtype: String?) {
-        let serverRequestId = params["requestId"].stringValue
-            ?? params["id"].stringValue
-            ?? UUID().uuidString
-        let threadId = params["threadId"].stringValue
-        let cwd: String = {
-            if let tid = threadId, let t = stateLock.withLock({ threads[tid] }), let c = t.cwd { return c }
-            return params["cwd"].stringValue ?? ""
-        }()
-        let projectName: String = {
-            if cwd.isEmpty { return "Codex" }
-            return InterventionDetector.projectName(forCwd: cwd)
-        }()
-        let context = buildContextSnippet(params: params, kind: kind)
-        let sessionId = threadId ?? "codex"
-        let source: AgentSessionSource = {
-            if let tid = threadId, let t = stateLock.withLock({ threads[tid] }) {
-                return mapSource(t.source)
+    private func handleNotification(method: String, params: JSON) {
+        if let hint = Self.statusHint(method: method, params: params) {
+            locked {
+                guard watchedThreadIDs.contains(hint.threadId) else { return }
+                statusHints[hint.threadId] = (hint.state, Date())
+                threadStates[hint.threadId] = hint.state
+                rebuildSnapshotLocked()
             }
-            return .unknown
-        }()
+            return
+        }
+        switch method {
+        case "account/rateLimits/updated":
+            guard let snapshot = CodexRateLimitSnapshot.parse(notificationParams: params, observedAt: Date()) else { return }
+            let (event, callback): (RateLimitEvent?, ((RateLimitEvent) -> Void)?) = locked {
+                guard started else { return (nil, nil) }
+                pushedRateLimit = snapshot
+                let e = applyRateLimitLocked(now: Date())
+                rebuildSnapshotLocked()
+                return (e, _onNewRateLimit)
+            }
+            if let event { callback?(event) }
+        case "serverRequest/resolved":
+            closeResolvedServerRequest(params: params)
+        default:
+            let first = locked { loggedUnhandledMethods.insert(method).inserted }
+            if first { Logger.shared.log("Codex notification (unhandled, logged once): \(method)") }
+        }
+    }
 
+    /// Approval requests become `.permission` pages answered with a JSON-RPC
+    /// decision. Anything else returns false → the client answers -32601.
+    private func handleServerRequest(_ request: AppServerClient.ServerRequest) -> Bool {
+        let subtype: String
+        switch request.method {
+        case AppServerProtocol.ServerRequestMethod.commandExecutionApproval: subtype = "command"
+        case AppServerProtocol.ServerRequestMethod.fileChangeApproval: subtype = "fileChange"
+        default: return false
+        }
+        let (cfg, relay, isStarted): (Config, RelaySink?, Bool) = locked { (_config, _relay, started) }
+        guard isStarted, cfg.relayEnabled, let relay else {
+            // No phone to ask: decline rather than leave the turn hanging.
+            client.respond(to: request, result: AppServerProtocol.ApprovalResponse(decision: "decline"))
+            Logger.shared.log("CodexBackend: declined \(request.method) — relay is off, nobody could answer it")
+            return true
+        }
+        let threadId = request.params["threadId"].stringValue
+        let thread = threadId.flatMap { tid in locked { threads[tid] } }
+        let cwd = thread?.cwd ?? request.params["cwd"].stringValue ?? ""
+        let token = "\(request.childToken)-\(Self.idSafe(request.id.description))"
         let event = InterventionEvent(
-            id: "codex-\(serverRequestId)",
-            sessionId: sessionId,
+            id: "codex-req-\(token)",
+            sessionId: threadId ?? "codex-unknown-\(token)",
             cwd: cwd,
-            projectName: projectName,
-            kind: kind,
+            projectName: cwd.isEmpty ? "Codex" : CodexInjector.projectName(forCwd: cwd),
+            kind: .permission,
             openedAt: Date(),
-            context: context,
-            transcriptPath: "",
+            context: Self.approvalContext(request.params),
+            transcriptPath: thread?.path ?? "",
             backend: .codex,
-            source: source,
+            source: Self.mapSource(thread?.source),
             subtype: subtype
         )
-
-        stateLock.withLock {
+        let callback: ((InterventionEvent) -> Void)? = locked {
             pendingInterventions[event.id] = event
-            interventionByServerRequest[serverRequestId] = event.id
-            // If a turn is associated with this thread, mark it as waiting.
-            if let tid = threadId, watchedThreadIDs.contains(tid) {
-                threadStates[tid] = (kind == .permission) ? .waitingOnApproval : .waitingOnUser
-            }
-            rebuildSnapshot()
+            serverRequests[event.id] = request
+            rebuildSnapshotLocked()
+            return _onNewIntervention
         }
-
-        Logger.shared.log("CodexBackend: OPENED \(kind.rawValue) in \(projectName) (req=\(serverRequestId.prefix(8)))")
-        relayClient?.sendInterventionOpened(event)
+        Logger.shared.log("CodexBackend: OPENED approval (\(subtype)) in \(event.projectName) req=\(request.id)")
+        relay.sendInterventionOpened(event)
+        callback?(event)
+        return true
     }
 
-    private func buildContextSnippet(params: AppServerProtocol.JSON, kind: InterventionKind) -> String {
-        // Try a few likely shapes from the protocol docs. Order matters:
-        // most-specific to most-generic.
+    private func closeResolvedServerRequest(params: JSON) {
+        guard let rid = AppServerProtocol.RequestID(json: params.first("requestId", "id")) else { return }
+        let (ids, relay): ([String], RelaySink?) = locked {
+            let ids = serverRequests.filter { $0.value.id == rid }.map(\.key)
+            for id in ids {
+                serverRequests[id] = nil
+                pendingInterventions[id] = nil
+            }
+            if !ids.isEmpty { rebuildSnapshotLocked() }
+            return (ids, _relay)
+        }
+        for id in ids {
+            Logger.shared.log("CodexBackend: server request \(rid) resolved elsewhere — closing \(id)")
+            relay?.sendInterventionClosed(id: id, reason: "session_resolved")
+        }
+    }
+
+    static func approvalContext(_ params: JSON) -> String {
         if let cmd = params["command"].stringValue { return "$ \(cmd)" }
-        if let cmd = params["item"]["command"].stringValue { return "$ \(cmd)" }
-        if let file = params["filePath"].stringValue {
-            let reason = params["reason"].stringValue
-            return reason.map { "Edit \(file) — \($0)" } ?? "Edit \(file)"
+        if let argv = params["command"].arrayValue?.compactMap(\.stringValue), !argv.isEmpty {
+            return "$ \(argv.joined(separator: " "))"
         }
-        if let file = params["item"]["filePath"].stringValue {
-            let reason = params["reason"].stringValue ?? params["item"]["reason"].stringValue
-            return reason.map { "Edit \(file) — \($0)" } ?? "Edit \(file)"
-        }
-        if let prompt = params["prompt"].stringValue { return prompt }
-        if let reason = params["reason"].stringValue { return reason }
-        if let title = params["title"].stringValue { return title }
-        return kind == .permission ? "Codex is asking for approval" : "Codex is asking for input"
+        if let reason = params["reason"].stringValue, !reason.isEmpty { return reason }
+        return "Codex is asking for approval"
     }
 
-    private func closeInterventionForServerRequest(params: AppServerProtocol.JSON) {
-        let requestId = params["requestId"].stringValue ?? params["id"].stringValue
-        guard let rid = requestId else { return }
-        let interventionId: String? = stateLock.withLock {
-            let iid = interventionByServerRequest.removeValue(forKey: rid)
-            if let iid {
-                pendingInterventions[iid] = nil
-                rebuildSnapshot()
-            }
-            return iid
-        }
-        guard let iid = interventionId else { return }
-        Logger.shared.log("CodexBackend: serverRequest/resolved \(rid.prefix(8)) → closing intervention \(iid.prefix(20))")
-        relayClient?.sendInterventionClosed(id: iid, reason: "session_resolved")
+    /// Keeps intervention ids within the Worker's charset/length limits.
+    static func idSafe(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let mapped = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
+        return String(String(mapped).prefix(64))
     }
 
-    // MARK: Rate limit
+    // MARK: Rate limits
 
-    /// `account/rateLimits/updated` is emitted every time the server has
-    /// new usage data, not only when you hit the wall. We only treat it
-    /// as a `RateLimitEvent` when usage is at 100% — anything else is
-    /// just usage telemetry we don't need to act on.
-    private func handleRateLimitUpdate(params: AppServerProtocol.JSON) {
-        let limitId = params["limitId"].stringValue ?? "default"
-        let usedPercent: Double = {
-            switch params["usedPercent"] {
-            case .double(let d): return d
-            case .int(let i): return Double(i)
-            default: return 0
+    /// Caller holds `lock`. Applies the newest snapshot (rollout or pushed):
+    /// it stays in force until a newer snapshot says otherwise or its reset
+    /// passes. Returns an event only the first time a given limit is seen.
+    private func applyRateLimitLocked(now: Date) -> RateLimitEvent? {
+        let newest = [lastRolloutRateLimit, pushedRateLimit].compactMap { $0 }.max { $0.observedAt < $1.observedAt }
+        guard let snapshot = newest, let until = snapshot.limitedUntil, until > now else {
+            if let cleared = currentRateLimit {
+                Logger.shared.log("Codex rate limit cleared (was \(cleared.resetTimeText))")
+                currentRateLimit = nil
             }
-        }()
-        let resetsAtUnix = params["resetsAt"].intValue
-        Logger.shared.log("Codex account/rateLimits/updated limit=\(limitId) used=\(usedPercent)% resetsAt=\(resetsAtUnix ?? -1)")
-
-        guard usedPercent >= 100, let resetsAt = resetsAtUnix else { return }
-
-        // Attribute the rate limit to whichever thread we currently watch is
-        // freshest. ChatGPT account limits don't belong to a single thread,
-        // but the UI needs *some* project name to render a useful page.
-        let (sessionId, cwd, projectName) = stateLock.withLock {
-            () -> (String, String, String) in
-            let candidate = watchedThreadIDs
-                .compactMap { threads[$0] }
-                .sorted { ($0.updatedAt ?? 0) > ($1.updatedAt ?? 0) }
-                .first
-            let sid = candidate?.id ?? "codex"
-            let cwd = candidate?.cwd ?? ""
-            let proj = cwd.isEmpty ? "Codex" : InterventionDetector.projectName(forCwd: cwd)
-            return (sid, cwd, proj)
+            return nil
         }
-
-        let resetDate = Date(timeIntervalSince1970: TimeInterval(resetsAt))
-        let resetTimeText = Self.formatResetText(resetDate)
+        let key = "\(snapshot.limitId)-\(Int(until.timeIntervalSince1970) / 60)"
+        let firstSeen = rateLimitFirstSeen[key] ?? snapshot.observedAt
+        rateLimitFirstSeen = [key: firstSeen]
+        // Account-level: not tied to a thread or project, and never resumable.
         let event = RateLimitEvent(
-            sessionId: sessionId,
-            cwd: cwd,
-            projectName: projectName,
-            eventTime: Date(),
-            resetTime: resetDate,
-            resetTimeText: resetTimeText,
-            transcriptPath: ""
+            sessionId: "codex-account",
+            cwd: "",
+            projectName: "Codex account",
+            eventTime: firstSeen,
+            resetTime: until,
+            resetTimeText: Self.formatResetText(until),
+            transcriptPath: "",
+            backend: .codex
         )
-
-        stateLock.withLock {
-            currentRateLimit = event
-            rebuildSnapshot()
-        }
-
-        Logger.shared.log("Codex rate-limit detected: limit=\(limitId) project=\(projectName) resetAt=\(resetDate)")
-        onNewRateLimit?(event)
+        currentRateLimit = event
+        guard notifiedRateLimitKeys.insert(key).inserted else { return nil }
+        if notifiedRateLimitKeys.count > 100 { notifiedRateLimitKeys = [key] }
+        Logger.shared.log("Codex rate limit reached: limit=\(snapshot.limitId) \(event.resetTimeText)")
+        return event
     }
 
     private static func formatResetText(_ d: Date) -> String {
         let df = DateFormatter()
-        df.dateStyle = .none
+        df.dateStyle = Calendar.current.isDateInToday(d) ? .none : .medium
         df.timeStyle = .short
         return "resets \(df.string(from: d))"
     }
 
-    private func updateThreadState(id: String, from flags: [String]) {
-        let waiting = flags.first(where: isWaitingFlag)
-        let newState: AgentSessionState
-        switch waiting {
-        case "waitingOnApproval":
-            newState = .waitingOnApproval
-        case "waitingOnUser":
-            newState = .waitingOnUser
-        case .some:
-            newState = .waitingOnUser  // unknown waiting flag — treat as waiting on user
-        case nil:
-            // No waiting flags. If a turn is in flight we'd have seen
-            // turn/started; default to idle until proven otherwise.
-            newState = .idle
-        }
-        stateLock.withLock {
-            threadFlags[id] = flags
-            threadStates[id] = newState
-            rebuildSnapshot()
+    // MARK: Replies (replyQueue)
+
+    /// Called by the Coordinator on a background queue; deliveries are
+    /// serialised here so keystrokes for two replies never interleave.
+    func handleReply(_ reply: RelayReply) {
+        if Thread.isMainThread {
+            replyQueue.async { [weak self] in self?.deliver(reply) }
+        } else {
+            replyQueue.sync { deliver(reply) }
         }
     }
 
-    private func setState(id: String, to state: AgentSessionState) {
-        stateLock.withLock {
-            guard watchedThreadIDs.contains(id) else { return }
-            threadStates[id] = state
-            rebuildSnapshot()
+    private func deliver(_ reply: RelayReply) {
+        let id = reply.interventionId
+        // Blocking-hook replies are answered by the hook itself.
+        guard !id.hasPrefix("hookpre-") else { return }
+        // A repeat of a reply whose background resume is still running:
+        // its result is reported when that run finishes.
+        guard !execGate.isReplyInFlight(id) else {
+            Logger.shared.log("CodexBackend: reply \(id.prefix(48)) ignored — background resume already running for it")
+            return
+        }
+        let (request, pending, cfg): (AppServerClient.ServerRequest?, InterventionEvent?, Config) = locked {
+            (serverRequests[id], pendingInterventions[id], _config)
+        }
+        if let request {
+            finishReply(id, outcome: answerServerRequest(request, reply: reply))
+            return
+        }
+        switch deliverToSession(reply: reply, pending: pending, config: cfg) {
+        case .finished(let outcome):
+            finishReply(id, outcome: outcome)
+        case .needsExecResume(let job):
+            startExecResume(job, interventionId: id)
         }
     }
 
-    private func isWaitingFlag(_ f: String) -> Bool {
-        f.hasPrefix("waitingOn")
+    /// Hands a background resume to `execQueue` so `replyQueue` (and the
+    /// low-battery pause/resume behind it) never waits on an agent turn.
+    private func startExecResume(_ job: CodexInjector.ExecResumeJob, interventionId id: String) {
+        switch execGate.begin(threadId: job.threadId, interventionId: id) {
+        case .duplicateReply:
+            Logger.shared.log("CodexBackend: reply \(id.prefix(48)) ignored — background resume already running for it")
+            return
+        case .threadBusy:
+            finishReply(id, outcome: .failure("A background Codex resume is already running for this session — reply once it finishes",
+                                              method: CodexInjector.Method.execResume))
+            return
+        case .started:
+            break
+        }
+        Logger.shared.log("CodexBackend: reply \(id.prefix(48)) → background resume queued for thread \(job.threadId.prefix(8))")
+        execQueue.async { [weak self] in
+            guard let self else { return }
+            defer { self.execGate.end(threadId: job.threadId, interventionId: id) }
+            // Re-checked right before launching: the turn must still be over
+            // (runExecResume re-checks that no live codex owns the thread).
+            let outcome: CodexDeliveryOutcome
+            let summary = job.rolloutPath.map { CodexRollout.summarizeTail(of: URL(fileURLWithPath: $0)) } ?? CodexRollout.Summary()
+            if !Self.execResumeMayStart(summary: summary) {
+                outcome = .failure("Codex started working on this session again — reply once the turn finishes",
+                                   method: CodexInjector.Method.execResume)
+            } else {
+                outcome = CodexInjector.runExecResume(job)
+            }
+            self.finishReply(id, outcome: outcome)
+        }
     }
 
-    // MARK: Snapshot building
+    /// Pure. A queued background resume may still start only while the
+    /// thread's latest turn is over and nothing waits on a prompt.
+    static func execResumeMayStart(summary: CodexRollout.Summary) -> Bool {
+        summary.pendingRequest == nil && (summary.phase == .completed || summary.phase == .aborted)
+    }
 
-    /// Caller must hold `stateLock`.
-    private func rebuildSnapshot() {
+    /// Reports one reply's result to the phone and, on success, closes its
+    /// page. Any queue.
+    private func finishReply(_ id: String, outcome: CodexDeliveryOutcome) {
+        Logger.shared.log("CodexBackend: reply \(id.prefix(48)) → method=\(outcome.method) success=\(outcome.success) — \(outcome.detail)")
+        let relay = self.relay
+        relay?.sendReplyInjected(interventionId: id, method: outcome.method, success: outcome.success,
+                                 detail: outcome.detail, output: outcome.output)
+        guard outcome.success else { return }
+        relay?.sendInterventionClosed(id: id, reason: "replied")
+        locked {
+            pendingInterventions[id] = nil
+            serverRequests[id] = nil
+            if id.hasPrefix("codex-idle-") { suppressedIdleIds.insert(id) }
+            rebuildSnapshotLocked()
+        }
+    }
+
+    private func answerServerRequest(_ request: AppServerClient.ServerRequest, reply: RelayReply) -> CodexDeliveryOutcome {
+        let method = "codex_app_server"
+        let hasText = !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let decision: String
+        switch reply.action {
+        case "approve": decision = "accept"
+        case "deny": decision = "decline"
+        case "carry_on": return .failure("This page needs Approve or Deny", method: method)
+        default:
+            // A typed answer to an approval means "no, do this instead"
+            // (same as Claude's Esc + text); the protocol can't carry text.
+            guard hasText else { return .failure("Empty reply — nothing to send", method: method) }
+            decision = "decline"
+        }
+        guard client.respond(to: request, result: AppServerProtocol.ApprovalResponse(decision: decision)) else {
+            return .failure("The Codex app-server restarted — that request is gone", method: method)
+        }
+        if decision == "accept" {
+            return CodexDeliveryOutcome(method: method, success: true, detail: "Approved in Codex", output: nil)
+        }
+        let detail = (reply.action == "deny") ? "Declined in Codex" : "Declined in Codex (approvals can't carry a message)"
+        return CodexDeliveryOutcome(method: method, success: true, detail: detail, output: nil)
+    }
+
+    private func deliverToSession(reply: RelayReply, pending: InterventionEvent?, config cfg: Config) -> CodexInjector.DeliveryStep {
+        let threadId = pending?.sessionId ?? reply.sessionId ?? ""
+        guard !threadId.isEmpty, let thread = lookupThread(threadId),
+              let cwd = thread.cwd, !cwd.isEmpty else {
+            return .finished(.failure("Page no longer knows this Codex session — reply on the Mac"))
+        }
+        // A background resume is writing to this thread (possibly before its
+        // first rollout line): nothing else may type into it meanwhile.
+        if execGate.isThreadBusy(thread.id) {
+            return .finished(.failure("A background Codex resume is running for this session — reply once it finishes"))
+        }
+        // Fresh read (not the scan cache): the decision must reflect the
+        // rollout as it is right now.
+        let summary: CodexRollout.Summary = {
+            guard let path = thread.path, !path.isEmpty else { return CodexRollout.Summary() }
+            return CodexRollout.summarizeTail(of: URL(fileURLWithPath: path))
+        }()
+        let plan = Self.replyPlan(action: reply.action, text: reply.text,
+                                  kind: pending?.kind.rawValue ?? reply.kind,
+                                  summary: summary)
+        switch plan {
+        case .refuse(let why):
+            return .finished(.failure(why))
+        case .type(let text):
+            return CodexInjector.deliver(text: text, threadId: thread.id, cwd: cwd,
+                                         rolloutPath: thread.path, codexPath: cfg.codexPath,
+                                         allowExecResume: cfg.headlessResumeFallbackEnabled,
+                                         cwdFallback: .forSource(Self.mapSource(thread.source)))
+        }
+    }
+
+    enum ReplyPlan: Equatable {
+        case type(String)
+        case refuse(String)
+    }
+
+    /// Whether (and what) to type into a Codex session. Typing is only safe
+    /// once the latest turn has ended: mid-turn an approval overlay may be on
+    /// screen, and it takes letters as hotkeys ("y" approves).
+    static func replyPlan(action: String?, text: String, kind: String?, summary: CodexRollout.Summary) -> ReplyPlan {
+        if let kind, ["permission", "plan", "approval"].contains(kind) {
+            return .refuse("Answer Codex approval prompts on your Mac — Page can't approve them remotely yet")
+        }
+        if summary.pendingRequest != nil {
+            return .refuse("Codex is waiting on a prompt — answer it on the Mac")
+        }
+        switch summary.phase {
+        case .inTurn:
+            return .refuse("Codex is still working — reply once the turn finishes")
+        case .unknown:
+            return .refuse("Couldn't confirm Codex is waiting for input — reply on the Mac")
+        case .completed, .aborted:
+            break
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return .type(trimmed) }
+        switch action {
+        case "approve": return .type("yes, proceed")
+        case "deny": return .type("no, stop")
+        case "carry_on": return .type("carry on")
+        default: return .refuse("Empty reply — nothing to send")
+        }
+    }
+
+    /// Thread record from the last listing, else asked of the app-server.
+    private func lookupThread(_ id: String) -> ThreadSummary? {
+        if let t = locked({ threads[id] }) { return t }
+        guard client.isReady else { return nil }
+        let box = LockedBox<ThreadSummary>()
+        let done = DispatchSemaphore(value: 0)
+        let client = self.client
+        Task.detached {
+            let result: AppServerProtocol.ThreadReadResult? = try? await client.call(
+                method: "thread/read",
+                params: AppServerProtocol.ThreadReadParams(threadId: id),
+                timeout: 5
+            )
+            box.value = result?.thread
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + 7)
+        return box.value
+    }
+
+    // MARK: Snapshot
+
+    /// Caller holds `lock`.
+    private func rebuildSnapshotLocked(now: Date = Date()) {
         let sessions: [AgentSession] = watchedThreadIDs.compactMap { id in
             guard let t = threads[id] else { return nil }
-            let source = mapSource(t.source)
-            let lastActivity = t.updatedAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
             let state = threadStates[id] ?? .idle
             return AgentSession(
                 backend: .codex,
                 sessionId: t.id,
                 cwd: t.cwd,
                 title: t.displayTitle,
-                source: source,
+                source: Self.mapSource(t.source),
                 state: state,
-                lastActivityAt: lastActivity,
-                activeFlags: threadFlags[id] ?? [],
-                supportsRemoteReply: false  // Phase 5.
+                lastActivityAt: threadActivity[id] ?? t.updatedAt.map { Date(timeIntervalSince1970: Self.epochSeconds($0)) },
+                activeFlags: state == .waitingOnApproval ? ["waitingOnApproval"] : [],
+                supportsRemoteReply: !(t.cwd ?? "").isEmpty
             )
         }.sorted { ($0.lastActivityAt ?? .distantPast) > ($1.lastActivityAt ?? .distantPast) }
 
-        // Hold the no-sleep assertion if any watched session is mid-turn
-        // or waiting for human input, OR we have pending interventions on
-        // the phone (someone needs to act, don't sleep on them).
-        let wantsPowerFromSessions = sessions.contains { session in
-            switch session.state {
-            case .active, .waitingOnUser, .waitingOnApproval: return true
-            case .idle, .rateLimited, .interrupted, .failed, .offline: return false
-            }
-        }
-        let wantsPower = wantsPowerFromSessions || !pendingInterventions.isEmpty
+        // Awake while a session works or waits, and for a bounded time while
+        // a page waits for its reply (so the reply can still be delivered).
+        let sessionsWantPower = sessions.contains { [.active, .waitingOnUser, .waitingOnApproval].contains($0.state) }
+        let holdWindow = _config.holdAwakeForPendingPageMinutes * 60
+        let pagesWantPower = holdWindow > 0
+            && pendingInterventions.values.contains { now.timeIntervalSince($0.openedAt) < holdWindow }
 
         lastSnapshot = AgentBackendSnapshot(
             backendID: .codex,
             displayName: displayName,
             sessions: sessions,
-            wantsPowerAssertion: wantsPower,
-            pendingInterventions: Array(pendingInterventions.values),
+            wantsPowerAssertion: sessionsWantPower || pagesWantPower,
+            pendingInterventions: pendingInterventions.values.sorted { $0.openedAt < $1.openedAt },
             currentRateLimit: currentRateLimit
         )
     }
 
-    private func mapSource(_ raw: String?) -> AgentSessionSource {
+    static func mapSource(_ raw: String?) -> AgentSessionSource {
         switch raw?.lowercased() {
         case "cli": return .terminal
         case "vscode": return .vscode
@@ -654,275 +1127,571 @@ final class CodexBackend: AgentBackend {
         default: return .unknown
         }
     }
-}
 
-private extension NSLock {
-    func withLock<R>(_ body: () -> R) -> R {
-        lock()
-        defer { unlock() }
-        return body()
+    @discardableResult
+    private func locked<R>(_ body: () throws -> R) rethrows -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
     }
 }
 
-/// Tails Codex rollout JSONL files for the watched threads to detect
-/// "task complete, no follow-up" → the same idle / waiting-on-user state
-/// the Claude path detects from transcripts.
-///
-/// Why this exists despite Phase 4 already wiring app-server notifications:
-/// our `codex app-server` child is isolated from sibling `codex` CLI /
-/// desktop processes — they each run their own embedded backend, so we
-/// only see `turn/*` events for threads our app-server actually drives.
-/// The rollout JSONL files, by contrast, are written by whichever process
-/// owns the session and are observable by anyone with read access.
-///
-/// The Codex format is more explicit than Claude's: every line is
-/// `{timestamp, type, payload}` and the unambiguous "I'm done, waiting on
-/// you" marker is `event_msg` with `payload.type == "task_complete"` as
-/// the latest event in the file.
-final class CodexIdleDetector {
-    var onNewEvent: ((InterventionEvent) -> Void)?
-    var onResolved: ((String) -> Void)?
+/// Tiny thread-safe slot for handing a value back from a Task.
+private final class LockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T?
+    var value: T? {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+}
 
-    private(set) var currentlyPending: [String: InterventionEvent] = [:]
-    private let queue = DispatchQueue(label: "ClaudePowerMode.CodexIdleDetector")
-    private let idleThresholdSeconds: TimeInterval = 90
-    private let settleSeconds: TimeInterval = 8
-    /// Don't keep paging the user about idle sessions they've clearly
-    /// abandoned. If the rollout hasn't moved in this long, the page
-    /// auto-resolves rather than being re-emitted every Mac restart.
-    private let maxIdleAgeSeconds: TimeInterval = 4 * 3600
-    /// (path → (mtime, last-eval)). Skips re-reading a rollout when
-    /// its mtime is unchanged and we're past the settle threshold.
-    private var evalCache: [String: (mtime: Date, event: InterventionEvent?)] = [:]
+// MARK: - Rollout tail analysis
 
-    struct WatchedThread {
-        let threadId: String
-        let rolloutPath: String
-        let cwd: String
-        let source: AgentSessionSource
+/// Reads the end of a Codex rollout JSONL and summarises where the session
+/// is. Every line is `{timestamp, type, payload}`. Verified against real
+/// rollouts (codex 0.13x–0.14x):
+///   - a turn starts with `event_msg/task_started` and ends with
+///     `event_msg/task_complete` (carries `last_agent_message`) or
+///     `event_msg/turn_aborted` (the user interrupted);
+///   - `response_item` lines (messages, tool calls, outputs) only occur
+///     inside a turn;
+///   - housekeeping can follow a turn's end without starting a new one
+///     (`thread_settings_applied` when the user changes settings), and
+///     `token_count`/`world_state`/`turn_context` carry no phase;
+///   - approval requests are NOT persisted. The `*_approval_request` /
+///     `request_user_input` handling below is forward-compatibility only.
+enum CodexRollout {
+    struct Summary: Equatable {
+        enum Phase: Equatable {
+            case unknown
+            case inTurn
+            case completed
+            case aborted
+        }
+        enum PendingRequest: Equatable {
+            case approval(String)
+            case userInput(String)
+        }
+
+        var phase: Phase = .unknown
+        /// Timestamp of the line that ended the latest turn.
+        var turnEndedAt: Date?
+        var lastAgentMessage: String?
+        var pendingRequest: PendingRequest?
+        /// Latest rate-limit snapshot (from `token_count`).
+        var rateLimit: CodexRateLimitSnapshot?
     }
 
-    func scan(threads: [WatchedThread]) {
-        var nowEvents: [InterventionEvent] = []
-        for t in threads {
-            if let ev = checkForIdle(t) {
-                nowEvents.append(ev)
-            }
+    static let tailBytes = 64 * 1024
+    static let extendedTailBytes = 1024 * 1024
+
+    static func summarizeTail(of url: URL) -> Summary {
+        guard let tail = readTail(of: url, maxBytes: tailBytes) else { return Summary() }
+        let summary = summarize(text: tail.text)
+        // One huge tool output can fill the whole window with a partial line.
+        if summary.phase == .unknown, tail.truncated,
+           let wider = readTail(of: url, maxBytes: extendedTailBytes) {
+            return summarize(text: wider.text)
         }
-
-        queue.sync {
-            let nowIds = Set(nowEvents.map(\.id))
-            let previousIds = Set(currentlyPending.keys)
-
-            for e in nowEvents where currentlyPending[e.id] == nil {
-                currentlyPending[e.id] = e
-                onNewEvent?(e)
-                Logger.shared.log("CodexBackend: OPENED idle in \(e.projectName) (thread \(e.sessionId.prefix(8)))")
-            }
-
-            for id in previousIds.subtracting(nowIds) {
-                if let e = currentlyPending.removeValue(forKey: id) {
-                    onResolved?(id)
-                    Logger.shared.log("CodexBackend: RESOLVED idle in \(e.projectName)")
-                }
-            }
-        }
+        return summary
     }
 
-    /// Remove pending interventions for threads we no longer watch — and
-    /// notify so the phone inbox can be cleaned up.
-    func dropThreads(notIn keep: Set<String>) {
-        let toRemove = queue.sync { () -> [InterventionEvent] in
-            let stale = currentlyPending.values.filter { !keep.contains($0.sessionId) }
-            for s in stale { currentlyPending[s.id] = nil }
-            return Array(stale)
-        }
-        for e in toRemove {
-            onResolved?(e.id)
-            Logger.shared.log("CodexBackend: RESOLVED idle in \(e.projectName) (thread dropped)")
-        }
-    }
-
-    private func checkForIdle(_ t: WatchedThread) -> InterventionEvent? {
-        guard !t.rolloutPath.isEmpty else { return nil }
-        let url = URL(fileURLWithPath: t.rolloutPath)
-        guard let vals = try? url.resourceValues(forKeys: [
-            .contentModificationDateKey, .isRegularFileKey
-        ]),
-              vals.isRegularFile == true,
-              let mtime = vals.contentModificationDate else { return nil }
-
-        let age = Date().timeIntervalSince(mtime)
-        if age < settleSeconds { return nil }
-        if age < idleThresholdSeconds { return nil }
-        // Auto-resolve very old idle states. Without this, every Mac
-        // restart re-emits historic "Codex is idle" pages from yesterday's
-        // sessions because the IdleDetector's in-memory state is wiped and
-        // the rollout file still matches the idle pattern.
-        if age > maxIdleAgeSeconds { return nil }
-
-        // mtime cache — if nothing's changed since last evaluation and
-        // we're past the idle threshold, the answer can't change. Skip
-        // the file read.
-        if let cached = evalCache[t.rolloutPath], cached.mtime == mtime {
-            return cached.event
-        }
-
-        // Tail-read: only the last 16 KB. The detector only walks
-        // suffix(30) lines anyway.
-        let text = Self.readTail(of: url, maxBytes: 16_384) ?? ""
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
-        guard !lines.isEmpty else {
-            evalCache[t.rolloutPath] = (mtime, nil)
-            return nil
-        }
-
-        // Walk the tail; track the index of the latest `task_complete` and
-        // the latest "meaningful" item (any response_item). Idle iff a
-        // task_complete exists and no response_item appears after it.
-        var taskCompleteIdx: Int?
-        var lastMeaningfulIdx: Int?
-        var lastAssistantText = ""
-
-        for (i, line) in lines.suffix(30).enumerated() {
-            guard let d = line.data(using: .utf8),
-                  let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { continue }
-            let type = obj["type"] as? String
-            let payload = obj["payload"] as? [String: Any] ?? [:]
-
-            if type == "event_msg" {
-                let pType = payload["type"] as? String
-                if pType == "task_complete" {
-                    taskCompleteIdx = i
-                    if let lam = payload["last_agent_message"] as? String, !lam.isEmpty {
-                        lastAssistantText = String(lam.prefix(280))
+    static func summarize(text: String) -> Summary {
+        var s = Summary()
+        let decoder = JSONDecoder()
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let obj = try? decoder.decode(AppServerProtocol.JSON.self, from: Data(line.utf8)) else { continue }
+            let timestamp = obj["timestamp"].stringValue.flatMap(parseTimestamp)
+            let payload = obj["payload"]
+            switch obj["type"].stringValue {
+            case "event_msg":
+                switch payload["type"].stringValue {
+                case "task_started", "turn_started":
+                    s.phase = .inTurn
+                    s.pendingRequest = nil
+                    s.lastAgentMessage = nil
+                case "task_complete", "turn_complete":
+                    s.phase = .completed
+                    s.pendingRequest = nil
+                    s.turnEndedAt = timestamp ?? epochDate(payload["completed_at"]) ?? s.turnEndedAt
+                    if let message = payload["last_agent_message"].stringValue, !message.isEmpty {
+                        s.lastAgentMessage = message
                     }
-                }
-            } else if type == "response_item" {
-                lastMeaningfulIdx = i
-                if let role = payload["role"] as? String, role == "assistant",
-                   let content = payload["content"] as? [[String: Any]] {
-                    for item in content {
-                        if let txt = item["text"] as? String, !txt.isEmpty {
-                            lastAssistantText = String(txt.prefix(280))
-                        }
+                case "turn_aborted":
+                    s.phase = .aborted
+                    s.pendingRequest = nil
+                    s.turnEndedAt = timestamp ?? epochDate(payload["completed_at"]) ?? s.turnEndedAt
+                case "exec_approval_request":
+                    s.phase = .inTurn
+                    s.pendingRequest = .approval(commandText(payload["command"]).map { "$ \($0)" } ?? "Codex wants to run a command")
+                case "apply_patch_approval_request":
+                    s.phase = .inTurn
+                    s.pendingRequest = .approval("Codex wants to edit files")
+                case "request_user_input":
+                    s.phase = .inTurn
+                    let question = payload["questions"].arrayValue?.first?["question"].stringValue
+                    s.pendingRequest = .userInput(question ?? "Codex is asking a question")
+                case "token_count":
+                    let limits = payload["rate_limits"]
+                    if !limits.isNull, let snapshot = CodexRateLimitSnapshot.parse(limits, observedAt: timestamp ?? Date()) {
+                        s.rateLimit = snapshot
                     }
+                default:
+                    break   // housekeeping; carries no phase
                 }
+            case "response_item":
+                // Activity: we're in a turn (even if its start scrolled out of
+                // the tail), and any open request has been answered.
+                s.phase = .inTurn
+                s.pendingRequest = nil
+                if payload["type"].stringValue == "message", payload["role"].stringValue == "assistant",
+                   let parts = payload["content"].arrayValue {
+                    let text = parts.compactMap { $0["text"].stringValue }.filter { !$0.isEmpty }.last
+                    if let text { s.lastAgentMessage = text }
+                }
+            default:
+                break
             }
         }
-
-        guard let tc = taskCompleteIdx else {
-            evalCache[t.rolloutPath] = (mtime, nil)
-            return nil
-        }
-        if let lm = lastMeaningfulIdx, lm > tc {
-            evalCache[t.rolloutPath] = (mtime, nil)
-            return nil
-        }
-
-        let project = InterventionDetector.projectName(forCwd: t.cwd)
-        // ID derived from mtime so each fresh idle window gets a new id
-        // (resolves cleanly when the user replies → new turn → new mtime).
-        let id = "codex-idle-\(t.threadId.prefix(8))-\(Int(mtime.timeIntervalSince1970))"
-        let evt = InterventionEvent(
-            id: id,
-            sessionId: t.threadId,
-            cwd: t.cwd,
-            projectName: project,
-            kind: .idle,
-            openedAt: mtime,
-            context: lastAssistantText.isEmpty ? "Codex finished a turn — waiting for input" : lastAssistantText,
-            transcriptPath: t.rolloutPath,
-            backend: .codex,
-            source: t.source
-        )
-        evalCache[t.rolloutPath] = (mtime, evt)
-        return evt
+        return s
     }
 
-    /// Last `maxBytes` of a file. Drops the first partial line when we
-    /// seek into the middle so the caller can split-by-newline safely.
-    private static func readTail(of url: URL, maxBytes: Int) -> String? {
+    /// Last `maxBytes` of a file. When it starts mid-file, the partial first
+    /// line is cut at the byte level *before* decoding, so a seek that lands
+    /// inside a multi-byte character can't make the whole tail undecodable.
+    static func readTail(of url: URL, maxBytes: Int) -> (text: String, truncated: Bool)? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        let size = (try? handle.seekToEnd()) ?? 0
-        let seekedFromStart = size <= UInt64(maxBytes)
-        let offset = seekedFromStart ? 0 : size - UInt64(maxBytes)
-        try? handle.seek(toOffset: offset)
-        guard let data = try? handle.readToEnd(),
-              var text = String(data: data, encoding: .utf8) else { return nil }
-        if !seekedFromStart, let nl = text.firstIndex(of: "\n") {
-            text = String(text[text.index(after: nl)...])
+        guard let size = try? handle.seekToEnd() else { return nil }
+        let truncated = size > UInt64(maxBytes)
+        do {
+            try handle.seek(toOffset: truncated ? size - UInt64(maxBytes) : 0)
+        } catch {
+            return nil
         }
-        return text
+        let data = (try? handle.readToEnd()) ?? Data()
+        return (tailText(from: data, droppingPartialFirstLine: truncated), truncated)
+    }
+
+    static func tailText(from data: Data, droppingPartialFirstLine: Bool) -> String {
+        var slice = data[...]
+        if droppingPartialFirstLine {
+            guard let nl = slice.firstIndex(of: 0x0A) else { return "" }
+            slice = slice[slice.index(after: nl)...]
+        }
+        // Lossy: a stray invalid byte costs one line, not the whole tail.
+        return String(decoding: slice, as: UTF8.self)
+    }
+
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let plainFormatter = ISO8601DateFormatter()
+
+    static func parseTimestamp(_ s: String) -> Date? {
+        fractionalFormatter.date(from: s) ?? plainFormatter.date(from: s)
+    }
+
+    private static func epochDate(_ v: AppServerProtocol.JSON) -> Date? {
+        guard let n = v.doubleValue, n > 0 else { return nil }
+        return Date(timeIntervalSince1970: n > 10_000_000_000 ? n / 1000 : n)
+    }
+
+    private static func commandText(_ v: AppServerProtocol.JSON) -> String? {
+        if let s = v.stringValue { return s }
+        if let argv = v.arrayValue?.compactMap(\.stringValue), !argv.isEmpty { return argv.joined(separator: " ") }
+        return nil
     }
 }
 
-/// Live-`codex` filter — analog of `liveClaudeSessionIds` from the Claude
-/// path. For Codex we only need the cwds, since `thread/list` already
-/// knows the thread→cwd mapping.
-enum CodexProcessMonitor {
-    static func liveCodexCwds() -> Set<String> {
-        let pids = pgrepCodex()
-        var cwds: Set<String> = []
-        for pid in pids {
-            if let cwd = lsofCwd(pid: pid) {
-                cwds.insert(cwd)
-            }
-        }
-        return cwds
+// MARK: - Rate limits
+
+/// A Codex `RateLimitSnapshot`, in either spelling: snake_case in rollout
+/// `token_count` events (`{limit_id, primary: {used_percent, resets_at},
+/// secondary, rate_limit_reached_type}`), camelCase over the protocol
+/// (`account/rateLimits/updated` → `{rateLimits: {limitId, primary: {usedPercent,
+/// resetsAt}, …}}`), plus the flat `{limitId, usedPercent, resetsAt}` an
+/// older spec described.
+struct CodexRateLimitSnapshot: Equatable {
+    struct Window: Equatable {
+        let usedPercent: Double
+        let resetsAt: Date?
     }
 
-    private static func pgrepCodex() -> [Int32] {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        task.arguments = ["-fl", "codex"]
-        let out = Pipe()
-        task.standardOutput = out
-        task.standardError = Pipe()
-        do { try task.run() } catch { return [] }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        let myPid = ProcessInfo.processInfo.processIdentifier
+    let limitId: String
+    let windows: [Window]
+    let reachedType: String?
+    let observedAt: Date
 
-        var pids: [Int32] = []
-        for line in output.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-            guard let pidStr = parts.first, let pid = Int32(pidStr), pid != myPid else { continue }
-            let cmd = parts.count > 1 ? String(parts[1]) : ""
-            // Only count processes whose actual executable basename is
-            // `codex` — same logic as the Claude filter.
-            let cmdParts = cmd.split(separator: " ", omittingEmptySubsequences: true)
-            guard let exe = cmdParts.first else { continue }
-            let exeBasename = (String(exe) as NSString).lastPathComponent
-            guard exeBasename == "codex" else { continue }
-            // Skip our own app-server child (we don't want to watch its cwd
-            // as if it were a user-launched session).
-            if cmd.contains("app-server") { continue }
-            pids.append(pid)
-        }
-        return pids
+    /// When the account is blocked: the reset of the exhausted window(s)
+    /// (the later one if several). Nil when not limited, or limited with no
+    /// known reset (nothing useful to show or hold awake for).
+    var limitedUntil: Date? {
+        let exhausted = windows.filter { $0.usedPercent >= 100 }
+        guard !exhausted.isEmpty || reachedType != nil else { return nil }
+        let relevant = exhausted.isEmpty ? windows : exhausted
+        return relevant.compactMap(\.resetsAt).max()
     }
 
-    private static func lsofCwd(pid: Int32) -> String? {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        task.arguments = ["-a", "-d", "cwd", "-p", String(pid), "-Fn"]
-        let out = Pipe()
-        task.standardOutput = out
-        task.standardError = Pipe()
-        do { try task.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        task.waitUntilExit()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        // `lsof -Fn` prints `n<path>` lines. The cwd line starts with "n/".
-        for line in output.split(separator: "\n") {
-            if line.hasPrefix("n/") {
-                return String(line.dropFirst())
+    static func parse(_ snapshot: AppServerProtocol.JSON, observedAt: Date) -> CodexRateLimitSnapshot? {
+        guard snapshot.objectValue != nil else { return nil }
+        var windows: [Window] = []
+        for key in ["primary", "secondary"] {
+            let w = snapshot[key]
+            guard w.objectValue != nil, let used = w.first("used_percent", "usedPercent").doubleValue else { continue }
+            windows.append(Window(usedPercent: used, resetsAt: epochDate(w.first("resets_at", "resetsAt"))))
+        }
+        if windows.isEmpty, let used = snapshot.first("used_percent", "usedPercent").doubleValue {
+            windows.append(Window(usedPercent: used, resetsAt: epochDate(snapshot.first("resets_at", "resetsAt"))))
+        }
+        let reached = snapshot.first("rate_limit_reached_type", "rateLimitReachedType").stringValue
+        guard !windows.isEmpty || reached != nil else { return nil }
+        return CodexRateLimitSnapshot(
+            limitId: snapshot.first("limit_id", "limitId").stringValue ?? "codex",
+            windows: windows,
+            reachedType: reached,
+            observedAt: observedAt
+        )
+    }
+
+    static func parse(notificationParams params: AppServerProtocol.JSON, observedAt: Date) -> CodexRateLimitSnapshot? {
+        let nested = params["rateLimits"]
+        return parse(nested.isNull ? params : nested, observedAt: observedAt)
+    }
+
+    private static func epochDate(_ v: AppServerProtocol.JSON) -> Date? {
+        guard let n = v.doubleValue, n > 0 else { return nil }
+        return Date(timeIntervalSince1970: n > 10_000_000_000 ? n / 1000 : n)
+    }
+}
+
+// MARK: - Low-battery pause
+
+extension CodexBackend: BatteryPausable {
+    /// How one working Codex session is asked to pause.
+    enum PauseStrategy: Equatable {
+        /// Esc (interrupts the turn), then type the message once the
+        /// rollout shows the turn ended.
+        case interrupt
+        /// Type the message mid-turn. Only into a cmux pane whose composer
+        /// cmux reads as empty: an approval overlay takes letters as
+        /// hotkeys, so blind mid-turn typing could approve something.
+        case queue(reason: String)
+        case skip(String)
+    }
+
+    /// Pure.
+    static func pauseStrategy(terminal: CodexInjector.Terminal, mode: LowBatteryAction) -> PauseStrategy {
+        switch (mode, terminal) {
+        case (.off, _):
+            return .skip("low-battery action is off")
+        case (_, .unavailable(let why)):
+            return .skip(why)
+        case (.pause, .tmux), (.pause, .cmux):
+            return .interrupt
+        case (.afterTurn, .cmux):
+            return .queue(reason: "it stops after the current step")
+        case (.afterTurn, .tmux), (.afterTurn, .terminalApp):
+            return .skip("Codex can't be messaged mid-turn there without risking an approval hotkey")
+        case (.pause, .terminalApp):
+            return .skip("Terminal.app can't press Esc, and typing mid-turn could hit an approval hotkey")
+        }
+    }
+
+    func pauseBusySessions(message: String) -> [PausedSession] {
+        pauseBusySessions(message: message, mode: config.lowBatteryAction)
+    }
+
+    private var config: Config { locked { _config } }
+
+    /// Asks every working Codex terminal session to stop. Serialised with
+    /// phone replies on `replyQueue`; blocks the caller (never main).
+    func pauseBusySessions(message: String, mode: LowBatteryAction) -> [PausedSession] {
+        guard mode != .off else { return [] }
+        guard !Thread.isMainThread else {
+            Logger.shared.log("CodexBackend: low-battery pause refused on the main thread (would deadlock)")
+            return []
+        }
+        let paused = replyQueue.sync { runPause(message: message, mode: mode) }
+        locked { batteryPausedIds.formUnion(paused.map(\.sessionId)) }
+        return paused
+    }
+
+    private struct PauseWork {
+        let thread: ThreadSummary
+        let path: String
+        let cwd: String
+        let pid: Int32
+        let terminal: CodexInjector.Terminal
+        var strategy: PauseStrategy
+        var pausedAt = Date()
+        var escSent = false
+        var turnEnded = false
+    }
+
+    /// replyQueue only.
+    private func runPause(message: String, mode: LowBatteryAction) -> [PausedSession] {
+        let (known, states) = locked { (threads, threadStates) }
+        let table = ProcessRunner.processTable()
+        guard !table.isEmpty else { return [] }
+        let processes = CodexProcessScanner.liveSessions(table: table)
+        var work: [PauseWork] = []
+        for (id, state) in states where state == .active {
+            guard let t = known[id], let path = t.path, !path.isEmpty, let cwd = t.cwd, !cwd.isEmpty else { continue }
+            // Page's own background resume is driving this turn: it has no
+            // terminal, and Esc must not land in some other codex.
+            guard !execGate.isThreadBusy(id) else {
+                Logger.shared.log("CodexBackend: low-battery pause skipped \(id.prefix(8)) — background resume running")
+                continue
+            }
+            // Fresh read: the scan's state can be a tick old.
+            let summary = CodexRollout.summarizeTail(of: URL(fileURLWithPath: path))
+            guard summary.phase == .inTurn, summary.pendingRequest == nil else { continue }
+            guard case .tty(let tty, let pid) = CodexInjector.resolveTarget(
+                cwd: CodexProcessScanner.canonicalPath(cwd), rolloutPath: path, processes: processes,
+                cwdFallback: .forSource(Self.mapSource(t.source))) else {
+                Logger.shared.log("CodexBackend: low-battery pause skipped \(id.prefix(8)) — no terminal Page can reach")
+                continue
+            }
+            let terminal = CodexInjector.terminal(tty: tty, pid: pid, threadId: t.id, table: table)
+            let strategy = Self.pauseStrategy(terminal: terminal, mode: mode)
+            if case .skip(let why) = strategy {
+                Logger.shared.log("CodexBackend: low-battery pause skipped \(id.prefix(8)) — \(why)")
+                continue
+            }
+            work.append(PauseWork(thread: t, path: path, cwd: cwd, pid: pid, terminal: terminal, strategy: strategy))
+        }
+        guard !work.isEmpty else { return [] }
+
+        // 1. Esc each session that gets interrupted.
+        for i in work.indices where work[i].strategy == .interrupt {
+            work[i].pausedAt = Date()
+            let r = CodexInjector.interrupt(work[i].terminal)
+            if r.success {
+                work[i].escSent = true
+            } else {
+                Logger.shared.log("CodexBackend: low-battery Esc failed for \(work[i].thread.id.prefix(8)): \(r.detail)")
+                work[i].strategy = .skip(r.detail)
             }
         }
-        return nil
+
+        // 2. Wait (≤5 s, together) for the rollouts to show the turns ended.
+        var waiting = Set(work.indices.filter { work[$0].escSent })
+        let deadline = Date().addingTimeInterval(5)
+        while !waiting.isEmpty {
+            for i in waiting where Self.pauseTurnEnded(CodexRollout.summarizeTail(of: URL(fileURLWithPath: work[i].path)).phase) {
+                work[i].turnEnded = true
+                waiting.remove(i)
+            }
+            if waiting.isEmpty || Date() >= deadline { break }
+            usleep(200_000)
+        }
+
+        // 3. Message them. Never type into a turn that may still be running
+        //    behind an approval overlay (tmux can't see one).
+        var paused: [PausedSession] = []
+        for w in work {
+            let label = w.terminal.label
+            let detail: String
+            switch w.strategy {
+            case .skip(let why):
+                Logger.shared.log("CodexBackend: low-battery pause skipped \(w.thread.id.prefix(8)) — \(why)")
+                continue
+            case .interrupt where !w.turnEnded:
+                detail = "Pressed Esc in \(label), but couldn't confirm Codex stopped — no pause message sent"
+            case .interrupt where ProcessRunner.isForeground(pid: w.pid) != true:
+                // Re-checked right before typing: if codex exited or was
+                // suspended after the Esc, the text would reach the shell.
+                detail = "Interrupted in \(label) — the pause message wasn't sent (Codex is no longer the terminal's active job)"
+            case .interrupt:
+                let r = CodexInjector.type(message, into: w.terminal)
+                detail = r.success
+                    ? "Interrupted in \(label) and sent the pause message"
+                    : "Interrupted in \(label) — the pause message wasn't sent (\(r.detail))"
+            case .queue(let reason):
+                guard ProcessRunner.isForeground(pid: w.pid) == true else {
+                    Logger.shared.log("CodexBackend: low-battery message not queued for \(w.thread.id.prefix(8)): not the foreground job")
+                    continue
+                }
+                let r = CodexInjector.type(message, into: w.terminal)
+                guard r.success else {
+                    Logger.shared.log("CodexBackend: low-battery message not queued for \(w.thread.id.prefix(8)): \(r.detail)")
+                    continue
+                }
+                detail = "Queued the pause message in \(label) — \(reason)"
+            }
+            Logger.shared.log("CodexBackend: low-battery pause \(w.thread.id.prefix(8)) — \(detail)")
+            paused.append(PausedSession(
+                backend: .codex,
+                sessionId: w.thread.id,
+                projectName: CodexInjector.projectName(forCwd: w.cwd),
+                cwd: w.cwd,
+                pausedAt: w.escSent ? w.pausedAt : Date(),
+                detail: detail
+            ))
+        }
+        return paused
+    }
+
+    /// Pure. Whether the rollout proves an interrupted turn has ended. Only
+    /// an explicit end counts: `.unknown` (unreadable tail, no markers in
+    /// view) may still be a running turn behind an approval overlay, where
+    /// typed letters are hotkeys.
+    static func pauseTurnEnded(_ phase: CodexRollout.Summary.Phase) -> Bool {
+        phase == .completed || phase == .aborted
+    }
+
+    /// Types `message` into each paused Codex session that is still open in
+    /// a terminal, finished with its turn, and untouched since the pause.
+    func resumePausedSessions(_ sessions: [PausedSession], message: String) -> [String] {
+        let mine = sessions.filter { $0.backend == .codex }
+        guard !mine.isEmpty else { return [] }
+        guard !Thread.isMainThread else {
+            Logger.shared.log("CodexBackend: low-battery resume refused on the main thread (would deadlock)")
+            return []
+        }
+        let cfg = config
+        // Someone at the Mac may be typing in that very session (plugging
+        // the charger in is what triggers an automatic resume): then the
+        // composer must be seen to be empty, not merely "no draft seen".
+        let requireEmpty = UserPresence.isActive(within: Self.resumePresenceWindow(cfg))
+        if requireEmpty { Logger.shared.log("CodexBackend: low-battery resume — you're at the Mac, typing only into an empty composer") }
+        let resumedIds: [String] = replyQueue.sync {
+            let authored = BatteryPauseSupport.pageAuthoredMessages(extra: [message])
+            var resumed: [String] = []
+            for p in mine {
+                let id = p.sessionId.prefix(8)
+                guard let t = lookupThread(p.sessionId), let path = t.path, !path.isEmpty,
+                      let cwd = t.cwd, !cwd.isEmpty else {
+                    Logger.shared.log("CodexBackend: low-battery resume \(id) — thread unknown, skipped")
+                    continue
+                }
+                let url = URL(fileURLWithPath: path)
+                let summary = CodexRollout.summarizeTail(of: url)
+                guard summary.phase == .completed || summary.phase == .aborted, summary.pendingRequest == nil else {
+                    Logger.shared.log("CodexBackend: low-battery resume \(id) — not waiting for input, skipped")
+                    continue
+                }
+                guard let tail = CodexRollout.readTail(of: url, maxBytes: 2 * 1024 * 1024) else { continue }
+                let activity = Self.userActivity(since: p.pausedAt, rolloutTail: tail.text,
+                                                 tailIsComplete: !tail.truncated, pageAuthored: authored)
+                guard activity == .none else {
+                    Logger.shared.log("CodexBackend: low-battery resume \(id) — user activity \(activity), skipped")
+                    continue
+                }
+                // Live terminals only: a background exec resume of a closed
+                // session isn't "carrying on where it left off".
+                let r: CodexDeliveryOutcome
+                switch CodexInjector.deliver(text: message, threadId: t.id, cwd: cwd, rolloutPath: path,
+                                             codexPath: cfg.codexPath, allowExecResume: false,
+                                             cwdFallback: .forSource(Self.mapSource(t.source)),
+                                             requireEmptyComposer: requireEmpty) {
+                case .finished(let outcome): r = outcome
+                case .needsExecResume: r = .failure("Codex isn't open any more")  // unreachable: exec resume is off
+                }
+                Logger.shared.log("CodexBackend: low-battery resume \(id) success=\(r.success) — \(r.detail)")
+                if r.success { resumed.append(p.sessionId) }
+            }
+            return resumed
+        }
+        locked { batteryPausedIds.subtract(resumedIds) }
+        return resumedIds
+    }
+
+    /// How recently the user must have touched the Mac to count as "at the
+    /// Mac" for a low-battery resume (same window as ClaudeBackend).
+    static func resumePresenceWindow(_ cfg: Config) -> TimeInterval {
+        max(120, cfg.idlePageOnlyWhenAwaySeconds)
+    }
+
+    /// Pure. Whether the user wrote to a Codex thread after `pausedAt`.
+    /// Counts `user_message` events, completed UserMessage items and
+    /// `role: user` messages — except the context Codex injects itself
+    /// (`<environment_context>`, `<recommended_plugins>`, … all start with
+    /// "<") and Page's own messages.
+    static func userActivity(since pausedAt: Date, rolloutTail: String, tailIsComplete: Bool,
+                             pageAuthored: Set<String>) -> BatteryPauseSupport.UserActivity {
+        var earliest: Date?
+        for line in rolloutTail.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            let ts = (obj["timestamp"] as? String).flatMap(BatteryPauseSupport.parseTimestamp)
+            if let ts, earliest == nil || ts < earliest! { earliest = ts }
+            guard let ts, ts > pausedAt, let payload = obj["payload"] as? [String: Any] else { continue }
+            var texts: [String] = []
+            switch (obj["type"] as? String, payload["type"] as? String) {
+            case ("event_msg", "user_message"):
+                if let m = payload["message"] as? String { texts = [m] }
+            case ("event_msg", "item_completed"):
+                let item = payload["item"] as? [String: Any]
+                if let kind = item?["type"] as? String, kind.lowercased() == "usermessage" {
+                    texts = Self.textParts(item?["content"])
+                }
+            case ("response_item", "message") where payload["role"] as? String == "user":
+                texts = Self.textParts(payload["content"])
+            default:
+                continue
+            }
+            for text in texts.map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }) where !text.isEmpty {
+                if text.hasPrefix("<") { continue }
+                if pageAuthored.contains(BatteryPauseSupport.normalize(text)) { continue }
+                return .userActed
+            }
+        }
+        if !tailIsComplete, (earliest.map { $0 > pausedAt } ?? true) { return .unknown }
+        return .none
+    }
+
+    private static func textParts(_ content: Any?) -> [String] {
+        if let s = content as? String { return [s] }
+        guard let parts = content as? [[String: Any]] else { return [] }
+        return parts.compactMap { $0["text"] as? String }
+    }
+}
+
+/// One background `codex exec resume` per thread at a time, and one per
+/// reply. Thread-safe.
+final class CodexExecResumeGate: @unchecked Sendable {
+    enum Begin: Equatable {
+        case started
+        /// The same reply is already being resumed (a re-sent reply).
+        case duplicateReply
+        /// Another reply's resume is running on this thread.
+        case threadBusy
+    }
+
+    private let lock = NSLock()
+    private var threads = Set<String>()
+    private var replies = Set<String>()
+
+    func begin(threadId: String, interventionId: String) -> Begin {
+        lock.lock()
+        defer { lock.unlock() }
+        if replies.contains(interventionId) { return .duplicateReply }
+        if threads.contains(threadId) { return .threadBusy }
+        threads.insert(threadId)
+        replies.insert(interventionId)
+        return .started
+    }
+
+    func end(threadId: String, interventionId: String) {
+        lock.lock()
+        threads.remove(threadId)
+        replies.remove(interventionId)
+        lock.unlock()
+    }
+
+    func isThreadBusy(_ threadId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return threads.contains(threadId)
+    }
+
+    func isReplyInFlight(_ interventionId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return replies.contains(interventionId)
     }
 }

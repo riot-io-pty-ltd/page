@@ -11,11 +11,28 @@ import CoreImage
 /// app on every `./install.sh`. Each rebuild produces a different hash,
 /// which revokes Keychain access, which makes us silently mint a NEW
 /// token, which diverges from whatever the paired iPhone already knows.
-/// A 0600-permission file survives rebuilds cleanly. The token is not
-/// sensitive enough to warrant the Keychain dance — it can be rotated
-/// freely from the menu bar.
+/// A 0600-permission file survives rebuilds cleanly (the notification
+/// hook also reads it).
+///
+/// Rotating the token retires the old one on the Worker: the Coordinator
+/// sends `relay.retire` with the old token before switching, and the Worker
+/// then refuses that token (410 `token_retired`), so phones still paired
+/// with it are told to re-pair and a leaked old token reads nothing more.
+/// (A Worker older than that ignores the frame; there the old token keeps
+/// working until it is unused.)
 enum PairingTokenManager {
-    private static var tokenFileURL: URL {
+    /// Posted (on the thread that called `regenerate()`) after a new token
+    /// has been written. The Coordinator retires the old token (see
+    /// `previousTokenKey`) and reconnects the relay with the new one.
+    static let tokenDidChange = Notification.Name("PagePairingTokenDidChange")
+    /// `tokenDidChange` userInfo: the token that was replaced. Present only
+    /// when the new token was written and differs from it, so a failed
+    /// write never retires the pairing still in use.
+    static let previousTokenKey = "previousToken"
+
+    private static let lock = NSLock()
+
+    static var tokenFileURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = appSupport.appendingPathComponent("ClaudePowerMode", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -28,10 +45,13 @@ enum PairingTokenManager {
     /// Returns existing token, or generates + stores a fresh one. Migrates
     /// from Keychain on first run after the file-storage switch.
     static func currentToken() -> String {
+        lock.lock()
+        defer { lock.unlock() }
         if let t = readFromFile() { return t }
-        if let t = readFromKeychain() {
-            // First-run migration from old storage.
-            store(t)
+        if let t = readFromKeychain(), store(t) {
+            // First-run migration from old storage. Delete the Keychain copy
+            // so a missing file can never resurrect a rotated-away token.
+            deleteFromKeychain()
             return t
         }
         let fresh = generate()
@@ -39,23 +59,42 @@ enum PairingTokenManager {
         return fresh
     }
 
+    /// Mints and stores a new token, then posts `tokenDidChange`. Paired
+    /// phones must re-scan.
+    @discardableResult
     static func regenerate() -> String {
+        lock.lock()
+        let previous = readFromFile()
         let fresh = generate()
-        store(fresh)
-        Logger.shared.log("Pairing token regenerated — paired phones must re-scan")
+        let ok = store(fresh)
+        deleteFromKeychain()
+        lock.unlock()
+        Logger.shared.log(ok
+            ? "Pairing token regenerated — paired phones must re-scan"
+            : "Pairing token regeneration FAILED to write the token file")
+        NotificationCenter.default.post(name: tokenDidChange, object: nil,
+                                        userInfo: changeUserInfo(previous: previous, fresh: fresh, stored: ok))
         return fresh
     }
 
+    /// Pure: the `tokenDidChange` userInfo for a regenerate.
+    static func changeUserInfo(previous: String?, fresh: String, stored: Bool) -> [String: String]? {
+        guard stored, let previous, !previous.isEmpty, previous != fresh else { return nil }
+        return [previousTokenKey: previous]
+    }
+
     /// JSON payload to embed in the QR. Includes everything an iOS app needs
-    /// to start talking to the same Worker as this Mac.
-    static func pairingPayloadJSON(relayURL: String) -> String {
+    /// to start talking to the same Worker as this Mac. `relayBaseURL` must
+    /// already be validated (`Config.relayBaseURL`) — it is always https
+    /// (or http for a local `wrangler dev`), never ws/wss or the placeholder.
+    static func pairingPayloadJSON(relayBaseURL: URL, token: String = currentToken()) -> String {
         let payload: [String: Any] = [
             "v": 1,
-            "token": currentToken(),
-            "relay": relayURL,
+            "token": token,
+            "relay": relayBaseURL.absoluteString,
             "host": Host.current().localizedName ?? "Mac"
         ]
-        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
     }
 
@@ -68,11 +107,30 @@ enum PairingTokenManager {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func store(_ token: String) {
-        let url = tokenFileURL
-        try? token.write(to: url, atomically: true, encoding: .utf8)
-        // 0600 — owner read/write only.
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    /// Writes the token so it is never readable by anyone else, not even
+    /// for an instant: the temp file is created with mode 0600 (O_EXCL, so
+    /// we never follow a planted file), fsynced, then renamed over the real
+    /// one. `String.write(atomically:)` created it with the umask (0644)
+    /// and chmod-ed afterwards, leaving a window.
+    @discardableResult
+    static func store(_ token: String, at url: URL = tokenFileURL) -> Bool {
+        let dir = url.deletingLastPathComponent().path
+        let tmp = "\(dir)/.\(url.lastPathComponent).\(getpid()).\(UInt32.random(in: 0...UInt32.max)).tmp"
+        let fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard fd >= 0 else {
+            Logger.shared.log("Couldn't create token temp file: errno \(errno)")
+            return false
+        }
+        let bytes = Array((token + "\n").utf8)
+        let written = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        let synced = fsync(fd) == 0
+        close(fd)
+        guard written == bytes.count, synced, rename(tmp, url.path) == 0 else {
+            Logger.shared.log("Couldn't write token file: errno \(errno)")
+            unlink(tmp)
+            return false
+        }
+        return true
     }
 
     // MARK: legacy Keychain migration
@@ -91,11 +149,25 @@ enum PairingTokenManager {
         return String(data: data, encoding: .utf8)
     }
 
+    private static func deleteFromKeychain() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: legacyKeychainService,
+            kSecAttrAccount as String: legacyKeychainAccount
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
     // MARK: token generation
 
     private static func generate() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        if status != errSecSuccess {
+            // Never hand out a predictable token; fall back to the system CSPRNG.
+            var rng = SystemRandomNumberGenerator()
+            bytes = (0..<32).map { _ in UInt8.random(in: 0...255, using: &rng) }
+        }
         return Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

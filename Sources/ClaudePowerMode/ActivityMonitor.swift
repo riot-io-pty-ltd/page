@@ -1,26 +1,16 @@
 import Foundation
 
 enum ActivityMonitor {
-    /// Returns the number of seconds since the most recent .jsonl transcript was modified
-    /// inside `directory` (recursively). Returns nil if no transcript exists.
-    static func secondsSinceLastTranscriptWrite(directory: String) -> Double? {
-        let expanded = (directory as NSString).expandingTildeInPath
-        let url = URL(fileURLWithPath: expanded)
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) else { return nil }
-
+    /// Seconds since the most recently modified of `transcripts` was written,
+    /// or nil if none exist. Callers pass the transcripts of live sessions
+    /// (from ClaudeSessionRegistry), which costs one stat per session instead
+    /// of walking every project under ~/.claude/projects each tick.
+    static func secondsSinceLastWrite(of transcripts: [URL], now: Date = Date()) -> Double? {
         var newest: Date?
-        for case let fileURL as URL in enumerator {
-            guard fileURL.pathExtension == "jsonl" else { continue }
-            let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-            guard values?.isRegularFile == true, let mtime = values?.contentModificationDate else { continue }
+        for url in transcripts {
+            guard let mtime = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { continue }
             if newest == nil || mtime > newest! { newest = mtime }
         }
-        guard let n = newest else { return nil }
-        return Date().timeIntervalSince(n)
+        return newest.map { max(0, now.timeIntervalSince($0)) }
     }
 }
