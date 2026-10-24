@@ -122,7 +122,8 @@ final class ClaudeBackend: AgentBackend {
 
     init(config: Config = Config.load()) {
         self._config = config
-        self.registry = ClaudeSessionRegistry(projectsDirectory: config.transcriptDirectory)
+        self.registry = ClaudeSessionRegistry(projectsDirectory: config.transcriptDirectory,
+                                              resolverQueue: DispatchQueue(label: "ClaudePowerMode.providerResolver", qos: .utility))
         // Wired once, unconditionally; the handlers check the live config,
         // so toggling a feature in Preferences takes effect without restart.
         rateWatcher.onNewEvent = { [weak self] event in

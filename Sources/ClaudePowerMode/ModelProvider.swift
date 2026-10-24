@@ -86,6 +86,10 @@ enum ModelProviderClassifier {
     static func claudeLive(argv: [String], env: [String: String], cwd: String?,
                            home: String = NSHomeDirectory()) -> ModelProvider {
         guard let cwd, !cwd.isEmpty else { return .unknown }
+        // Project (or config-dir) settings Page won't read — inside a
+        // privacy-protected folder — may hold any `env`.
+        if PrivacyProtectedPaths.contains(cwd, home: home) { return .unknown }
+        if let dir = env["CLAUDE_CONFIG_DIR"], !dir.isEmpty, PrivacyProtectedPaths.contains(dir, home: home) { return .unknown }
         var settings = ClaudeSettingsEnv.read(cwd: cwd, home: home, configDir: env["CLAUDE_CONFIG_DIR"])
         if let flag = ClaudeSettingsEnv.settingsFlag(argv) {
             guard let extra = ClaudeSettingsEnv.readFlagSettings(flag, cwd: cwd, home: home) else { return .unknown }

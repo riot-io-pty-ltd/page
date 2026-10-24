@@ -88,16 +88,26 @@ final class ClaudeSessionRegistry {
     /// pid → provider of the process with that pid and start time, and the
     /// session last recorded for it. A recycled pid has a new start time.
     private var providerCache: [Int32: (start: Int?, provider: ModelProvider, recordedSession: String?)] = [:]
+    /// When set, providers are resolved here instead of on the caller's
+    /// (tick) queue. Resolving reads settings files in the session's
+    /// project, and a file read can block — on a network mount, or behind a
+    /// macOS privacy prompt — which must never stall keep-awake. Until a
+    /// result lands the session's provider is `.unknown` (fails closed).
+    private let resolverQueue: DispatchQueue?
+    /// (pid, start) resolutions queued or running (under `lock`).
+    private var pendingResolutions: Set<String> = []
 
     init(projectsDirectory: String, sessionsDirectory: String = "~/.claude/sessions",
          resolveProvider: @escaping ProviderResolver = ClaudeSessionRegistry.liveProvider,
          startSeconds: @escaping (Int32) -> Int? = CmuxBridge.processStartSeconds,
-         recordProvider: @escaping (String, ModelProvider) -> Void = { SessionProviderStore.record(sessionId: $0, provider: $1) }) {
+         recordProvider: @escaping (String, ModelProvider) -> Void = { SessionProviderStore.record(sessionId: $0, provider: $1) },
+         resolverQueue: DispatchQueue? = nil) {
         self.projectsDirectory = (projectsDirectory as NSString).expandingTildeInPath
         self.sessionsDirectory = (sessionsDirectory as NSString).expandingTildeInPath
         self.resolveProvider = resolveProvider
         self.startSeconds = startSeconds
         self.recordProvider = recordProvider
+        self.resolverQueue = resolverQueue
     }
 
     /// Default resolver: the process's allowlisted environment and argv
@@ -124,12 +134,22 @@ final class ClaudeSessionRegistry {
 
         var updated = cache
         if prune { updated = updated.filter { starts[$0.key] != nil } }
+        // Only what this pass decided is written back, so a background
+        // resolution that lands meanwhile isn't overwritten by the snapshot.
+        var changed: Set<Int32> = prune ? Set(cache.keys).subtracting(updated.keys) : []
         var toRecord: [(String, ModelProvider)] = []
         let result = sessions.map { s -> ClaudeLiveSession in
             let start = starts[s.pid] ?? nil
             var entry: (start: Int?, provider: ModelProvider, recordedSession: String?)
             if let hit = updated[s.pid], hit.start == start, start != nil {
                 entry = hit
+            } else if resolverQueue != nil {
+                // Off the caller's queue; `.unknown` and nothing recorded
+                // until the result is cached (a later pass records it).
+                if let start { resolveInBackground(pid: s.pid, start: start, cwd: s.cwd) }
+                var copy = s
+                copy.provider = .unknown
+                return copy
             } else {
                 entry = (start, resolveProvider(s.pid, s.cwd), nil)
             }
@@ -140,16 +160,36 @@ final class ClaudeSessionRegistry {
             // Without a start time a recycled pid can't be told apart, so
             // nothing is cached for it.
             if start != nil { updated[s.pid] = entry } else { updated[s.pid] = nil }
+            changed.insert(s.pid)
             var copy = s
             copy.provider = entry.provider
             return copy
         }
         lock.lock()
+        for pid in changed { providerCache[pid] = updated[pid] }
         // Bounded: one entry per live Claude process in practice.
-        providerCache = updated.count > 256 ? [:] : updated
+        if providerCache.count > 256 { providerCache = [:] }
         lock.unlock()
         for (sid, provider) in toRecord { recordProvider(sid, provider) }
         return result
+    }
+
+    private func resolveInBackground(pid: Int32, start: Int, cwd: String?) {
+        guard let queue = resolverQueue else { return }
+        let key = "\(pid):\(start)"
+        lock.lock()
+        let inserted = pendingResolutions.insert(key).inserted
+        lock.unlock()
+        guard inserted else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            let provider = self.resolveProvider(pid, cwd)
+            self.lock.lock()
+            self.pendingResolutions.remove(key)
+            if self.providerCache.count > 256 { self.providerCache = [:] }
+            self.providerCache[pid] = (start, provider, nil)
+            self.lock.unlock()
+        }
     }
 
     func setProjectsDirectory(_ dir: String) {
