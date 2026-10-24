@@ -247,6 +247,11 @@ final class ClaudeBackend: AgentBackend {
             lastPurgeAt = now
             scheduler.purgeStale()
         }
+        // The registry has just recorded live sessions' providers.
+        for job in ResumeProviderGate.jobsToCancel(scheduler.listScheduled(), stored: { SessionProviderStore.provider(for: $0) }) {
+            Logger.shared.log("Cancelling the background resume for \(job.sessionId.prefix(8)): the session now runs on a non-Anthropic model")
+            scheduler.cancel(job)
+        }
 
         let relayAvailable = cfg.relayEnabled && relay != nil
         let holdForReset = cfg.holdAssertionUntilReset && activeLimit != nil

@@ -61,6 +61,39 @@ enum ModelProviderClassifier {
         "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     ]
 
+    /// Claude Code's switches to a third-party platform, each billed
+    /// somewhere other than the user's Anthropic account. Bedrock and
+    /// Vertex are documented; the others are the `CLAUDE_CODE_USE_*`
+    /// provider checks found in the Claude Code 2.1.310 binary. Missing one
+    /// would classify that session as Anthropic, so the list errs wide.
+    static let claudePlatformSwitches = [
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY",
+    ]
+
+    /// Environment keys `ProcArgs` reads from a live Claude process: the
+    /// provider keys, plus `CLAUDE_CONFIG_DIR` (where its user settings
+    /// live). Values are used for classification only, never kept.
+    static let claudeProcessEnvKeys: Set<String> = ClaudeSettingsEnv.keys.union(["CLAUDE_CONFIG_DIR"])
+
+    /// A live Claude Code process's provider from its argv, allowlisted
+    /// environment (`claudeProcessEnvKeys`) and launch directory. `.unknown`
+    /// unless every settings source could be seen: without the launch
+    /// directory the project settings can't be read, and a `--settings`
+    /// file that can't be read may hold any `env`. `.unknown` is never
+    /// taken as Anthropic evidence.
+    static func claudeLive(argv: [String], env: [String: String], cwd: String?,
+                           home: String = NSHomeDirectory()) -> ModelProvider {
+        guard let cwd, !cwd.isEmpty else { return .unknown }
+        var settings = ClaudeSettingsEnv.read(cwd: cwd, home: home, configDir: env["CLAUDE_CONFIG_DIR"])
+        if let flag = ClaudeSettingsEnv.settingsFlag(argv) {
+            guard let extra = ClaudeSettingsEnv.readFlagSettings(flag, cwd: cwd, home: home) else { return .unknown }
+            for (k, v) in extra { settings[k] = v }
+        }
+        return claude(env: env, settingsEnv: settings)
+    }
+
     /// Claude Code's provider from its process environment and the merged
     /// settings.json `env`. Settings override the process per key (Claude
     /// Code applies them on top of its environment), and the result fails
@@ -78,7 +111,7 @@ enum ModelProviderClassifier {
 
     /// One environment, on its own. Never returns `.unknown`.
     static func classifyClaudeEnv(_ env: [String: String]) -> ModelProvider {
-        if isTruthy(env["CLAUDE_CODE_USE_BEDROCK"]) || isTruthy(env["CLAUDE_CODE_USE_VERTEX"]) {
+        if claudePlatformSwitches.contains(where: { isTruthy(env[$0]) }) {
             return .cloudGateway
         }
         // Ollama's cloud models run on Ollama's servers, whatever the base
@@ -193,9 +226,10 @@ enum ModelProviderClassifier {
         return tag == "cloud" || tag.hasSuffix("-cloud")
     }
 
+    /// Claude Code's own truthiness test (1 / true / yes / on).
     static func isTruthy(_ value: String?) -> Bool {
         guard let v = value?.trimmingCharacters(in: .whitespaces).lowercased() else { return false }
-        return v == "1" || v == "true" || v == "yes"
+        return v == "1" || v == "true" || v == "yes" || v == "on"
     }
 
     /// Lower-cased host (IPv6 brackets stripped) and port (scheme default
@@ -245,14 +279,22 @@ enum ModelProviderClassifier {
 enum ClaudeSettingsEnv {
     static let keys: Set<String> = ProcArgs.envAllowlist.filter {
         $0.hasPrefix("ANTHROPIC_") || $0.hasPrefix("CLAUDE_CODE_USE_")
-    }
+    }.union(ModelProviderClassifier.claudePlatformSwitches)
 
-    /// `~/.claude/settings.json`, then (with a cwd) the project's
-    /// `.claude/settings.json` and `.claude/settings.local.json`; later
-    /// files override earlier ones. Missing or malformed files are skipped.
-    /// Managed (enterprise) settings are not read.
-    static func read(cwd: String?, home: String = NSHomeDirectory()) -> [String: String] {
-        var paths = [(home as NSString).appendingPathComponent(".claude/settings.json")]
+    /// The user settings (`~/.claude/settings.json`, or
+    /// `$CLAUDE_CONFIG_DIR/settings.json` when the session set that), then
+    /// (with a cwd) the project's `.claude/settings.json` and
+    /// `.claude/settings.local.json`; later files override earlier ones.
+    /// Missing or malformed files are skipped. Managed (enterprise)
+    /// settings are not read.
+    static func read(cwd: String?, home: String = NSHomeDirectory(), configDir: String? = nil) -> [String: String] {
+        let userDir: String
+        if let configDir = configDir?.trimmingCharacters(in: .whitespaces), !configDir.isEmpty {
+            userDir = expand(configDir, cwd: cwd, home: home)
+        } else {
+            userDir = (home as NSString).appendingPathComponent(".claude")
+        }
+        var paths = [(userDir as NSString).appendingPathComponent("settings.json")]
         if let cwd, !cwd.isEmpty {
             paths.append((cwd as NSString).appendingPathComponent(".claude/settings.json"))
             paths.append((cwd as NSString).appendingPathComponent(".claude/settings.local.json"))
@@ -265,6 +307,44 @@ enum ClaudeSettingsEnv {
             for (k, v) in parse(data) { env[k] = v }
         }
         return env
+    }
+
+    /// Pure. The value of Claude Code's `--settings` flag (a file path or
+    /// inline JSON), or nil when it isn't given. Stops at `--`.
+    static func settingsFlag(_ argv: [String]) -> String? {
+        var i = 0
+        var found: String?
+        while i < argv.count {
+            let tok = argv[i]
+            if tok == "--" { break }
+            if tok == "--settings" {
+                found = i + 1 < argv.count ? argv[i + 1] : ""
+                i += 1
+            } else if tok.hasPrefix("--settings=") {
+                found = String(tok.dropFirst("--settings=".count))
+            }
+            i += 1
+        }
+        return found
+    }
+
+    /// The allowlisted `env` of a `--settings` value: inline JSON, or a file
+    /// (relative to the launch directory). nil when it can't be read.
+    static func readFlagSettings(_ value: String, cwd: String, home: String) -> [String: String]? {
+        let v = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !v.isEmpty else { return nil }
+        if v.hasPrefix("{") { return parse(Data(v.utf8)) }
+        let path = expand(v, cwd: cwd, home: home)
+        if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
+           size.intValue > 1 << 20 { return nil }
+        return FileManager.default.contents(atPath: path).map(parse)
+    }
+
+    private static func expand(_ path: String, cwd: String?, home: String) -> String {
+        if path == "~" { return home }
+        if path.hasPrefix("~/") { return (home as NSString).appendingPathComponent(String(path.dropFirst(2))) }
+        if path.hasPrefix("/") { return path }
+        return ((cwd ?? home) as NSString).appendingPathComponent(path)
     }
 
     /// Pure. Allowlisted string (or number / boolean) values of `env`.
@@ -320,6 +400,15 @@ enum ResumeProviderGate {
     static func evidence(sessionId: String, transcript: URL?,
                          stored: (String) -> ModelProvider? = { SessionProviderStore.provider(for: $0) }) -> Evidence {
         Evidence(stored: stored(sessionId), lastAssistantModel: TranscriptParser.lastAssistantModel(transcript: transcript))
+    }
+
+    /// Pure (given `stored`). Scheduled background resumes whose session
+    /// has since been seen running on a non-Anthropic provider (a later
+    /// `claude --resume` under Ollama, or a job left by a build without
+    /// this gate). They would fire on the user's Anthropic account.
+    static func jobsToCancel(_ scheduled: [ScheduledResume],
+                             stored: (String) -> ModelProvider?) -> [ScheduledResume] {
+        scheduled.filter { stored($0.sessionId)?.isKnownNonAnthropic == true }
     }
 
     /// For a rate-limit event (scheduled resume): nil when allowed.

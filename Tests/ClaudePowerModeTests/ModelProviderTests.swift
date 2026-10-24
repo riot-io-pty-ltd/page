@@ -47,8 +47,23 @@ final class ModelProviderTests: XCTestCase {
         XCTAssertEqual(C.claude(env: ["CLAUDE_CODE_USE_BEDROCK": "1"], settingsEnv: [:]), .cloudGateway)
         XCTAssertEqual(C.claude(env: ["CLAUDE_CODE_USE_VERTEX": "true"], settingsEnv: [:]), .cloudGateway)
         XCTAssertEqual(C.claude(env: ["CLAUDE_CODE_USE_VERTEX": "YES"], settingsEnv: [:]), .cloudGateway)
+        // Claude Code's own truthiness also accepts "on".
+        XCTAssertEqual(C.claude(env: ["CLAUDE_CODE_USE_BEDROCK": "on"], settingsEnv: [:]), .cloudGateway)
+        XCTAssertEqual(C.claude(env: [:], settingsEnv: ["CLAUDE_CODE_USE_VERTEX": " On "]), .cloudGateway)
         XCTAssertFalse(ModelProvider.cloudGateway.isLocal)
         XCTAssertTrue(ModelProvider.cloudGateway.isKnownNonAnthropic)
+    }
+
+    func testOtherPlatformSwitchesAreGateways() {
+        for key in ["CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+                    "CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_GATEWAY"] {
+            XCTAssertEqual(C.claude(env: [key: "1"], settingsEnv: [:]), .cloudGateway, key)
+            XCTAssertEqual(C.claude(env: [:], settingsEnv: [key: "true"]), .cloudGateway, "\(key) in settings")
+            XCTAssertTrue(ClaudeSettingsEnv.keys.contains(key), "\(key) is read from settings files")
+            XCTAssertTrue(C.claudeProcessEnvKeys.contains(key), "\(key) is read from the process")
+        }
+        XCTAssertEqual(ClaudeSettingsEnv.parse(Data(#"{"env":{"CLAUDE_CODE_USE_FOUNDRY":true}}"#.utf8)),
+                       ["CLAUDE_CODE_USE_FOUNDRY": "true"])
     }
 
     func testCustomGatewayAndLookalikeHosts() {
@@ -211,5 +226,42 @@ final class ModelProviderTests: XCTestCase {
         XCTAssertEqual(ClaudeSettingsEnv.read(cwd: nil, home: home.path)["ANTHROPIC_BASE_URL"], "https://api.anthropic.com")
         XCTAssertEqual(ClaudeSettingsEnv.read(cwd: "/nonexistent-\(UUID().uuidString)", home: "/nonexistent"), [:])
         XCTAssertTrue(ClaudeSettingsEnv.keys.allSatisfy { $0.hasPrefix("ANTHROPIC_") || $0.hasPrefix("CLAUDE_CODE_USE_") })
+    }
+
+    // MARK: Live Claude process
+
+    func testClaudeLiveReadsEverySettingsSourceOrIsUnknown() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("claudelive-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let home = root.appendingPathComponent("home")
+        let project = root.appendingPathComponent("proj")
+        let configDir = root.appendingPathComponent("altconfig")
+        for dir in [home.appendingPathComponent(".claude"), project.appendingPathComponent(".claude"), configDir] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        let ollama = #"{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:11434","ANTHROPIC_AUTH_TOKEN":"ollama"}}"#
+        func live(_ argv: [String] = ["claude"], env: [String: String] = [:], cwd: String? = nil) -> ModelProvider {
+            C.claudeLive(argv: argv, env: env, cwd: cwd ?? project.path, home: home.path)
+        }
+
+        XCTAssertEqual(live(), .anthropic)
+        XCTAssertEqual(C.claudeLive(argv: ["claude"], env: [:], cwd: nil, home: home.path), .unknown,
+                       "no launch directory: the project settings can't be read")
+        XCTAssertEqual(C.claudeLive(argv: ["claude"], env: [:], cwd: "", home: home.path), .unknown)
+
+        // CLAUDE_CONFIG_DIR moves the user settings.
+        try ollama.write(to: configDir.appendingPathComponent("settings.json"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(live(env: ["CLAUDE_CONFIG_DIR": configDir.path]), .ollama)
+        XCTAssertEqual(live(), .anthropic, "~/.claude/settings.json is clean")
+
+        // --settings: a file (relative to the launch directory), inline JSON, or unreadable.
+        try ollama.write(to: project.appendingPathComponent("extra.json"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(live(["claude", "--settings", "extra.json"]), .ollama)
+        XCTAssertEqual(live(["claude", "--settings=\(project.path)/extra.json"]), .ollama)
+        XCTAssertEqual(live(["claude", "--settings", #"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#]), .cloudGateway)
+        XCTAssertEqual(live(["claude", "--settings", "missing.json"]), .unknown, "unreadable settings could say anything")
+        XCTAssertEqual(live(["claude", "--settings"]), .unknown)
+        XCTAssertEqual(live(["claude", "--", "--settings", "extra.json"]), .anthropic, "after -- it's the prompt")
+        XCTAssertEqual(ClaudeSettingsEnv.settingsFlag(["claude", "-p", "hi"]), nil)
     }
 }

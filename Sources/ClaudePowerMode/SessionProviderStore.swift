@@ -39,13 +39,20 @@ enum SessionProviderStore {
     }()
 
     /// Records that `sessionId` is running on `provider`. `.unknown` is
-    /// never recorded (it carries no evidence either way). Thread-safe.
+    /// never stored (it carries no evidence either way), but it removes an
+    /// existing entry: the session is now running somewhere Page couldn't
+    /// classify, so an older `.anthropic` must not vouch for it. Thread-safe.
     static func record(sessionId: String, provider: ModelProvider, now: Date = Date()) {
-        guard provider != .unknown, ClaudeSessionRegistry.isValidSessionId(sessionId) else { return }
+        guard ClaudeSessionRegistry.isValidSessionId(sessionId) else { return }
         let key = sessionId.lowercased()
         lock.lock(); defer { lock.unlock() }
         let stored = loadLocked()
         var entries = pruned(stored, now: now)
+        if provider == .unknown {
+            guard entries.removeValue(forKey: key) != nil || entries.count != stored.count else { return }
+            saveLocked(entries)
+            return
+        }
         guard needsWrite(existing: entries[key], provider: provider, now: now) || entries.count != stored.count else { return }
         entries[key] = Entry(provider: provider, seenAt: now)
         saveLocked(pruned(entries, now: now))

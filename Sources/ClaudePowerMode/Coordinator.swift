@@ -1252,7 +1252,9 @@ final class Coordinator {
             DispatchQueue.main.async { completion(.failure(ResumeError.unsupportedBackend(event.backend))) }
             return
         }
-        guard Coordinator.canResume(event) else {
+        // The provider gate reads files and has its own error: it runs in
+        // ClaudeBackend.scheduleResumeManually, on the tick queue.
+        guard Coordinator.canResume(event, providerRefusal: { _ in nil }) else {
             DispatchQueue.main.async { completion(.failure(ResumeError.missingSession)) }
             return
         }

@@ -41,11 +41,17 @@ final class LocalModelAgentTests: XCTestCase {
 
         SessionProviderStore.record(sessionId: sid, provider: .anthropic)
         XCTAssertEqual(SessionProviderStore.provider(for: sid), .anthropic, "the latest provider wins")
-        SessionProviderStore.record(sessionId: sid, provider: .unknown)
-        XCTAssertEqual(SessionProviderStore.provider(for: sid), .anthropic, "unknown is never recorded")
         SessionProviderStore.record(sessionId: "not-a-session", provider: .ollama)
         XCTAssertEqual(SessionProviderStore.all().count, 1)
         XCTAssertNil(SessionProviderStore.provider(for: "1b5c2d0e-3f0a-4d3e-9a7c-1c2b3d4e5f60"))
+
+        // A later process of the session that couldn't be classified: the
+        // old `.anthropic` no longer vouches for it.
+        SessionProviderStore.record(sessionId: sid, provider: .unknown)
+        XCTAssertNil(SessionProviderStore.provider(for: sid), "unknown clears, and is never stored")
+        XCTAssertTrue(SessionProviderStore.all().isEmpty)
+        SessionProviderStore.record(sessionId: sid, provider: .unknown)
+        XCTAssertTrue(SessionProviderStore.all().isEmpty)
     }
 
     func testStoreExpiry() {
@@ -115,15 +121,19 @@ final class LocalModelAgentTests: XCTestCase {
         XCTAssertEqual(resolved, [10, 11, 10])
     }
 
-    func testUnknownProviderIsNotRecorded() {
-        var recorded = 0
+    func testUnknownProviderClearsTheStoredOne() {
+        SessionProviderStore.record(sessionId: sid, provider: .anthropic)
+        var recorded: [ModelProvider] = []
         let reg = ClaudeSessionRegistry(projectsDirectory: dir.path, sessionsDirectory: dir.path,
                                         resolveProvider: { _, _ in .unknown }, startSeconds: { _ in 1 },
-                                        recordProvider: { _, _ in recorded += 1 })
+                                        recordProvider: { SessionProviderStore.record(sessionId: $0, provider: $1); recorded.append($1) })
         let s = ClaudeLiveSession(pid: 10, sessionId: sid, cwd: nil, status: .busy, statusUpdatedAt: nil,
                                   tty: nil, hasSessionFile: true)
         XCTAssertEqual(reg.annotateProviders([s]).first?.provider, .unknown)
-        XCTAssertEqual(recorded, 0)
+        _ = reg.annotateProviders([s])
+        XCTAssertEqual(recorded, [.unknown], "once per session per process")
+        XCTAssertNil(SessionProviderStore.provider(for: sid), "an earlier run's anthropic no longer counts")
+        XCTAssertNotNil(ResumeProviderGate.refusal(ResumeProviderGate.evidence(sessionId: sid, transcript: nil)))
     }
 
     // MARK: Headless resume gate
@@ -184,6 +194,17 @@ final class LocalModelAgentTests: XCTestCase {
         XCTAssertTrue(Coordinator.canResume(event("")), "seen live on Anthropic")
         XCTAssertFalse(Coordinator.canResume(event(""), providerRefusal: { _ in "no" }))
         XCTAssertNil(ResumeProviderGate.refusal(for: event("")))
+    }
+
+    func testScheduledJobsCancelledOnceSeenOffAnthropic() {
+        func job(_ id: String) -> ScheduledResume {
+            ScheduledResume(sessionId: id, cwd: "/p", projectName: "p", resetTime: Date(), prompt: "", plistPath: "",
+                            logPath: "", label: id, createdAt: Date())
+        }
+        let stored: [String: ModelProvider] = ["a": .ollama, "b": .anthropic, "d": .cloudGateway, "e": .otherLocal]
+        let cancel = ResumeProviderGate.jobsToCancel([job("a"), job("b"), job("c"), job("d"), job("e")],
+                                                     stored: { stored[$0] })
+        XCTAssertEqual(cancel.map(\.sessionId), ["a", "d", "e"], "never seen (c) and Anthropic (b) are kept")
     }
 
     // MARK: Rate limits

@@ -100,17 +100,20 @@ final class ClaudeSessionRegistry {
         self.recordProvider = recordProvider
     }
 
-    /// Default resolver: the process's allowlisted environment (argv is
-    /// read by `ProcArgs` but dropped here) plus the settings files for its
-    /// cwd. `.unknown` when the environment can't be read.
+    /// Default resolver: the process's allowlisted environment and argv
+    /// (`ProcArgs`; only a `--settings` value is looked at, then both are
+    /// dropped) plus the settings files for its cwd. `.unknown` when the
+    /// environment, the cwd or a `--settings` file can't be read.
     static func liveProvider(pid: Int32, cwd: String?) -> ModelProvider {
-        guard let info = ProcArgs.read(pid: pid) else { return .unknown }
-        return ModelProviderClassifier.claude(env: info.env, settingsEnv: ClaudeSettingsEnv.read(cwd: cwd))
+        guard let info = ProcArgs.read(pid: pid, envKeys: ModelProviderClassifier.claudeProcessEnvKeys) else { return .unknown }
+        return ModelProviderClassifier.claudeLive(argv: info.argv, env: info.env, cwd: cwd)
     }
 
     /// Fills in `provider` for each session, classifying a process only the
-    /// first time its (pid, start time) is seen, and records known
-    /// providers in `SessionProviderStore` (once per session per process).
+    /// first time its (pid, start time) is seen, and records the provider
+    /// in `SessionProviderStore` (once per session per process). An
+    /// `.unknown` is recorded too: it clears what an earlier process of the
+    /// same session left there, which no longer describes this run.
     /// `prune` drops cache entries for processes no longer in `sessions`.
     func annotateProviders(_ sessions: [ClaudeLiveSession], prune: Bool = false) -> [ClaudeLiveSession] {
         guard !sessions.isEmpty || prune else { return sessions }
@@ -130,7 +133,7 @@ final class ClaudeSessionRegistry {
             } else {
                 entry = (start, resolveProvider(s.pid, s.cwd), nil)
             }
-            if entry.provider != .unknown, entry.recordedSession != s.sessionId {
+            if entry.recordedSession != s.sessionId {
                 toRecord.append((s.sessionId, entry.provider))
                 entry.recordedSession = s.sessionId
             }
