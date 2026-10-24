@@ -1,0 +1,13 @@
+// Copy to Config/Local.xcconfig (git-ignored) and fill in, then run
+// `xcodegen generate` again.
+
+// Your Apple developer team id (Xcode → Settings → Accounts, or
+// developer.apple.com → Membership).
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Use your own bundle id if app.page.Page is taken by another team. Set the
+// same value as APNS_BUNDLE_ID in Cloudflare/wrangler.toml.
+// PAGE_BUNDLE_ID = com.example.page
+
+// Paid Apple Developer Program teams only: enable push notifications.
+// PAGE_ENTITLEMENTS = Page/Page-Push.entitlements

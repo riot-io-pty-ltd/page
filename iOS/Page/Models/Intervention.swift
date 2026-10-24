@@ -1,14 +1,29 @@
 import Foundation
-import SwiftUI
 
-/// New vocab (approval / user_input / idle / rate_limit) is the Phase 4
-/// canonical set. Legacy Claude vocab (permission / plan / question) is
-/// decoded into the canonical set so old pages still render.
-enum InterventionKind: String, Codable, CaseIterable {
+/// New vocab (approval / user_input / idle / rate_limit) is the canonical
+/// set. Legacy Claude vocab (permission / plan / question) is decoded into
+/// the canonical set so pages from older Macs and hooks still render.
+///
+/// Foundation-only on purpose (colours live in Theme.swift) so the model and
+/// its decoding can be compiled and tested outside the app target.
+enum InterventionKind: String, CaseIterable {
     case approval
     case userInput = "user_input"
     case idle
     case rateLimit = "rate_limit"
+
+    /// Maps any wire value to a kind. Unknown values become `.userInput`,
+    /// matching the Worker's own coercion ("unknown kind -> question"): a
+    /// text-only reply screen is the safe default because it never offers
+    /// Approve/Deny for something we don't understand.
+    init(wire raw: String?) {
+        switch raw {
+        case "approval", "permission", "plan": self = .approval
+        case "idle":                           self = .idle
+        case "rate_limit":                     self = .rateLimit
+        default:                               self = .userInput
+        }
+    }
 
     var label: String {
         switch self {
@@ -19,37 +34,29 @@ enum InterventionKind: String, Codable, CaseIterable {
         }
     }
 
-    /// Ring colour for the chip and matching footer dot. Same hue used in
-    /// both places so the eye links them at a glance.
-    var color: Color {
+    /// Spoken name for VoiceOver ("Approval request", not "APPROVAL").
+    var accessibilityName: String {
         switch self {
-        case .approval:   return Theme.Colour.kindApproval
-        case .userInput:  return Theme.Colour.kindUserInput
-        case .idle:       return Theme.Colour.kindIdle
-        case .rateLimit:  return Theme.Colour.kindRateLimit
+        case .approval:   return "Approval request"
+        case .userInput:  return "Question"
+        case .idle:       return "Idle session"
+        case .rateLimit:  return "Rate limit"
         }
     }
 
-    init(from decoder: Decoder) throws {
-        let raw = try decoder.singleValueContainer().decode(String.self)
-        switch raw {
-        case "approval":   self = .approval
-        case "user_input": self = .userInput
-        case "idle":       self = .idle
-        case "rate_limit": self = .rateLimit
-        // Back-compat with pre-Phase-4 Worker payloads:
-        case "permission", "plan": self = .approval
-        case "question":           self = .userInput
-        default:
-            throw DecodingError.dataCorruptedError(
-                in: try decoder.singleValueContainer(),
-                debugDescription: "Unknown intervention kind: \(raw)"
-            )
+    /// Inbox ordering: things that block an agent on a yes/no come first,
+    /// then questions, then idle sessions, then informational pages.
+    var urgencyRank: Int {
+        switch self {
+        case .approval:   return 0
+        case .userInput:  return 1
+        case .idle:       return 2
+        case .rateLimit:  return 3
         }
     }
 }
 
-enum InterventionBackend: String, Codable {
+enum InterventionBackend: String {
     case claude, codex
 
     var badge: String {
@@ -59,16 +66,15 @@ enum InterventionBackend: String, Codable {
         }
     }
 
-    /// Brand tint for the backend pill.
-    var tint: Color {
+    var displayName: String {
         switch self {
-        case .claude: return Theme.Colour.backendClaude
-        case .codex:  return Theme.Colour.backendCodex
+        case .claude: return "Claude"
+        case .codex:  return "Codex"
         }
     }
 }
 
-enum InterventionSource: String, Codable {
+enum InterventionSource: String {
     case terminal, desktop, vscode, exec, remote, unknown
 
     /// Always returns a human label — "Terminal" reads as fast as "VS Code"
@@ -85,7 +91,7 @@ enum InterventionSource: String, Codable {
     }
 }
 
-struct Intervention: Identifiable, Codable, Hashable {
+struct Intervention: Identifiable, Hashable {
     let id: String
     let sessionId: String
     let cwd: String
@@ -102,38 +108,77 @@ struct Intervention: Identifiable, Codable, Hashable {
     var backend: InterventionBackend?
     var source: InterventionSource?
     var subtype: String?
+    /// v2 (Worker-managed): "pending" | "delivered" | "failed".
+    var deliveryStatus: String?
+    /// v2: short human-readable delivery result from the Mac.
+    var deliveryDetail: String?
+    var deliveryMethod: String?
+    /// Worker-managed: a page from a v1 blocking hook (`hook-` id). The hook
+    /// polls for the answer itself and can only apply Approve or Deny.
+    var hookBlocking: Bool?
 
-    var pagedAgo: String { Self.relative(from: openedAt, prefix: "Paged") }
-    var closedAgo: String? {
-        guard let c = closedAt else { return nil }
-        return Self.relative(from: c, prefix: "Closed")
-    }
-    /// Time between page open and resolution.
-    var responseTimeSeconds: Int? {
-        guard let c = closedAt else { return nil }
-        return max(0, Int(c.timeIntervalSince(openedAt)))
+    /// Hook-owned pages: the hook polls for the answer itself, the Mac never
+    /// types anything for these.
+    var isBlockingHook: Bool { id.hasPrefix("hookpre-") || hookBlocking == true }
+
+    /// Only Approve/Deny can be applied (the relay answers anything else
+    /// with 422 `approve_or_deny_only`), so don't offer a text reply.
+    var acceptsDecisionsOnly: Bool { hookBlocking == true && !id.hasPrefix("hookpre-") && kind == .approval }
+
+    /// Name of the agent for copy ("Claude needs your input").
+    var agentName: String { backend?.displayName ?? "Your agent" }
+}
+
+extension Intervention: Decodable {
+    private enum CodingKeys: String, CodingKey {
+        case id, sessionId, cwd, projectName, kind, openedAt, context
+        case closedAt, closeReason, repliedAt, repliedText, repliedAction
+        case backend, source, subtype, deliveryStatus, deliveryDetail, deliveryMethod
+        case hookBlocking
     }
 
-    private static func relative(from date: Date, prefix: String) -> String {
-        let s = Int(Date().timeIntervalSince(date))
-        if s < 60 { return "\(prefix) \(s)s ago" }
-        if s < 3600 { return "\(prefix) \(s / 60)m ago" }
-        if s < 86_400 { return "\(prefix) \(s / 3600)h ago" }
-        return "\(prefix) \(s / 86_400)d ago"
+    /// Lenient by design: only `id`, `sessionId` and `openedAt` are required.
+    /// Everything else is optional or defaulted, and a malformed optional
+    /// field is treated as missing instead of failing the whole page — one
+    /// odd hook payload must never blank the inbox.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        sessionId = try c.decode(String.self, forKey: .sessionId)
+        openedAt = try c.decode(Date.self, forKey: .openedAt)
+        cwd = c.lenientString(.cwd) ?? ""
+        let project = c.lenientString(.projectName) ?? ""
+        projectName = project.isEmpty ? (cwd.split(separator: "/").last.map(String.init) ?? "Unknown project") : project
+        kind = InterventionKind(wire: c.lenientString(.kind))
+        context = c.lenientString(.context) ?? ""
+        closedAt = try? c.decodeIfPresent(Date.self, forKey: .closedAt)
+        closeReason = c.lenientString(.closeReason)
+        repliedAt = try? c.decodeIfPresent(Date.self, forKey: .repliedAt)
+        repliedText = c.lenientString(.repliedText)
+        repliedAction = c.lenientString(.repliedAction)
+        backend = c.lenientString(.backend).flatMap(InterventionBackend.init(rawValue:))
+        source = c.lenientString(.source).map { InterventionSource(rawValue: $0) ?? .unknown }
+        subtype = c.lenientString(.subtype)
+        deliveryStatus = c.lenientString(.deliveryStatus)
+        deliveryDetail = c.lenientString(.deliveryDetail)
+        deliveryMethod = c.lenientString(.deliveryMethod)
+        hookBlocking = (try? c.decodeIfPresent(Bool.self, forKey: .hookBlocking)) ?? nil
     }
 }
 
+private extension KeyedDecodingContainer {
+    /// A string if present and actually a string; nil for missing, null or
+    /// the wrong type.
+    func lenientString(_ key: Key) -> String? {
+        (try? decodeIfPresent(String.self, forKey: key)) ?? nil
+    }
+}
+
+/// What we persist about the paired Mac. Older builds stored extra fields
+/// (hostname, activeSessions, pingMs, connected); JSONDecoder ignores unknown
+/// keys, so existing Keychain entries still decode. Any new field must stay
+/// optional for the same reason.
 struct PairedMac: Codable, Hashable {
     let name: String
-    let hostname: String
-    let activeSessions: Int
-    let pingMs: Int
-    let connected: Bool
-}
-
-struct PairingPayload: Codable {
-    let v: Int
-    let token: String
-    let relay: String
-    let host: String?
+    var pairedAt: Date?
 }

@@ -1,0 +1,5 @@
+# Local build output
+build/
+
+# Personal signing settings (see Config/Local.xcconfig.example)
+Config/Local.xcconfig

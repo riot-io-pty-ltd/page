@@ -6,6 +6,7 @@ struct PageApp: App {
     @StateObject private var pairing = PairingStore()
     @StateObject private var api = APIClient.shared
     @StateObject private var notifications = NotificationService.shared
+    @StateObject private var router = AppRouter.shared
 
     var body: some Scene {
         WindowGroup {
@@ -13,21 +14,10 @@ struct PageApp: App {
                 .environmentObject(pairing)
                 .environmentObject(api)
                 .environmentObject(notifications)
-                .preferredColorScheme(nil)  // system-driven
-                .task {
-                    await notifications.requestAuthorization()
-                }
-                .onChange(of: pairing.relayURL) { _, newValue in
-                    PairingStoreShared.relayURL = newValue
-                }
-                .onChange(of: pairing.relayToken) { _, newValue in
-                    PairingStoreShared.relayToken = newValue
-                }
-                .onAppear {
-                    // Seed the cross-store bridges on first appearance so
-                    // APIClient has values before any user interaction.
-                    PairingStoreShared.relayURL = pairing.relayURL
-                    PairingStoreShared.relayToken = pairing.relayToken
+                .environmentObject(router)
+                .onOpenURL { url in
+                    // page://intervention/<id> opens that page's reply screen.
+                    router.handle(url: url)
                 }
         }
     }
@@ -35,31 +25,63 @@ struct PageApp: App {
 
 struct RootView: View {
     @EnvironmentObject var pairing: PairingStore
+    @EnvironmentObject var api: APIClient
+    @EnvironmentObject var notifications: NotificationService
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        if pairing.pairedMac == nil {
-            PairMacView()
-        } else {
-            MainTabView()
+        Group {
+            if pairing.isPaired {
+                MainTabView()
+            } else {
+                PairMacView()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .active:
+                pairing.reloadIfNeeded()
+                Task { await notifications.refreshAuthorization() }
+                if pairing.isPaired {
+                    api.activate()
+                    Task { await notifications.requestAuthorizationIfNeeded() }
+                }
+            case .background:
+                // iOS would freeze the socket anyway; close it cleanly and
+                // rely on APNs until we're back.
+                api.disconnect()
+            default:
+                break
+            }
         }
     }
 }
 
 struct MainTabView: View {
-    @State private var selection: AppTab = .inbox
+    @EnvironmentObject var api: APIClient
+    @EnvironmentObject var notifications: NotificationService
+    @EnvironmentObject var router: AppRouter
 
     var body: some View {
         ZStack(alignment: .bottom) {
             Group {
-                switch selection {
+                switch router.tab {
                 case .inbox:    InboxView()
                 case .history:  HistoryView()
                 case .stats:    StatsView()
                 case .settings: SettingsView()
                 }
             }
-            PillTabBar(selection: $selection)
+            PillTabBar(selection: $router.tab, inboxCount: api.inbox.count)
         }
         .ignoresSafeArea(.keyboard)
+        .task {
+            // First appearance after launch or after pairing.
+            api.activate()
+            await notifications.requestAuthorizationIfNeeded()
+        }
+        .sheet(item: $router.presented) { item in
+            ReplyView(interventionId: item.id)
+        }
     }
 }

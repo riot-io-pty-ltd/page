@@ -3,19 +3,11 @@ import Foundation
 
 /// Seeds in-memory mock state so you can navigate the inbox/reply screens
 /// without a real Mac sending pages. Triggered by a "Skip pairing (DEV)"
-/// button on the Pair screen.
+/// button on the Pair screen; never writes credentials or touches the network.
 @MainActor
 enum DevBypass {
     static func fakeMac() -> PairedMac {
-        PairedMac(name: "MacBook Pro",
-                  hostname: "studio.local",
-                  activeSessions: 3,
-                  pingMs: 4,
-                  connected: true)
-    }
-
-    static func fakePairingPayload() -> PairingPayload {
-        PairingPayload(v: 1, token: "DEV-TOKEN", relay: AppConstants.workerBaseURL.absoluteString, host: "MacBook Pro")
+        PairedMac(name: "MacBook Pro (dev)", pairedAt: Date())
     }
 
     static func fakeInterventions() -> [Intervention] {
@@ -54,6 +46,17 @@ enum DevBypass {
                 backend: .claude,
                 source: .terminal,
                 subtype: "plan"
+            ),
+            Intervention(
+                id: "dev-4",
+                sessionId: "99999999-4444-dddd-eeee-ffffffffffff",
+                cwd: "/Users/you/projects/orbit-api",
+                projectName: "orbit-api",
+                kind: .idle,
+                openedAt: now.addingTimeInterval(-900),
+                context: "Finished the migration and all tests pass. Waiting for your next instruction.",
+                backend: .claude,
+                source: .terminal
             )
         ]
     }

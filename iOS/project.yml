@@ -7,15 +7,20 @@ options:
   groupSortPosition: top
   createIntermediateGroups: true
 
+# Per-developer settings (team id, bundle id, push entitlements) come from
+# Config/Local.xcconfig via Config/Page.xcconfig. See README.md.
+configFiles:
+  Debug: Config/Page.xcconfig
+  Release: Config/Page.xcconfig
+
 settings:
   base:
     SWIFT_VERSION: "5.10"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    # Bump these to version a build; Info.plist reads them.
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
     CODE_SIGN_STYLE: Automatic
-    CODE_SIGNING_REQUIRED: "NO"
-    CODE_SIGNING_ALLOWED: "NO"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
 
 targets:
@@ -27,13 +32,15 @@ targets:
       - path: Page
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: app.page.Page
+        PRODUCT_BUNDLE_IDENTIFIER: $(PAGE_BUNDLE_ID)
         INFOPLIST_FILE: Page/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Page/Page.entitlements
+        CODE_SIGN_ENTITLEMENTS: $(PAGE_ENTITLEMENTS)
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
         SUPPORTS_MACCATALYST: "NO"
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: "NO"
-        CODE_SIGNING_REQUIRED: "NO"
-        CODE_SIGNING_ALLOWED: "NO"
         GENERATE_INFOPLIST_FILE: "NO"
+        # Simulator builds stay unsigned so they work without any Apple
+        # account; device builds sign with DEVELOPMENT_TEAM from Local.xcconfig.
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "NO"
+        "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": "NO"

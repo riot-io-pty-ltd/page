@@ -2,7 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- No paid-team entitlements here while developer account is expired.
-         When renewed, restore: aps-environment=development for APNs. -->
+    <!-- Default entitlements: nothing that needs a paid Apple Developer
+         Program team, so free (Personal Team) signing works. Without
+         aps-environment the app can't receive push notifications; pages
+         only arrive while it is open. Paid teams: set
+         PAGE_ENTITLEMENTS = Page/Page-Push.entitlements in
+         Config/Local.xcconfig (see iOS/README.md). -->
 </dict>
 </plist>

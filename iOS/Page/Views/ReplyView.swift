@@ -1,183 +1,575 @@
 import SwiftUI
+import UIKit
 
+/// Context-first reply screen for one intervention, presented as a sheet
+/// from the inbox, a notification tap or a `page://intervention/<id>` link.
+///
+/// It watches the live inbox: if the page is answered elsewhere, superseded
+/// or resolved while open, the actions disable, a short "Resolved" state
+/// shows, and the sheet closes itself — so a stale screen can never approve
+/// a prompt that's no longer there.
 struct ReplyView: View {
-    let intervention: Intervention
-    let onDismiss: () -> Void
+    let interventionId: String
 
     @EnvironmentObject var api: APIClient
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
-    @State private var replyText: String = ""
-    @State private var sending: Bool = false
+    @ScaledMetric(relativeTo: .body) private var buttonHeight: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var sendSize: CGFloat = 36
+
+    /// Last known copy, so content stays readable after the page closes.
+    @State private var snapshot: Intervention?
+    @State private var lookupFinished = false
+    @State private var replyText = ""
+    @State private var lastAttempt: Attempt?
+    @State private var pendingQuickAction: ReplyAction?
+    @State private var copied = false
+    /// Ticks so "sent but unconfirmed" is noticed without other changes.
+    @State private var now = Date()
+    /// The archive lookup for a close that arrived without a reason is done.
+    @State private var closeLookupFinished = false
+
+    private struct Attempt: Equatable {
+        let action: ReplyAction
+        let text: String
+    }
+
+    /// What the screen is showing, derived from live state every render.
+    private enum Phase: Equatable {
+        case loading
+        case missing
+        case open
+        case sending
+        /// `slow`: past `ReplyConfirmation.slowAfter` without confirmation.
+        case sent(queued: Bool, slow: Bool)
+        /// Accepted by the relay but never confirmed by the Mac within the
+        /// relay's ack window (`ReplyConfirmation`), so a second answer is
+        /// accepted again. Input re-opens so the page can't get stuck.
+        case unconfirmed
+        /// Closed with no reason known yet while we had a reply out:
+        /// checking the archive before saying what happened.
+        case checkingClose
+        case delivered(String?)
+        case failed(String)
+        case alreadyReplied
+        case resolved(String)
+
+        var acceptsInput: Bool {
+            switch self {
+            case .open, .failed, .unconfirmed: return true
+            default: return false
+            }
+        }
+
+        /// States after which the sheet closes on its own.
+        var autoCloseDelay: Double? {
+            switch self {
+            case .delivered: return 1.4
+            case .resolved, .alreadyReplied: return 2.2
+            default: return nil
+            }
+        }
+    }
+
+    private var live: Intervention? { api.inbox.first { $0.id == interventionId } }
+    private var intervention: Intervention? { live ?? snapshot }
+
+    /// Only a relay known to predate delivery reporting gets the short
+    /// legacy window; anything else holds a second answer for the Worker's
+    /// ack window, which would refuse it with 409 before then.
+    private var legacyRelay: Bool {
+        api.relayIsLegacy && live?.deliveryStatus == nil
+    }
+
+    private var phase: Phase {
+        let isLive = live != nil
+        switch api.deliveries[interventionId] {
+        case .sending?: return .sending
+        case .sent(let queued, let at)?:
+            if !isLive { return closedPhase(hadOwnReply: true) }
+            if ReplyConfirmation.isUnconfirmed(sentAt: at, queued: queued, now: now, legacyRelay: legacyRelay) {
+                return .unconfirmed
+            }
+            return .sent(queued: queued, slow: now.timeIntervalSince(at) > ReplyConfirmation.slowAfter)
+        case .delivered(let detail)?: return .delivered(detail)
+        case .failed(let message)?: return isLive ? .failed(message) : closedPhase(hadOwnReply: true)
+        case .alreadyReplied?: return .alreadyReplied
+        case .gone?: return .resolved("This page was already resolved.")
+        case nil:
+            if isLive { return .open }
+            if snapshot != nil { return closedPhase(hadOwnReply: false) }
+            return lookupFinished ? .missing : .loading
+        }
+    }
+
+    private func closedPhase(hadOwnReply: Bool) -> Phase {
+        let reason = api.recentCloseReasons[interventionId] ?? snapshot?.closeReason
+        switch ClosedReplyPhase.decide(reason: reason, hadOwnReply: hadOwnReply, lookupFinished: closeLookupFinished) {
+        case .delivered: return .delivered(nil)
+        case .resolved(let why): return .resolved(why)
+        case .checking: return .checkingClose
+        }
+    }
 
     var body: some View {
         ZStack {
             Theme.Colour.surface.ignoresSafeArea()
             VStack(spacing: 0) {
                 topBar
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Theme.Space.l) {
-                        kindChip
-                        Text(headline)
-                            .font(Theme.Font.display22)
-                            .foregroundStyle(Theme.Colour.text)
-                        contextBlock
+                if let iv = intervention {
+                    ScrollView {
+                        content(iv)
+                            .padding(.horizontal, Theme.Space.xl)
+                            .padding(.vertical, Theme.Space.l)
                     }
-                    .padding(.horizontal, Theme.Space.xl)
-                    .padding(.top, Theme.Space.l)
+                    .scrollDismissesKeyboard(.interactively)
+                    statusStrip
+                    actionZone(iv)
+                    footer(iv)
+                } else {
+                    placeholder
                 }
-                actionRow
-                replyField
             }
         }
-        .ignoresSafeArea(.keyboard, edges: .top)
+        .task { await lookUp() }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                now = Date()
+            }
+        }
+        .onChange(of: live) { _, newValue in
+            if let newValue { snapshot = newValue }
+        }
+        .task(id: phase == .checkingClose) {
+            guard phase == .checkingClose else { return }
+            await api.resolveCloseReason(interventionId)
+            closeLookupFinished = true
+        }
+        .task(id: phase) {
+            guard let delay = phase.autoCloseDelay else { return }
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if !Task.isCancelled { dismiss() }
+        }
+        .confirmationDialog(discardTitle, isPresented: discardBinding, titleVisibility: .visible) {
+            discardButtons
+        } message: {
+            Text("Your typed text won't be sent with this action.")
+        }
     }
 
-    // MARK: header
+    /// Finds the intervention even on a cold launch from a notification,
+    /// when the inbox hasn't loaded yet.
+    private func lookUp() async {
+        if let live { snapshot = live }
+        if snapshot == nil {
+            if api.inboxLoad != .loaded || lookupFinished == false { await api.refreshInbox() }
+            snapshot = live ?? api.history.first { $0.id == interventionId }
+        }
+        if snapshot == nil {
+            await api.refreshHistory()
+            snapshot = api.history.first { $0.id == interventionId }
+        }
+        lookupFinished = true
+    }
+
+    // MARK: Header
 
     private var topBar: some View {
         HStack(spacing: Theme.Space.m) {
-            Button(action: onDismiss) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
+            Button { dismiss() } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(.body, design: .default, weight: .semibold))
                     .foregroundStyle(Theme.Colour.text)
-                    .frame(width: 36, height: 36)
+                    .frame(width: 44, height: 44)
             }
+            .accessibilityLabel("Close")
             VStack(spacing: 2) {
-                Text(intervention.projectName)
+                Text(intervention?.projectName ?? " ")
                     .font(Theme.Font.mono13)
                     .foregroundStyle(Theme.Colour.textMuted)
-                Text("Session \(intervention.sessionId.prefix(8))")
+                    .lineLimit(1)
+                Text("Session \(String((intervention?.sessionId ?? "").prefix(8)))")
                     .font(Theme.Font.bodyEm)
                     .foregroundStyle(Theme.Colour.text)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            Spacer().frame(width: 36)
+            .accessibilityElement(children: .combine)
+            Spacer().frame(width: 44)
         }
-        .padding(.horizontal, Theme.Space.xl)
+        .padding(.horizontal, Theme.Space.m)
         .padding(.top, Theme.Space.s)
-        .padding(.bottom, Theme.Space.m)
+        .padding(.bottom, Theme.Space.s)
         .overlay(Rectangle().fill(Theme.Colour.hairline).frame(height: 0.5), alignment: .bottom)
     }
 
-    private var kindChip: some View {
-        Text(intervention.kind.label + " REQUEST")
-            .font(.system(size: 11, weight: .semibold))
-            .tracking(0.5)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .overlay(Capsule().strokeBorder(Theme.Colour.pulseGradient(scheme), lineWidth: 1))
-            .foregroundStyle(Theme.Colour.textMuted)
-    }
-
-    private var headline: String {
-        switch intervention.kind {
-        case .approval:
-            if intervention.subtype == "plan" { return "Approve the plan?" }
-            return "Run this command?"
-        case .userInput:
-            return intervention.context.split(separator: ".").first.map(String.init) ?? "Your input?"
-        case .idle:
-            return "Session is waiting"
-        case .rateLimit:
-            return "Rate-limited"
+    @ViewBuilder
+    private var placeholder: some View {
+        Spacer()
+        if phase == .missing, let failure = api.inboxLoad.failureMessage {
+            VStack(spacing: Theme.Space.m) {
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(.largeTitle))
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .accessibilityHidden(true)
+                Text("Couldn't load this page")
+                    .font(Theme.Font.title17)
+                    .foregroundStyle(Theme.Colour.text)
+                Text(failure)
+                    .font(Theme.Font.body15)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .multilineTextAlignment(.center)
+                Button("Try again") {
+                    lookupFinished = false
+                    Task { await lookUp() }
+                }
+                .font(Theme.Font.bodyEm)
+                .padding(.top, Theme.Space.s)
+            }
+            .padding(Theme.Space.xxl)
+        } else if phase == .missing {
+            VStack(spacing: Theme.Space.m) {
+                Image(systemName: "checkmark.circle")
+                    .font(.system(.largeTitle))
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .accessibilityHidden(true)
+                Text("This page is no longer available")
+                    .font(Theme.Font.title17)
+                    .foregroundStyle(Theme.Colour.text)
+                Text("It was probably answered or resolved on your Mac.")
+                    .font(Theme.Font.body15)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .multilineTextAlignment(.center)
+                Button("Close") { dismiss() }
+                    .font(Theme.Font.bodyEm)
+                    .padding(.top, Theme.Space.s)
+            }
+            .padding(Theme.Space.xxl)
+        } else {
+            ProgressView("Loading…")
         }
+        Spacer()
     }
 
-    private var contextBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s) {
-            Text(intervention.context)
-                .font(Theme.Font.body15)
+    // MARK: Content
+
+    private func content(_ iv: Intervention) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.l) {
+            HStack(spacing: 6) {
+                KindChip(kind: iv.kind, subtype: iv.subtype)
+                if let backend = iv.backend {
+                    BackendPill(backend: backend, source: iv.source)
+                }
+            }
+            Text(ReplyCopy.headline(for: iv))
+                .font(Theme.Font.display22)
                 .foregroundStyle(Theme.Colour.text)
-                .padding(Theme.Space.l)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.Colour.surfaceRaised)
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-            Text("Working directory: \(intervention.cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
-                .font(Theme.Font.caption12)
-                .foregroundStyle(Theme.Colour.textMuted)
+                .accessibilityAddTraits(.isHeader)
+            TimelineView(.periodic(from: .now, by: 15)) { context in
+                Text(RelativeTime.string("Paged", since: iv.openedAt, now: context.date))
+                    .font(Theme.Font.caption12)
+                    .tracking(0.5)
+                    .textCase(.uppercase)
+                    .foregroundStyle(Theme.Colour.textMuted)
+            }
+            contextBlock(iv)
+            if !iv.cwd.isEmpty {
+                Text("Working directory: \(PathDisplay.abbreviatingHome(iv.cwd))")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .textSelection(.enabled)
+            }
         }
     }
 
-    // MARK: actions
+    private func contextBlock(_ iv: Intervention) -> some View {
+        // Approvals are usually a command or a diff: monospace, selectable.
+        let isCode = iv.kind == .approval && iv.subtype != "plan"
+        return VStack(alignment: .leading, spacing: Theme.Space.s) {
+            HStack {
+                Text(isCode ? "REQUEST" : "CONTEXT")
+                    .font(Theme.Font.chip11)
+                    .tracking(0.5)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                Spacer()
+                Button {
+                    UIPasteboard.general.string = iv.context
+                    copied = true
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        copied = false
+                    }
+                } label: {
+                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(Theme.Font.caption12)
+                        .foregroundStyle(Theme.Colour.textMuted)
+                        .frame(minHeight: 32)
+                }
+                .disabled(iv.context.isEmpty)
+                .accessibilityLabel(copied ? "Copied" : "Copy request text")
+            }
+            Text(iv.context.isEmpty ? "No details were sent with this page." : iv.context)
+                .font(isCode ? Theme.Font.mono13 : Theme.Font.body15)
+                .foregroundStyle(Theme.Colour.text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(Theme.Space.l)
+        .background(isCode ? Theme.Colour.surfaceInset : Theme.Colour.surfaceRaised)
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
 
-    private var actionRow: some View {
-        HStack(spacing: 8) {
-            quickButton("Approve", filled: true, color: Theme.Colour.pulseGradient(scheme)) { reply(action: "approve") }
-            quickButton("Deny", filled: true, color: AnyShapeStyle(Theme.Colour.destructive)) { reply(action: "deny") }
-            quickButton("Carry on", filled: false, color: AnyShapeStyle(Theme.Colour.text)) { reply(action: "carry_on") }
+    // MARK: Delivery / resolution state
+
+    @ViewBuilder
+    private var statusStrip: some View {
+        switch phase {
+        case .open, .loading, .missing:
+            EmptyView()
+        case .sending:
+            strip(icon: nil, text: "Sending…", color: Theme.Colour.textMuted)
+        case .sent(let queued, let slow):
+            if queued {
+                strip(icon: "clock", text: "Queued — your Mac is offline. It'll be typed in when the Mac reconnects (within an hour).", color: Theme.Colour.warning)
+            } else if slow {
+                strip(icon: nil, text: legacyRelay
+                      ? "Sent — waiting for your Mac to confirm…"
+                      : "Sent — waiting for your Mac. It hasn't confirmed this reply yet; if it reports a failure, or hasn't confirmed within 20 minutes, you can answer again.",
+                      color: Theme.Colour.textMuted)
+            } else {
+                strip(icon: nil, text: "Sent — waiting for your Mac to confirm…", color: Theme.Colour.textMuted)
+            }
+        case .checkingClose:
+            strip(icon: nil, text: "This page closed — checking whether your reply landed…", color: Theme.Colour.textMuted)
+        case .delivered(let detail):
+            strip(icon: "checkmark.circle.fill", text: "Delivered — \(detail ?? "typed into the session on your Mac").", color: Theme.Colour.success)
+        case .failed(let message):
+            HStack(alignment: .top, spacing: Theme.Space.s) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Theme.Colour.destructiveText)
+                    .accessibilityHidden(true)
+                Text("Failed: \(message)")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                if let attempt = lastAttempt {
+                    Button("Retry") { send(attempt.action, text: attempt.text) }
+                        .font(Theme.Font.bodyEm)
+                        .frame(minHeight: 32)
+                }
+            }
+            .stripStyle()
+        case .unconfirmed:
+            strip(icon: "questionmark.circle", text: "Your Mac never confirmed this reply. If the session is still waiting, you can answer again.", color: Theme.Colour.warning)
+        case .alreadyReplied:
+            strip(icon: "checkmark.circle", text: "Already answered — another reply (maybe from your lock screen) got there first.", color: Theme.Colour.textMuted)
+        case .resolved(let why):
+            strip(icon: "checkmark.circle", text: "Resolved — \(why)", color: Theme.Colour.textMuted)
+        }
+    }
+
+    private func strip(icon: String?, text: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: Theme.Space.s) {
+            if let icon {
+                Image(systemName: icon).foregroundStyle(color).accessibilityHidden(true)
+            } else {
+                ProgressView().controlSize(.small)
+            }
+            Text(text)
+                .font(Theme.Font.caption12)
+                .foregroundStyle(Theme.Colour.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .stripStyle()
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: Actions
+
+    @ViewBuilder
+    private func actionZone(_ iv: Intervention) -> some View {
+        let enabled = phase.acceptsInput
+        VStack(spacing: Theme.Space.m) {
+            switch iv.kind {
+            case .approval:
+                HStack(spacing: Theme.Space.s) {
+                    quickButton(iv.subtype == "plan" ? "Approve plan" : "Approve",
+                                style: .accent, enabled: enabled) { tapQuick(.approve) }
+                    quickButton(iv.subtype == "plan" ? "Keep planning" : "Deny",
+                                style: .destructive, enabled: enabled) { tapQuick(.deny) }
+                }
+                if iv.acceptsDecisionsOnly {
+                    // The relay refuses anything else for these (422).
+                    Text("This page comes from an older Page hook that can only apply Approve or Deny.")
+                        .font(Theme.Font.caption12)
+                        .foregroundStyle(Theme.Colour.textMuted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    replyField(placeholder: "Deny with instructions…", enabled: enabled)
+                }
+            case .userInput:
+                replyField(placeholder: "Type your answer…", enabled: enabled)
+            case .idle:
+                quickButton("Carry on", style: .outline, enabled: enabled) { tapQuick(.carryOn) }
+                replyField(placeholder: "Tell it what to do next…", enabled: enabled)
+            case .rateLimit:
+                Text("Nothing to answer. Page on your Mac resumes the session when the limit resets if auto-resume is on.")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                quickButton("Close", style: .outline, enabled: true) { dismiss() }
+            }
         }
         .padding(.horizontal, Theme.Space.xl)
-        .padding(.top, Theme.Space.l)
+        .padding(.top, Theme.Space.m)
     }
 
-    private func quickButton<S: ShapeStyle>(_ label: String, filled: Bool, color: S, action: @escaping () -> Void) -> some View {
+    private enum QuickStyle { case accent, destructive, outline }
+
+    private func quickButton(_ label: String, style: QuickStyle, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
-                .font(.system(size: 15, weight: .semibold))
+                .font(Theme.Font.button17)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
-                .frame(height: 44)
-                .background(
-                    Group {
-                        if filled {
-                            RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous).fill(color)
-                        } else {
-                            RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous)
-                                .strokeBorder(Theme.Colour.hairline, lineWidth: 1)
-                        }
+                .frame(minHeight: buttonHeight)
+                .background {
+                    let shape = RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous)
+                    switch style {
+                    case .accent: shape.fill(Theme.Colour.pulseGradient(scheme))
+                    case .destructive: shape.fill(Theme.Colour.destructive)
+                    case .outline: shape.strokeBorder(Theme.Colour.hairline, lineWidth: 1)
                     }
-                )
-                .foregroundStyle(filled ? AnyShapeStyle(Color.black) : AnyShapeStyle(Theme.Colour.text))
+                }
+                .foregroundStyle(style == .outline ? Theme.Colour.text : Theme.Colour.onAccent)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(sending)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.45)
     }
 
-    private var replyField: some View {
-        VStack(spacing: Theme.Space.xs) {
-            HStack(spacing: Theme.Space.s) {
-                TextField("Or type a reply…", text: $replyText, axis: .vertical)
-                    .lineLimit(1...4)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Font.body15)
-                    .padding(.horizontal, Theme.Space.l)
-                    .padding(.vertical, Theme.Space.s)
-                Button(action: { reply(action: replyText.isEmpty ? nil : "custom") }) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(Color.black)
-                        .frame(width: 36, height: 36)
-                        .background(
-                            replyText.isEmpty
-                                ? AnyShapeStyle(Theme.Colour.textMuted)
-                                : AnyShapeStyle(Theme.Colour.pulseGradient(scheme))
-                        )
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 6)
-                .padding(.vertical, 4)
-                .disabled(sending || replyText.isEmpty)
+    private func replyField(placeholder: String, enabled: Bool) -> some View {
+        let hasText = !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return HStack(alignment: .bottom, spacing: Theme.Space.s) {
+            TextField(placeholder, text: $replyText, axis: .vertical)
+                .lineLimit(1...5)
+                .textFieldStyle(.plain)
+                .font(Theme.Font.body15)
+                .padding(.horizontal, Theme.Space.l)
+                .padding(.vertical, Theme.Space.m)
+                .disabled(!enabled)
+            Button { send(.custom, text: replyText.trimmingCharacters(in: .whitespacesAndNewlines)) } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(.body, design: .default, weight: .bold))
+                    .foregroundStyle(Theme.Colour.onAccent)
+                    .frame(width: sendSize, height: sendSize)
+                    .background(
+                        hasText && enabled
+                            ? AnyShapeStyle(Theme.Colour.pulseGradient(scheme))
+                            : AnyShapeStyle(Theme.Colour.textMuted.opacity(0.5))
+                    )
+                    .clipShape(Circle())
             }
-            .background(Theme.Colour.surfaceRaised)
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.input).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.input))
-            .padding(.horizontal, Theme.Space.xl)
-            .padding(.top, Theme.Space.l)
+            .buttonStyle(.plain)
+            .padding(.trailing, 6)
+            .padding(.bottom, 6)
+            .disabled(!enabled || !hasText)
+            .accessibilityLabel("Send reply")
+        }
+        .background(Theme.Colour.surfaceRaised)
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.input).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.input))
+    }
 
-            Text("Reply goes to session \(intervention.sessionId.prefix(8)) · injected via tmux")
-                .font(Theme.Font.caption12)
-                .foregroundStyle(Theme.Colour.textMuted)
-                .padding(.bottom, Theme.Space.l)
+    private func footer(_ iv: Intervention) -> some View {
+        Text(footerText(iv))
+            .font(Theme.Font.caption12)
+            .foregroundStyle(Theme.Colour.textMuted)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, Theme.Space.xl)
+            .padding(.top, Theme.Space.s)
+            .padding(.bottom, Theme.Space.l)
+    }
+
+    private func footerText(_ iv: Intervention) -> String {
+        if iv.isBlockingHook {
+            return "Your answer goes straight to \(iv.agentName)'s permission hook in session \(iv.sessionId.prefix(8))."
+        }
+        var where_ = "session \(iv.sessionId.prefix(8))"
+        if let source = iv.source, source != .unknown { where_ += " (\(source.label))" }
+        return "Page types your reply into \(where_) on your Mac."
+    }
+
+    /// Quick actions never carry the draft: the Mac uses non-empty text in
+    /// place of the action, so a half-typed note would silently turn Deny
+    /// into a prompt. With a draft present, ask first.
+    private func tapQuick(_ action: ReplyAction) {
+        if replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            send(action, text: "")
+        } else {
+            pendingQuickAction = action
         }
     }
 
-    private func reply(action: String?) {
-        sending = true
+    private func send(_ action: ReplyAction, text: String) {
+        guard ReplyOutcome.validate(text: text, action: action) == nil else { return }
+        lastAttempt = Attempt(action: action, text: text)
         Task {
-            await api.reply(interventionId: intervention.id, text: replyText, action: action)
-            sending = false
-            onDismiss()
+            let outcome = await api.reply(to: interventionId, text: text, action: action)
+            if case .accepted = outcome, action == .custom { replyText = "" }
         }
+    }
+
+    // MARK: Discard-draft confirmation
+
+    private var discardBinding: Binding<Bool> {
+        Binding(get: { pendingQuickAction != nil }, set: { if !$0 { pendingQuickAction = nil } })
+    }
+
+    private var discardTitle: String {
+        switch pendingQuickAction {
+        case .approve?: return "Approve without your note?"
+        case .deny?: return "Deny with your note?"
+        case .carryOn?: return "Send your note instead?"
+        default: return ""
+        }
+    }
+
+    @ViewBuilder
+    private var discardButtons: some View {
+        let draft = replyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch pendingQuickAction {
+        case .approve?:
+            Button("Approve and discard note") { replyText = ""; send(.approve, text: "") }
+        case .deny?:
+            Button("Deny with these instructions") { send(.custom, text: draft) }
+            Button("Deny and discard note", role: .destructive) { replyText = ""; send(.deny, text: "") }
+        case .carryOn?:
+            Button("Send my note") { send(.custom, text: draft) }
+            Button("Carry on and discard note") { replyText = ""; send(.carryOn, text: "") }
+        default:
+            EmptyView()
+        }
+        Button("Cancel", role: .cancel) { pendingQuickAction = nil }
+    }
+}
+
+private extension View {
+    func stripStyle() -> some View {
+        self
+            .padding(Theme.Space.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.Colour.surfaceRaised)
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, Theme.Space.xl)
+            .padding(.top, Theme.Space.s)
     }
 }

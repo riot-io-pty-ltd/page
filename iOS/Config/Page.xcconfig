@@ -1,0 +1,18 @@
+// Shared build settings for the Page iOS app (referenced from project.yml).
+//
+// Personal settings go in Config/Local.xcconfig (git-ignored). Copy
+// Config/Local.xcconfig.example to get started. Values set there override
+// the defaults below.
+
+// Bundle id. Must match APNS_BUNDLE_ID in Cloudflare/wrangler.toml. Change it
+// (in Local.xcconfig) if you sign with your own team, because bundle ids are
+// unique per Apple developer team.
+PAGE_BUNDLE_ID = app.page.Page
+
+// Entitlements. The default file has no paid-team entitlements, so a free
+// Apple ID (Personal Team) can still build and run the app; pages then only
+// arrive while the app is open. With a paid Apple Developer Program team,
+// switch to Page/Page-Push.entitlements in Local.xcconfig to enable APNs.
+PAGE_ENTITLEMENTS = Page/Page.entitlements
+
+#include? "Local.xcconfig"

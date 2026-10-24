@@ -12,6 +12,15 @@ enum AppTab: Hashable, CaseIterable {
         }
     }
 
+    var accessibilityName: String {
+        switch self {
+        case .inbox: return "Inbox"
+        case .history: return "History"
+        case .stats: return "Stats"
+        case .settings: return "Settings"
+        }
+    }
+
     var systemImage: String {
         switch self {
         case .inbox: return "tray.fill"
@@ -24,6 +33,7 @@ enum AppTab: Hashable, CaseIterable {
 
 struct PillTabBar: View {
     @Binding var selection: AppTab
+    var inboxCount: Int = 0
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -32,15 +42,18 @@ struct PillTabBar: View {
                 Button { selection = tab } label: {
                     VStack(spacing: 4) {
                         Image(systemName: tab.systemImage)
-                            .font(.system(size: 18, weight: .semibold))
+                            .font(.system(.body, design: .default, weight: .semibold))
                         Text(tab.label)
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(.caption2, design: .default, weight: .semibold))
                             .tracking(0.5)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
                     .foregroundStyle(selection == tab
-                                     ? AnyShapeStyle(scheme == .dark ? Color(hex: "#0E1014") : Color(hex: "#15171A"))
+                                     ? AnyShapeStyle(Theme.Colour.onAccent)
                                      : AnyShapeStyle(Theme.Colour.textMuted))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.vertical, 6)
                     .background(
                         ZStack {
                             if selection == tab {
@@ -49,12 +62,20 @@ struct PillTabBar: View {
                             }
                         }
                     )
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(tab.accessibilityName)
+                .accessibilityValue(tab == .inbox && inboxCount > 0 ? "\(inboxCount) waiting" : "")
+                .accessibilityAddTraits(selection == tab ? .isSelected : [])
             }
         }
         .padding(4)
-        .frame(height: 62)
+        .frame(minHeight: 62)
+        .fixedSize(horizontal: false, vertical: true)
+        // Four tabs can't grow forever on a phone; past this size iOS's own
+        // tab bars rely on the large-content viewer too.
+        .dynamicTypeSize(...DynamicTypeSize.xxLarge)
         .background(
             RoundedRectangle(cornerRadius: 36, style: .continuous)
                 .fill(Theme.Colour.surfaceRaised)

@@ -1,0 +1,251 @@
+import SwiftUI
+import UIKit
+
+// Small views shared by the Inbox, Reply, History and Settings screens.
+
+struct KindChip: View {
+    let kind: InterventionKind
+    var subtype: String? = nil
+
+    private var text: String {
+        kind == .approval && subtype == "plan" ? "PLAN APPROVAL" : kind.label
+    }
+
+    var body: some View {
+        Text(text)
+            .font(Theme.Font.chip11)
+            .tracking(0.5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .overlay(Capsule().strokeBorder(kind.color, lineWidth: 1))
+            .foregroundStyle(kind.color)
+            .accessibilityLabel(kind.accessibilityName)
+    }
+}
+
+struct BackendPill: View {
+    let backend: InterventionBackend
+    let source: InterventionSource?
+
+    var body: some View {
+        let tint = backend.tint
+        HStack(spacing: 6) {
+            Text(backend.badge)
+                .font(Theme.Font.chip11)
+                .tracking(0.5)
+            Text(source?.label ?? InterventionSource.unknown.label)
+                .font(Theme.Font.caption12)
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(tint.opacity(0.12)))
+        .overlay(Capsule().strokeBorder(tint.opacity(0.5), lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(backend.displayName), \(source?.label ?? "unknown surface")")
+    }
+}
+
+/// Section title used across tabs ("YOUR MAC", "TOP PROJECTS" …).
+struct SectionTitle: View {
+    let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(Theme.Font.caption12)
+            .tracking(0.5)
+            .foregroundStyle(Theme.Colour.textMuted)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+extension View {
+    /// Raised card: surface, hairline border, rounded corners.
+    func cardStyle(padding: CGFloat = Theme.Space.l) -> some View {
+        self
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.Colour.surfaceRaised)
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+                .strokeBorder(Theme.Colour.hairline, lineWidth: 1))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+    }
+}
+
+// MARK: - Mac presence
+
+extension MacPresence {
+    /// One-line status, e.g. "Online · heartbeat 12s ago".
+    func summary(now: Date) -> String {
+        switch self {
+        case .unknown:
+            return "Checking…"
+        case .online(let seen):
+            guard let seen else { return "Online" }
+            return "Online · heartbeat \(RelativeTime.ago(since: seen, now: now))"
+        case .stale(let seen):
+            return "Not responding · last heartbeat \(RelativeTime.ago(since: seen, now: now))"
+        case .offline(let seen):
+            guard let seen else { return "Offline" }
+            return "Offline · last seen \(RelativeTime.ago(since: seen, now: now))"
+        case .neverConnected:
+            return "Never connected with this pairing"
+        }
+    }
+
+    var dotColor: Color {
+        switch self {
+        case .online: return Theme.Colour.success
+        case .stale: return Theme.Colour.warning
+        case .offline, .neverConnected: return Theme.Colour.destructiveText
+        case .unknown: return Theme.Colour.textMuted
+        }
+    }
+}
+
+struct StatusDot: View {
+    let color: Color
+    var body: some View {
+        Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
+    }
+}
+
+// MARK: - Banners
+
+/// A problem the user should know about, with a way to fix it when there is
+/// one. Shown at the top of the Inbox so "All quiet" is never a false promise.
+struct StatusBanner: View {
+    enum Tone { case warning, error, info }
+
+    let tone: Tone
+    let systemImage: String
+    let title: String
+    let message: String
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
+
+    private var tint: Color {
+        switch tone {
+        case .warning: return Theme.Colour.warning
+        case .error: return Theme.Colour.destructiveText
+        case .info: return Theme.Colour.textMuted
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Theme.Space.m) {
+            Image(systemName: systemImage)
+                .font(.system(.body, design: .default, weight: .semibold))
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                Text(title)
+                    .font(Theme.Font.bodyEm)
+                    .foregroundStyle(Theme.Colour.text)
+                Text(message)
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let actionTitle, let action {
+                    Button(actionTitle, action: action)
+                        .font(Theme.Font.bodyEm)
+                        .foregroundStyle(Theme.Colour.text)
+                        .padding(.top, 2)
+                        .frame(minHeight: 32)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Theme.Space.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(tint.opacity(0.35), lineWidth: 1))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// The set of banners that apply right now, most important first.
+struct InboxBanners: View {
+    @EnvironmentObject var api: APIClient
+    @EnvironmentObject var notifications: NotificationService
+    @EnvironmentObject var pairing: PairingStore
+    let now: Date
+    @State private var confirmingRepair = false
+
+    var body: some View {
+        VStack(spacing: Theme.Space.s) {
+            if api.authRejected {
+                StatusBanner(tone: .error, systemImage: "key.slash",
+                             title: "This pairing no longer works",
+                             message: "Your relay rejected this iPhone's pairing token — the Mac probably generated a new one. Unpair and scan the new code.",
+                             actionTitle: "Re-pair…") { confirmingRepair = true }
+            } else if let failure = api.inboxLoad.failureMessage, api.connection != .connected {
+                StatusBanner(tone: .error, systemImage: "wifi.exclamationmark",
+                             title: "Can't reach your relay",
+                             message: "\(failure) The inbox may be out of date.",
+                             actionTitle: "Try again") { Task { await api.refreshAll() } }
+            } else {
+                presenceBanner
+            }
+            if notifications.authorization == .denied {
+                StatusBanner(tone: .warning, systemImage: "bell.slash",
+                             title: "Notifications are off",
+                             message: "You won't be paged while Page is closed.",
+                             actionTitle: "Open Settings") { Self.openNotificationSettings() }
+            } else if case .unavailable(let why) = notifications.push {
+                StatusBanner(tone: .warning, systemImage: "bell.badge.slash",
+                             title: "Push notifications unavailable",
+                             message: why)
+            } else if case .failed(let why) = notifications.push {
+                StatusBanner(tone: .warning, systemImage: "bell.badge.slash",
+                             title: "Push registration failed",
+                             message: why,
+                             actionTitle: "Retry") { Task { await notifications.registerWithRelay(force: true) } }
+            }
+        }
+        .confirmationDialog("Unpair this Mac?", isPresented: $confirmingRepair, titleVisibility: .visible) {
+            Button("Unpair", role: .destructive) { pairing.unpair() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You'll go back to the pairing screen. On your Mac, open Page → Pair phone… and scan the code.")
+        }
+    }
+
+    @ViewBuilder
+    private var presenceBanner: some View {
+        let presence = MacPresence.evaluate(api.macStatus, now: now)
+        switch presence {
+        case .neverConnected:
+            StatusBanner(tone: .error, systemImage: "key.slash",
+                         title: "Your Mac hasn't connected with this pairing",
+                         message: "The relay has never seen Page on your Mac use this pairing code, so no pages can reach this iPhone. If you regenerated the token on your Mac, re-pair with the new code.",
+                         actionTitle: "Re-pair…") { confirmingRepair = true }
+        case .offline(let seen):
+            // An abandoned token still answers like an offline Mac, so after
+            // a long silence offer the re-pair a regenerated token needs.
+            let repair = presence.suggestsRepair(now: now)
+            StatusBanner(tone: .warning, systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                         title: "Your Mac is offline",
+                         message: (seen.map { "Last seen \(RelativeTime.ago(since: $0, now: now)). " } ?? "")
+                            + "New pages can't reach you until Page on your Mac reconnects to the relay."
+                            + (repair ? " If you regenerated the token on your Mac, re-pair this iPhone." : ""),
+                         actionTitle: repair ? "Re-pair…" : nil,
+                         action: repair ? { confirmingRepair = true } : nil)
+        case .stale(let seen):
+            StatusBanner(tone: .warning, systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                         title: "Your Mac stopped checking in",
+                         message: "Last heartbeat \(RelativeTime.ago(since: seen, now: now)). It may be asleep or busy; pages may be delayed.")
+        default:
+            EmptyView()
+        }
+    }
+
+    static func openNotificationSettings() {
+        if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+            UIApplication.shared.open(url)
+        }
+    }
+}
