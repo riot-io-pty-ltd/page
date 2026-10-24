@@ -230,6 +230,46 @@ final class ModelProviderTests: XCTestCase {
 
     // MARK: Live Claude process
 
+    /// The keys beyond `ProcArgs.envAllowlist` come back from a process's
+    /// environment block (the shape `claude` processes have).
+    func testProcessEnvKeysAreReadFromTheEnvironmentBlock() throws {
+        var bytes: [UInt8] = []
+        withUnsafeBytes(of: Int32(1).littleEndian) { bytes += $0 }
+        for s in ["/usr/local/bin/claude", "claude",
+                  "CLAUDE_CODE_USE_FOUNDRY=1", "CLAUDE_CONFIG_DIR=/x", "UNRELATED_SECRET=s"] {
+            bytes += Array(s.utf8) + [0]
+        }
+        let info = try XCTUnwrap(ProcArgs.parse(Data(bytes), envKeys: C.claudeProcessEnvKeys))
+        XCTAssertEqual(info.env, ["CLAUDE_CODE_USE_FOUNDRY": "1", "CLAUDE_CONFIG_DIR": "/x"])
+        XCTAssertEqual(C.claude(env: info.env, settingsEnv: [:]), .cloudGateway)
+    }
+
+    /// The same through a real child process. macOS hides the environment
+    /// of Apple platform binaries such as /bin/sleep (not of `claude`), so
+    /// this skips unless the kernel shows it.
+    func testProcessEnvKeysAreReadFromALiveProcess() throws {
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        child.arguments = ["30"]
+        child.environment = ["CLAUDE_CODE_USE_FOUNDRY": "1", "CLAUDE_CONFIG_DIR": "/x", "UNRELATED_SECRET": "s"]
+        try child.run()
+        defer { child.terminate(); child.waitUntilExit() }
+        usleep(100_000)
+        let info = try XCTUnwrap(ProcArgs.read(pid: child.processIdentifier, envKeys: C.claudeProcessEnvKeys))
+        try XCTSkipIf(info.env.isEmpty, "the kernel hides this child's environment (platform binary)")
+        XCTAssertEqual(info.env, ["CLAUDE_CODE_USE_FOUNDRY": "1", "CLAUDE_CONFIG_DIR": "/x"])
+        XCTAssertEqual(C.claude(env: info.env, settingsEnv: [:]), .cloudGateway)
+    }
+
+    /// cmux starts Claude with `--settings '<inline JSON of hooks>'`: no
+    /// `env`, so it must not make the session unclassifiable.
+    func testInlineHookSettingsKeepTheClassification() {
+        let argv = ["claude", "--session-id", "455cd6af-046c-4468-9d9b-5de46c4d8194", "--settings",
+                    #"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cmux hooks claude stop"}]}]}}"#]
+        XCTAssertEqual(C.claudeLive(argv: argv, env: [:], cwd: "/nonexistent-\(UUID().uuidString)", home: "/nonexistent"),
+                       .anthropic)
+    }
+
     func testClaudeLiveReadsEverySettingsSourceOrIsUnknown() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("claudelive-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
