@@ -21,6 +21,10 @@ jobs:
         run: swift build -c debug
       - name: Build (release)
         run: swift build -c release
+      - name: Unit tests
+        # Pure logic + fakes only. The live injection test skips itself
+        # unless PAGE_LIVE_SESSION_ID is set.
+        run: swift test
 
   ios-build:
     name: iOS build (simulator)
@@ -44,15 +48,20 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             build
+      - name: Logic tests
+        working-directory: iOS
+        run: bash Tests/run-logic-tests.sh
 
   worker-typecheck:
-    name: Worker typecheck
+    name: Worker typecheck + tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # Tests run the TypeScript sources through Node's type stripping
+          # (package.json engines: >=22.18).
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: Cloudflare/package-lock.json
       - name: Install deps
@@ -61,3 +70,19 @@ jobs:
       - name: Type-check
         working-directory: Cloudflare
         run: npx tsc --noEmit
+      - name: Tests
+        working-directory: Cloudflare
+        run: npm test
+
+  scripts:
+    name: Shell + Python syntax
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n (macOS bash 3.2)
+        run: |
+          bash -n hooks/page-notify.sh
+          bash -n install.sh
+          bash -n build.sh
+      - name: Python compile
+        run: python3 -m py_compile hooks/page-extract-context.py

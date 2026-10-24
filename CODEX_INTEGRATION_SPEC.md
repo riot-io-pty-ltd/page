@@ -15,6 +15,123 @@ This document covers:
 This is a design and implementation spec only. It does not change runtime
 behavior by itself.
 
+## Current implementation status (October 2026)
+
+Read this section first. The rest of this document is the original design.
+Where the two disagree, this section describes what actually ships.
+
+### Why the shipped design differs from the plan
+
+The plan assumed Page's own `codex app-server` child could watch and steer
+the user's sessions. It can't. Each Codex surface (the CLI TUI, Codex Desktop,
+the VS Code extension) embeds its own app-server. A separately spawned child
+can list every thread on disk (`thread/list`, `thread/read`), but it never
+receives `turn/*`, `thread/status/changed` or approval requests for turns
+that another process drives. `thread/read` does not subscribe the child to
+another process's live thread.
+
+The one signal every surface shares is the rollout JSONL file each session
+appends to. So the shipped backend uses the app-server for discovery and the
+rollout files for live state.
+
+### What works
+
+| Capability | How | Surfaces |
+|---|---|---|
+| Discovery | `thread/list` through Page's app-server child. It requests `sortKey: "updated_at"`, `sortDirection: "desc"` (dropped after an RPC error on older servers) and follows `nextCursor` for up to 4 pages of 50. Pages are merged and deduplicated by id. Sub-agent threads are skipped. | all |
+| Which threads count | A thread is watched if it was updated in the last 30 min, or it has an open idle page, or it is the newest thread in a directory where a live interactive `codex` process runs. Older threads in the same directory are history and are ignored. | all |
+| Keep-awake | State is re-derived from the rollout tail on every tick. In a turn (`task_started`/`response_item` after the last `task_complete`/`turn_aborted`) means active, for up to 15 min without writes. A turn that has been silent longer counts as stalled and stops holding power. After the turn ends the session is idle. Pending pages also hold power, but only for `holdAwakeForPendingPageMinutes`. | all |
+| Idle pages | The latest turn ended with `task_complete`, at least `idlePageDelaySeconds` ago and at most 4h ago. The page is held back while the user is at the Mac (`idlePageOnlyWhenAwaySeconds`). Its id is `codex-idle-<threadId>-<task_complete epoch>`, keyed on the turn end rather than the file mtime, because `thread_settings_applied` can be written after `task_complete`. Some sessions never page: aborted turns (the user hit Esc), `codex exec` threads, and terminal sessions whose `codex` process has exited. | all |
+| Rate limits | The `rate_limits` snapshot in rollout `token_count` events (snake_case) and `account/rateLimits/updated` (camelCase, nested under `rateLimits`). Limited means either window has `usedPercent >= 100` or `rateLimitReachedType` is set. The limit clears when a newer snapshot shows it isn't limited, or when `resetsAt` passes. It is reported once per limit, tagged `backend: .codex` and attributed to "Codex account". It is never auto-resumed. | all |
+| Replies | `Codex/CodexInjector.swift`, and only when the thread's latest turn has ended (see below). | CLI in tmux or Terminal.app; Desktop and VS Code through exec resume |
+| Approvals arriving at Page's own child | Correctly classified as JSON-RPC server requests (id + method). `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` become `.permission` pages and are answered with `{decision: "accept" \| "decline"}`. Every other server request (for example `item/tool/requestUserInput`) gets a `-32601` reply so the server never blocks. This only fires if a turn runs against Page's child, which doesn't happen today. | none in practice |
+
+### What does not work, and why
+
+- **Codex approval prompts are not detected** for CLI, Desktop or VS Code
+  sessions. Codex does not persist approval requests to the rollout: across
+  every local rollout inspected there are no `*_approval_request` events. A
+  session blocked on an approval looks mid-turn, so it shows as active for
+  15 min and then as stalled. A heuristic such as "tool call without output,
+  quiet for N seconds" was rejected. It fires on every long-running command,
+  and it would put Approve buttons on the phone that Page can't honour safely.
+  The parser does recognise `exec_approval_request`,
+  `apply_patch_approval_request` and `request_user_input` if a future Codex
+  persists them, but it only uses them for session state, not pages.
+- **Phone Approve/Deny for a live Codex TUI** is refused with "Answer Codex
+  approval prompts on your Mac". The TUI's approval keystrokes are unverified,
+  and letters typed into an approval overlay act as hotkeys.
+
+### Reply safety rules (CodexInjector + CodexBackend.replyPlan)
+
+1. Text is typed only if the latest turn-relevant rollout line is
+   `task_complete` or `turn_aborted`. Mid-turn the reply is refused ("Codex is
+   still working — reply once the turn finishes"), and so is an unknown phase.
+2. Targeting is exact or it fails. The target is the codex process holding the
+   thread's rollout open (when `lsof` shows it), else the single interactive
+   codex whose cwd matches. Processes are grouped by tty, because the Node
+   wrapper and the native binary share one. Two terminals means the reply is
+   refused as ambiguous.
+3. tmux: the pane whose `#{pane_tty}` is that tty gets `send-keys -l` (or a
+   bracketed `paste-buffer -p` for multi-line text). Page then waits 0.4s,
+   because Codex folds an Enter that arrives inside a paste burst into the
+   text, and sends an `Enter` key. Every exit code is checked.
+4. Terminal.app: `do script` into the tab with that tty, then select the tab
+   and bring it to the front. Page then checks that Terminal is frontmost
+   with that tab selected immediately before sending Return through System
+   Events `tell process "Terminal"`. Codex treats a typed newline as a newline
+   inside the composer, so submitting needs a real Return key event.
+   `ok_no_enter` (Accessibility not granted) is reported as a failure, and the
+   reply says the text is waiting in the composer.
+5. Other hosts (iTerm2, VS Code's terminal, cmux, ...) fail with "Page can't
+   type into <App> yet — use tmux or Terminal.app".
+6. `codex exec resume <thread> <text>` runs in the background (15-min
+   timeout, output in `~/Library/Logs/Page-codex-replies/`). This happens only
+   when no live interactive codex owns the thread or its directory, and only if
+   `headlessResumeFallbackEnabled` is on. This is the Desktop / VS Code path.
+   `--skip-git-repo-check` is added (before `resume`, because it is an `exec`
+   option) only after the CLI's own refusal message names it. That message
+   proves the flag exists in the installed build, without Page having to
+   probe `codex exec --help`.
+
+### App-server client hardening
+
+- Inbound messages are classified as response, server request or
+  notification, and `id` may be an integer or a string.
+- Partial stdout lines are buffered until their newline arrives, and stderr is
+  drained to the log.
+- The stdin pipe has `F_SETNOSIGPIPE`, so a write to a dead child returns
+  EPIPE instead of killing the app. `main.swift` also ignores SIGPIPE.
+- A generation counter means a stale child's exit or output can never fail
+  the current child's calls.
+- A failed handshake terminates the child it spawned.
+- `shutdown()` sends SIGTERM, then SIGKILL after 2s.
+- Restarts back off exponentially (15s up to 5 min). A child that dies within
+  a minute of starting counts as a failed start.
+- The `codex` binary is found with
+  `ProcessRunner.findExecutable("codex", configured: codexPath)`, using
+  `ProcessRunner.augmentedEnvironment()`. Changing `codexPath` restarts the
+  child.
+
+### Future work: the protocol-native architecture
+
+To make approvals, steering and live status first-class, sessions have to run
+against one shared app-server instead of each surface's embedded one:
+
+- Page runs a long-lived app-server on a local socket, and users start the TUI
+  with `codex --remote <addr>` (or a wrapper that does). Approval requests
+  then arrive at Page as server requests and can be answered with the
+  decision enum. Replies become `turn/steer` / `turn/start` instead of
+  keystrokes, and `thread/status/changed` becomes authoritative. The routing
+  for this is already in place in `AppServerClient` and
+  `CodexBackend.handleServerRequest`.
+- Open questions for that work: WebSocket/remote transport stability (still
+  marked experimental), Desktop and VS Code support for a remote server,
+  and auth for a socket other local processes can reach.
+- `item/tool/requestUserInput` answers: the answer schema
+  (`ToolRequestUserInputResponse`) is unverified, so these are rejected with
+  `-32601` today.
+
 ## Summary
 
 Codex support should be built around a backend abstraction, not around more
@@ -543,11 +660,20 @@ Claude-only feature because Anthropic's reset wording ("resets 7:10pm
 (Africa/Johannesburg)") is so specific to Claude Code's transcript. The
 app-server spike disproved that assumption.
 
-Codex exposes rate-limit state as a first-class protocol notification:
+Codex exposes rate-limit state as a first-class protocol notification. The
+shape below was confirmed against the 0.142.5 binary's serde strings and the
+`token_count` events in real rollouts (an earlier draft showed a flat
+`{limitId, usedPercent, resetsAt}`; the parser still accepts it):
 
 ```
 account/rateLimits/updated
-  { limitId, usedPercent, windowDurationMins, resetsAt: <unix> }
+  { rateLimits: { limitId, limitName?, planType?, rateLimitReachedType?,
+                  primary:   { usedPercent, windowDurationMins, resetsAt: <unix> },
+                  secondary: { usedPercent, windowDurationMins, resetsAt: <unix> } | null } }
+
+rollout event_msg/token_count (same snapshot, snake_case)
+  { rate_limits: { limit_id, primary: { used_percent, window_minutes, resets_at }, secondary,
+                   rate_limit_reached_type } }
 ```
 
 That is strictly easier to consume than Claude's transcript regex — the
@@ -623,11 +749,11 @@ The thread = session assumption held up under empirical testing. A live
 `source` (e.g. `"vscode"`), `name`, `path` (rollout JSONL), `cliVersion`,
 and `modelProvider`. See "Empirical findings" section below.
 
-One caveat that surfaced: threads come back with `status: {type:"notLoaded"}`
-and don't push notifications until you explicitly attach. The backend has
-to maintain a watched-threads set and call `thread/read` (or equivalent
-subscribe) for each one we care about. The list endpoint is for discovery
-only.
+One caveat that surfaced: threads come back with `status: {type:"notLoaded"}`.
+The original plan was to `thread/read` each watched thread to subscribe.
+In practice `thread/read` doesn't attach Page's child to a thread another
+process is driving, so no notifications arrive (see "Current implementation
+status"). The shipped backend no longer calls it per thread.
 
 ## Empirical findings from app-server spike
 
@@ -664,8 +790,9 @@ obvious from the docs alone.
    break on minor version bumps — use permissive decoding.
 
 3. **Threads are `notLoaded` until attached.** `thread/list` is discovery
-   only. The backend needs an explicit subscribe step (`thread/read`)
-   before notifications about a thread start arriving.
+   only. Attaching requires *driving* the thread from this server
+   (`thread/resume` / `turn/start`); `thread/read` does not subscribe to a
+   thread another surface's embedded server is running.
 
 4. **WebSocket is documented as "experimental and unsupported."** Only
    stdio is a viable transport for v1.
@@ -730,10 +857,13 @@ obvious from the docs alone.
 These still need proof during implementation:
 
 1. Which exact app-server messages map best to the current Page intervention
-   kinds? The spike confirmed the method names exist (`item/commandExecution/requestApproval`,
-   `item/fileChange/requestApproval`, `tool/requestUserInput`,
-   `thread/status/changed` with `activeFlags`) but did not yet observe one
-   firing live. Phase 2 needs to capture the real payloads when triggered.
+   kinds? The method names exist as server *requests* (id + method):
+   `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
+   `item/tool/requestUserInput` (not `tool/requestUserInput`). Approval decisions
+   are `accept | acceptForSession | decline | cancel`. `thread/status/changed`
+   is `{threadId, status: {type, activeFlags?}}`, with flags `waitingOnApproval`
+   and `waitingOnUserInput`. None of these has been observed firing live, and
+   they only reach Page under the shared-server architecture (future work).
 2. Does the same Codex auth grant cover the desktop app's threads, or are
    they isolated per surface? `thread/list` returned a `vscode`-source
    thread on the spike, suggesting they share state — but this needs
@@ -759,6 +889,13 @@ Do not build the Codex integration around:
 
 Use app-server as the control plane, and use Codex session files only as backup
 observability and recovery tooling.
+
+> **Status note (October 2026):** the shipped backend deliberately departs
+> from this recommendation until sessions can share one app-server. Rollout
+> files are the primary state source. Process detection picks the reply
+> target. tmux, Terminal.app and `codex exec resume` are the reply paths,
+> under the safety rules in "Current implementation status". The
+> recommendation still describes the target architecture.
 
 ## Recommended next step
 
