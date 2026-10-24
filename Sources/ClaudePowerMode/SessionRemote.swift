@@ -78,15 +78,32 @@ struct SessionCommand: Equatable {
 }
 
 /// Client ids seen in the last 15 minutes (at most 2000): a replayed
-/// command is dropped, never acted on twice.
+/// command is dropped, never acted on twice. With a `storeURL` the ids are
+/// also kept on disk, so a command captured by the relay (or by anyone with
+/// the token) can't be replayed after Page restarts inside the freshness
+/// window. Only ids and times are stored, never command content.
 struct SessionReplayGuard {
     static let window: TimeInterval = 15 * 60
     static let capacity = 2000
 
     private var seen: [String: Date] = [:]
     private var order: [String] = []
+    private let storeURL: URL?
 
     var count: Int { seen.count }
+
+    init(storeURL: URL? = nil, now: Date = Date()) {
+        self.storeURL = storeURL
+        guard let storeURL, let data = BoundedFileRead.read(storeURL.path, maxBytes: 256 * 1024),
+              let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Double] else { return }
+        for (id, at) in stored.sorted(by: { $0.value < $1.value }) {
+            let date = Date(timeIntervalSince1970: at)
+            guard now.timeIntervalSince(date) <= Self.window, !id.isEmpty, id.count <= SessionCommand.maxIdLength else { continue }
+            seen[id] = date
+            order.append(id)
+        }
+        while order.count > Self.capacity { seen.removeValue(forKey: order.removeFirst()) }
+    }
 
     /// True (and remembers `clientId`) the first time; false for a replay.
     mutating func admit(_ clientId: String, now: Date) -> Bool {
@@ -98,7 +115,19 @@ struct SessionReplayGuard {
         seen[clientId] = now
         order.append(clientId)
         while order.count > Self.capacity { seen.removeValue(forKey: order.removeFirst()) }
+        persist()
         return true
+    }
+
+    /// Atomic 0600 write. A failed write only weakens the guard across a
+    /// restart; it never blocks a command.
+    private func persist() {
+        guard let storeURL else { return }
+        let obj = seen.mapValues { $0.timeIntervalSince1970 }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+        let tmp = storeURL.deletingLastPathComponent().appendingPathComponent(".\(storeURL.lastPathComponent).\(UUID().uuidString)")
+        guard FileManager.default.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600]) else { return }
+        if rename(tmp.path, storeURL.path) != 0 { try? FileManager.default.removeItem(at: tmp) }
     }
 }
 
@@ -248,7 +277,7 @@ final class SessionRemote {
     private var previews: [String: (stamp: FileStamp?, checkedAt: Date, entries: [SessionTranscriptEntry])] = [:]
     private var transcripts: [String: (stamp: FileStamp, snapshot: SessionTranscript.Snapshot)] = [:]
     private var watchers = SessionWatchers()
-    private var replay = SessionReplayGuard()
+    private var replay: SessionReplayGuard
     private var seq: Int64 = 0
     private var lastListAt: Date?
     private var lastListBody: Data?
@@ -264,9 +293,12 @@ final class SessionRemote {
     }
 
     /// `autoTimer` false (tests) leaves the periodic work to `step()`.
+    /// `replayStore`: where seen command ids survive a restart (nil keeps
+    /// them in memory only, for tests).
     init(backends: SessionRemoteBackends, now: @escaping () -> Date = Date.init, autoTimer: Bool = true,
-         macName: @escaping () -> String = { Host.current().localizedName ?? "Mac" }) {
+         macName: @escaping () -> String = { Host.current().localizedName ?? "Mac" }, replayStore: URL? = nil) {
         self.backends = backends
+        self.replay = SessionReplayGuard(storeURL: replayStore, now: now())
         self.now = now
         self.autoTimer = autoTimer
         self.macNameProvider = macName

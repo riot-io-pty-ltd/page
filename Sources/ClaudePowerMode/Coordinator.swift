@@ -280,7 +280,8 @@ final class Coordinator {
             queues[b.id] = DispatchQueue(label: "ClaudePowerMode.reply.\(b.id.rawValue)", qos: .userInitiated)
         }
         replyQueues = queues
-        sessionRemote = SessionRemote(backends: LiveSessionBackends(claude: claudeBackend, codex: codexBackend))
+        sessionRemote = SessionRemote(backends: LiveSessionBackends(claude: claudeBackend, codex: codexBackend),
+                                      replayStore: PairingTokenManager.sessionReplayFileURL)
     }
 
     // MARK: lifecycle

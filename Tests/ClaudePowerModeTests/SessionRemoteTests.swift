@@ -384,6 +384,30 @@ final class SessionRemoteTests: XCTestCase {
         XCTAssertFalse(big.admit("id2099", now: t0))
     }
 
+    /// A command captured before a restart is still refused after it: the
+    /// seen ids survive on disk (0600, ids and times only), and expire.
+    func testReplayGuardSurvivesARestart() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("replay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("session_replay.json")
+
+        var before = SessionReplayGuard(storeURL: url, now: t0)
+        XCTAssertTrue(before.admit("captured", now: t0))
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int, 0o600)
+        XCTAssertFalse(String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("text"))
+
+        var after = SessionReplayGuard(storeURL: url, now: t0.addingTimeInterval(60))
+        XCTAssertFalse(after.admit("captured", now: t0.addingTimeInterval(60)), "replay after restart refused")
+        XCTAssertTrue(after.admit("new", now: t0.addingTimeInterval(60)))
+
+        let later = SessionReplayGuard(storeURL: url, now: t0.addingTimeInterval(16 * 60))
+        XCTAssertEqual(later.count, 1, "entries older than 15 minutes are dropped on load")
+
+        try Data("not json".utf8).write(to: url)
+        XCTAssertEqual(SessionReplayGuard(storeURL: url, now: t0).count, 0, "a corrupt file starts empty")
+    }
+
     // MARK: commands
 
     func testInputGoesThroughTheBackendAndAlwaysGetsAResult() throws {

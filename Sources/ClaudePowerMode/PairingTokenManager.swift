@@ -44,6 +44,13 @@ enum PairingTokenManager {
         storageDirectory.appendingPathComponent("session_key.txt")
     }
 
+    /// Command ids the live-sessions view has acted on in the last 15
+    /// minutes (`SessionReplayGuard`), so a replay is refused across a
+    /// restart too. Ids and times only.
+    static var sessionReplayFileURL: URL {
+        storageDirectory.appendingPathComponent("session_replay.json")
+    }
+
     private static var storageDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = appSupport.appendingPathComponent("ClaudePowerMode", isDirectory: true)

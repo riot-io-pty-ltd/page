@@ -107,7 +107,9 @@ encrypted with a second secret, the **session key**:
   storage, history, logs or push payloads.
 - **Typing requires the key.** The Mac acts on a command only if it
   decrypts with the phone→Mac key, is within ±5 minutes of the Mac's clock
-  and hasn't been seen in the last 15 minutes. A leaked relay token alone
+  and hasn't been seen in the last 15 minutes (seen ids are kept on disk,
+  in `session_replay.json`, so a captured command can't be replayed after
+  Page restarts either). A leaked relay token alone
   can't type anything here. Every accepted command then goes through the
   Mac's input gate, which never weakens the reply path's rules (no Esc on a
   prompt, no typing over a draft, no background resume).

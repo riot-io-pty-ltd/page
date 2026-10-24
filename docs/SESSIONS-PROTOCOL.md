@@ -201,7 +201,8 @@ The Mac checks, in order:
   no content.
 - `|now − ts| ≤ 5 min`. Otherwise it replies `refused/stale`.
 - `clientId` hasn't been seen in the last 15 min (an LRU of up to 2000
-  entries). Otherwise it is dropped silently.
+  entries, persisted to disk so it survives a Mac restart). Otherwise it is
+  dropped silently.
 - The feature is enabled in config (`remoteSessionsEnabled`, default
   `true`, with a toggle in Preferences ▸ Integrations or Phone). Otherwise
   it replies `refused/disabled`.
