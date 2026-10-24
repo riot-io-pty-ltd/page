@@ -120,14 +120,18 @@ enum AppServerProtocol {
         /// True for threads spawned by another thread (sub-agents). Their
         /// `task_complete` is not "the user's agent is waiting on them".
         let isSubAgent: Bool
+        /// The thread's model provider id ("openai", "ollama", "lmstudio",
+        /// "ollama-launch", …). Optional and lenient: older servers omit it,
+        /// and a non-string value decodes as nil.
+        let modelProvider: String?
 
         enum CodingKeys: String, CodingKey {
-            case id, cwd, path, source, name, preview, createdAt, updatedAt, status, parentThreadId
+            case id, cwd, path, source, name, preview, createdAt, updatedAt, status, parentThreadId, modelProvider
         }
 
         init(id: String, cwd: String?, path: String?, source: String? = nil, name: String? = nil,
              preview: String? = nil, createdAt: Int? = nil, updatedAt: Int?,
-             status: ThreadStatusEnvelope? = nil, isSubAgent: Bool = false) {
+             status: ThreadStatusEnvelope? = nil, isSubAgent: Bool = false, modelProvider: String? = nil) {
             self.id = id
             self.cwd = cwd
             self.path = path
@@ -138,6 +142,7 @@ enum AppServerProtocol {
             self.updatedAt = updatedAt
             self.status = status
             self.isSubAgent = isSubAgent
+            self.modelProvider = modelProvider
         }
 
         init(from decoder: Decoder) throws {
@@ -154,6 +159,7 @@ enum AppServerProtocol {
             self.source = rawSource?.stringValue
             let parent = try? c.decodeIfPresent(String.self, forKey: .parentThreadId)
             self.isSubAgent = parent != nil || rawSource?.objectValue != nil
+            self.modelProvider = (try? c.decodeIfPresent(String.self, forKey: .modelProvider)) ?? nil
         }
 
         var displayTitle: String {

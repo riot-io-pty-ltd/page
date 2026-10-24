@@ -48,6 +48,10 @@ struct ClaudeLiveSession: Equatable {
     /// False when found only by a UUID in argv (Claude Code too old to write
     /// a sessions file). Status is then `.unknown`.
     let hasSessionFile: Bool
+    /// Model provider, from the process's environment and the session's
+    /// settings files (`ModelProviderClassifier.claude`). `.unknown` until
+    /// the registry fills it in, or when the environment can't be read.
+    var provider: ModelProvider = .unknown
 
     var devTTY: String? { tty.map { "/dev/" + $0 } }
 }
@@ -75,9 +79,74 @@ final class ClaudeSessionRegistry {
     private var transcriptMisses: [String: Date] = [:]
     private let missRetryInterval: TimeInterval = 60
 
-    init(projectsDirectory: String, sessionsDirectory: String = "~/.claude/sessions") {
+    /// Provider of a live process (pid, cwd). Reads its environment
+    /// (`ProcArgs`), so it runs once per process: see `providerCache`.
+    typealias ProviderResolver = (_ pid: Int32, _ cwd: String?) -> ModelProvider
+    private let resolveProvider: ProviderResolver
+    private let startSeconds: (Int32) -> Int?
+    private let recordProvider: (_ sessionId: String, _ provider: ModelProvider) -> Void
+    /// pid → provider of the process with that pid and start time, and the
+    /// session last recorded for it. A recycled pid has a new start time.
+    private var providerCache: [Int32: (start: Int?, provider: ModelProvider, recordedSession: String?)] = [:]
+
+    init(projectsDirectory: String, sessionsDirectory: String = "~/.claude/sessions",
+         resolveProvider: @escaping ProviderResolver = ClaudeSessionRegistry.liveProvider,
+         startSeconds: @escaping (Int32) -> Int? = CmuxBridge.processStartSeconds,
+         recordProvider: @escaping (String, ModelProvider) -> Void = { SessionProviderStore.record(sessionId: $0, provider: $1) }) {
         self.projectsDirectory = (projectsDirectory as NSString).expandingTildeInPath
         self.sessionsDirectory = (sessionsDirectory as NSString).expandingTildeInPath
+        self.resolveProvider = resolveProvider
+        self.startSeconds = startSeconds
+        self.recordProvider = recordProvider
+    }
+
+    /// Default resolver: the process's allowlisted environment (argv is
+    /// read by `ProcArgs` but dropped here) plus the settings files for its
+    /// cwd. `.unknown` when the environment can't be read.
+    static func liveProvider(pid: Int32, cwd: String?) -> ModelProvider {
+        guard let info = ProcArgs.read(pid: pid) else { return .unknown }
+        return ModelProviderClassifier.claude(env: info.env, settingsEnv: ClaudeSettingsEnv.read(cwd: cwd))
+    }
+
+    /// Fills in `provider` for each session, classifying a process only the
+    /// first time its (pid, start time) is seen, and records known
+    /// providers in `SessionProviderStore` (once per session per process).
+    /// `prune` drops cache entries for processes no longer in `sessions`.
+    func annotateProviders(_ sessions: [ClaudeLiveSession], prune: Bool = false) -> [ClaudeLiveSession] {
+        guard !sessions.isEmpty || prune else { return sessions }
+        let starts = Dictionary(sessions.map { ($0.pid, startSeconds($0.pid)) }, uniquingKeysWith: { a, _ in a })
+        lock.lock()
+        let cache = providerCache
+        lock.unlock()
+
+        var updated = cache
+        if prune { updated = updated.filter { starts[$0.key] != nil } }
+        var toRecord: [(String, ModelProvider)] = []
+        let result = sessions.map { s -> ClaudeLiveSession in
+            let start = starts[s.pid] ?? nil
+            var entry: (start: Int?, provider: ModelProvider, recordedSession: String?)
+            if let hit = updated[s.pid], hit.start == start, start != nil {
+                entry = hit
+            } else {
+                entry = (start, resolveProvider(s.pid, s.cwd), nil)
+            }
+            if entry.provider != .unknown, entry.recordedSession != s.sessionId {
+                toRecord.append((s.sessionId, entry.provider))
+                entry.recordedSession = s.sessionId
+            }
+            // Without a start time a recycled pid can't be told apart, so
+            // nothing is cached for it.
+            if start != nil { updated[s.pid] = entry } else { updated[s.pid] = nil }
+            var copy = s
+            copy.provider = entry.provider
+            return copy
+        }
+        lock.lock()
+        // Bounded: one entry per live Claude process in practice.
+        providerCache = updated.count > 256 ? [:] : updated
+        lock.unlock()
+        for (sid, provider) in toRecord { recordProvider(sid, provider) }
+        return result
     }
 
     func setProjectsDirectory(_ dir: String) {
@@ -102,12 +171,12 @@ final class ClaudeSessionRegistry {
     /// with the rest of the tick).
     @discardableResult
     func refresh(processTable: [ProcessRunner.ProcessInfoRow]) -> [ClaudeLiveSession] {
-        let live = Self.buildLiveSessions(
+        let live = annotateProviders(Self.buildLiveSessions(
             records: readRecords(),
             processTable: processTable,
             ownPid: ProcessInfo.processInfo.processIdentifier,
             isAlive: ProcessRunner.isAlive
-        )
+        ), prune: true)
         lock.lock()
         lastSessions = live
         lock.unlock()
@@ -121,24 +190,24 @@ final class ClaudeSessionRegistry {
     func liveSessions(forSessionId sessionId: String,
                       processTable: [ProcessRunner.ProcessInfoRow]? = nil) -> [ClaudeLiveSession] {
         let table = processTable ?? ProcessRunner.processTable()
-        return Self.buildLiveSessions(
+        return annotateProviders(Self.buildLiveSessions(
             records: readRecords(),
             processTable: table,
             ownPid: ProcessInfo.processInfo.processIdentifier,
             isAlive: ProcessRunner.isAlive
-        ).filter { $0.sessionId == sessionId }
+        ).filter { $0.sessionId == sessionId })
     }
 
     /// Fresh read of every live session (does not replace the tick's
     /// cached `sessions`). Used by the low-battery pause, which must act on
     /// statuses as they are now.
     func allLiveSessions(processTable: [ProcessRunner.ProcessInfoRow]) -> [ClaudeLiveSession] {
-        Self.buildLiveSessions(
+        annotateProviders(Self.buildLiveSessions(
             records: readRecords(),
             processTable: processTable,
             ownPid: ProcessInfo.processInfo.processIdentifier,
             isAlive: ProcessRunner.isAlive
-        )
+        ))
     }
 
     /// Pids of live Claude Code processes whose sessions file says they own

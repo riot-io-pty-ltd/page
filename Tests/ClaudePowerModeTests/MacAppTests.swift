@@ -382,10 +382,16 @@ final class MacAppMiscTests: XCTestCase {
         XCTAssertNil(RateLimitUserInfo.decode(["eventId": "legacy"]))
     }
 
-    func testOnlyRealClaudeSessionsCanResume() {
+    func testOnlyRealClaudeSessionsCanResume() throws {
+        // A transcript whose last reply came from a Claude model: the
+        // positive Anthropic evidence a background resume now requires.
+        let transcript = FileManager.default.temporaryDirectory.appendingPathComponent("canresume-\(UUID().uuidString).jsonl")
+        try #"{"type":"assistant","message":{"model":"claude-opus-4-1","content":[]}}"#.appending("\n")
+            .write(to: transcript, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: transcript) }
         func event(_ sid: String, cwd: String = "/p", backend: AgentBackendID = .claude) -> RateLimitEvent {
             RateLimitEvent(sessionId: sid, cwd: cwd, projectName: "p", eventTime: Date(), resetTime: Date(),
-                           resetTimeText: "", transcriptPath: "", backend: backend)
+                           resetTimeText: "", transcriptPath: transcript.path, backend: backend)
         }
         let uuid = "0b5c2d0e-3f0a-4d3e-9a7c-1c2b3d4e5f60"
         XCTAssertTrue(Coordinator.canResume(event(uuid)))

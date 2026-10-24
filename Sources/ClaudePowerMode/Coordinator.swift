@@ -1234,10 +1234,14 @@ final class Coordinator {
     /// Only Claude limits that name a real session and project can be
     /// resumed with `claude --resume`. Codex thread ids (or the "codex"
     /// fallback) passed to it would fail — or run in the wrong directory.
-    static func canResume(_ event: RateLimitEvent) -> Bool {
+    /// The resume runs without the session's environment, so the session
+    /// must also be known to run on Anthropic (`ResumeProviderGate`).
+    static func canResume(_ event: RateLimitEvent,
+                          providerRefusal: (RateLimitEvent) -> String? = ResumeProviderGate.refusal(for:)) -> Bool {
         event.backend == .claude
             && UUID(uuidString: event.sessionId) != nil
             && !event.cwd.trimmingCharacters(in: .whitespaces).isEmpty
+            && providerRefusal(event) == nil
     }
 
     /// Schedules a resume at the event's reset time. Runs on the tick queue
