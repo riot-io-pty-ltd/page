@@ -441,6 +441,22 @@ final class LocalWebSocketServer {
         }
     }
 
+    /// Every message received so far, in order.
+    var receivedMessages: [Data] {
+        lock.lock(); defer { lock.unlock() }
+        return messages
+    }
+
+    /// Sends `data` as a text message to every connected client.
+    func send(_ data: Data) {
+        lock.lock(); let conns = connections; lock.unlock()
+        let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+        let context = NWConnection.ContentContext(identifier: "page.test.send", metadata: [meta])
+        for conn in conns {
+            conn.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { _ in })
+        }
+    }
+
     func stop() {
         lock.lock(); let conns = connections; connections.removeAll(); lock.unlock()
         conns.forEach { $0.cancel() }

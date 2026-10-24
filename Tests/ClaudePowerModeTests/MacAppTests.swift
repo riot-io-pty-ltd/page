@@ -458,11 +458,12 @@ final class MacAppMiscTests: XCTestCase {
 
     func testPairingPayloadUsesNormalisedRelay() throws {
         let base = try Config.validatedRelayURL("wss://page.me.workers.dev/ws").get()
-        let json = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base, token: "t0k3n")
+        let json = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base, token: "t0k3n", sessionKey: nil)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
         XCTAssertEqual(obj["relay"] as? String, "https://page.me.workers.dev")
         XCTAssertEqual(obj["v"] as? Int, 1)
         XCTAssertEqual(obj["token"] as? String, "t0k3n")
+        XCTAssertNil(obj["sk"], "no session key passed, none sent")
     }
 
     func testLoggerRedactsCredentials() {

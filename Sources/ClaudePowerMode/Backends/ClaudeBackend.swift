@@ -713,6 +713,55 @@ final class ClaudeBackend: AgentBackend {
         return (detectorIds + rl).filter { !$0.hasPrefix("hook") }
     }
 
+    // MARK: phone sessions view (SessionRemote)
+
+    /// Live sessions as of the last tick (pid, tty, provider), for the
+    /// phone's list. Never used to type: the gate re-reads everything.
+    var remoteLiveSessions: [ClaudeLiveSession] { registry.sessions }
+
+    /// The session's transcript file, if Page knows it.
+    func remoteTranscriptURL(sessionId: String, cwd: String?) -> URL? {
+        registry.transcriptURL(forSessionId: sessionId, cwdHint: cwd)
+    }
+
+    /// Fresh status of one live process (one small file read).
+    func remoteStatus(pid: Int32) -> ClaudeSessionStatus? {
+        registry.currentRecord(forPid: pid).map { ClaudeSessionStatus(raw: $0.status) }
+    }
+
+    private func remoteIO() -> SessionInputGate.ClaudeIO {
+        let registry = self.registry
+        return SessionInputGate.ClaudeIO(
+            resolve: { InjectionExecutor.resolveClaudeTarget($0, registry: registry) },
+            currentRecord: { registry.currentRecord(forPid: $0) },
+            resolveHost: { InjectionExecutor.resolveHost(for: $0, processTable: $1) },
+            deliver: { InjectionExecutor.deliverToLiveSession($0, session: $1, processTable: $2, registry: registry) },
+            isForeground: { ProcessRunner.isForeground(pid: $0) },
+            sendInterrupt: { InjectionExecutor.sendInterrupt(host: $0) }
+        )
+    }
+
+    /// Text typed on the phone's Sessions screen. Runs the input gate and
+    /// delivers on the injection queue (one at a time with replies and the
+    /// battery pause). Never a background resume. `completion` runs on
+    /// the injection queue.
+    func remoteInput(sessionId: String, clientId: String, text: String, interventionId: String?,
+                     completion: @escaping (SessionCommandResult) -> Void) {
+        let io = remoteIO()
+        injectionQueue.async {
+            completion(SessionInputGate.runClaudeInput(sessionId: sessionId, clientId: clientId, text: text,
+                                                       interventionId: interventionId, io: io))
+        }
+    }
+
+    /// The phone's Stop button: Esc in a busy session.
+    func remoteInterrupt(sessionId: String, interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
+        let io = remoteIO()
+        injectionQueue.async {
+            completion(SessionInputGate.runClaudeInterrupt(sessionId: sessionId, interventionId: interventionId, io: io))
+        }
+    }
+
     // MARK: manual resume
 
     struct NonAnthropicResumeError: LocalizedError {

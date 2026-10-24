@@ -753,7 +753,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func pairingContent(base: URL) -> NSStackView {
         let stack = makeStack()
-        let payload = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base)
+        let payload = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base,
+                                                             sessionKey: PairingTokenManager.currentSessionKey())
         pairingPayloadCached = payload
 
         if let qr = QRCode.image(from: payload, size: CGSize(width: 300, height: 300)) {

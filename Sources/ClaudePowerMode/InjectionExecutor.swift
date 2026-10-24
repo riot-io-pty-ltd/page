@@ -304,6 +304,11 @@ enum InjectionExecutor {
         /// resume): the input box must be verified empty, not just "no
         /// draft seen", before text + Enter is sent.
         var requireEmptyInput: Bool = false
+        /// Text typed on the phone's Sessions screen: refused, right before
+        /// the text key, if it starts with a digit and Claude has turned
+        /// busy since the gate looked (a menu opening first would take the
+        /// digit as an answer).
+        var refuseDigitWhileBusy: Bool = false
     }
 
     enum ClaudeTarget {
@@ -492,7 +497,7 @@ enum InjectionExecutor {
         // Before every key: still in front of its terminal, and the status
         // is what the plan assumed — menu keys only into the menu the plan
         // was made for, message keys never into a menu.
-        let precheck: (Keystroke) -> String? = { _ in
+        let precheck: (Keystroke) -> String? = { key in
             guard ProcessRunner.isForeground(pid: session.pid) == true else { return notForegroundMessage }
             guard session.hasSessionFile else { return nil }
             guard let rec = currentRecordRetrying(registry, pid: session.pid) else { return sessionExitedMessage }
@@ -506,7 +511,7 @@ enum InjectionExecutor {
             } else if now == .waiting {
                 return newPageMessage
             }
-            return nil
+            return digitWhileBusyRefusal(key: key, status: now, enabled: req.refuseDigitWhileBusy)
         }
         Logger.shared.log("Injection.claude session=\(session.sessionId.prefix(8)) pid=\(session.pid) status=\(session.status.rawValue) host=\(host.label) plan=\(steps.count) step(s)")
 
@@ -1015,6 +1020,15 @@ enum InjectionExecutor {
             sentSomething = true
         }
         return InjectionResult(method: .tmux, success: true, output: "ok \(paneId)")
+    }
+
+    /// Pure. Phone text starting with a digit, about to be typed while
+    /// Claude is busy: refused (`SessionInputGate.digitWhileBusyMessage`).
+    /// Only the text key — once the digit is in the input box, Enter just
+    /// queues the message.
+    static func digitWhileBusyRefusal(key: Keystroke, status: ClaudeSessionStatus, enabled: Bool) -> String? {
+        guard enabled, status == .busy, case .text(let text) = key, SessionInputGate.startsWithDigit(text) else { return nil }
+        return SessionInputGate.digitWhileBusyMessage
     }
 
     private static func partialDetail(_ sentSomething: Bool, _ base: String) -> String {

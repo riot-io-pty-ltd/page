@@ -195,6 +195,9 @@ final class Coordinator {
     /// One serial queue per backend: replies to the same agent stay in
     /// arrival order, and a slow Claude delivery can't hold up Codex.
     private let replyQueues: [AgentBackendID: DispatchQueue]
+    /// The phone's live-sessions view (SESSIONS-PROTOCOL.md). Has its own
+    /// queues; the tick only hands it a copy of the sessions.
+    private let sessionRemote: SessionRemote
 
     private var relay: RelayClient?
     private var relayIdentity: RelayIdentity?
@@ -277,6 +280,7 @@ final class Coordinator {
             queues[b.id] = DispatchQueue(label: "ClaudePowerMode.reply.\(b.id.rawValue)", qos: .userInitiated)
         }
         replyQueues = queues
+        sessionRemote = SessionRemote(backends: LiveSessionBackends(claude: claudeBackend, codex: codexBackend))
     }
 
     // MARK: lifecycle
@@ -304,6 +308,7 @@ final class Coordinator {
                 self?.onResumeResult?(result)
             }
             self.restorePowerStateAfterLaunch(cfg)
+            self.sessionRemote.setEnabled(cfg.remoteSessionsEnabled)
             // Relay first, so backends have their sink before they start.
             self.configureRelay(force: false)
             // A regenerate the last run couldn't confirm (offline, crash).
@@ -422,6 +427,7 @@ final class Coordinator {
             housekeepingTimer = nil
             relay?.stop()
             relay = nil
+            sessionRemote.stop()
             backends.forEach { $0.relay = nil }
             backends.forEach { $0.shutdown() }
             localModels.setEnabled(false)
@@ -512,6 +518,7 @@ final class Coordinator {
             sleepGuard.syncWatchdog(enabled: cfg.keepAwakeLidClosedOnBattery)
         }
         if cfg.checkIntervalSeconds != old.checkIntervalSeconds { scheduleTimers() }
+        if cfg.remoteSessionsEnabled != old.remoteSessionsEnabled { sessionRemote.setEnabled(cfg.remoteSessionsEnabled) }
         configureRelay(force: false)
     }
 
@@ -556,6 +563,10 @@ final class Coordinator {
         if let old = relay, Self.shouldRetire(current: relayIdentity, desired: desired, tokenToRetire: tokenToRetire) {
             tokenToRetire = nil
             retiringRelay = old
+            // The session key was rotated with the token: cut the old one
+            // off now, not when retirement finishes (up to the POST
+            // timeout). The completion attaches the new client and key.
+            sessionRemote.attach(sink: nil, rootKey: nil)
             Logger.shared.log("Retiring the replaced pairing token on the relay before switching")
             old.retire(reason: "token_regenerated") { [weak self] sent in
                 guard let self else { return }
@@ -585,6 +596,7 @@ final class Coordinator {
         }
         guard let desired else {
             backends.forEach { $0.relay = nil }
+            sessionRemote.attach(sink: nil, rootKey: nil)
             if tickConfig.relayEnabled, let problem = tickConfig.relayURLProblem {
                 Logger.shared.log("Relay enabled but not usable: \(problem.message)")
             }
@@ -600,9 +612,20 @@ final class Coordinator {
             guard let self, let client else { return }
             self.tickQueue.async { self.relayDidConnect(client) }
         }
-        client.onConnectionChange = { [weak self] _ in
+        client.onConnectionChange = { [weak self, weak client] connected in
+            if let client { self?.sessionRemote.connectionChanged(connected, from: client) }
             self?.tickQueue.async { self?.publishSnapshot() }
         }
+        // Sealed; the session remote decrypts (or drops) them on its queue.
+        client.onSessionsCommand = { [weak self] envelope in
+            self?.sessionRemote.handleCommand(envelope)
+        }
+        client.onPhonesStatus = { [weak self, weak client] n in
+            if let client { self?.sessionRemote.setPhones(n, from: client) }
+        }
+        // Re-read on every new client: a regenerated token comes with a
+        // new session key, and a phone holding the old one must be cut off.
+        sessionRemote.attach(sink: client, rootKey: PairingTokenManager.currentSessionKey())
         relay = client
         relayIdentity = desired
         lastRelayIdentity = desired
@@ -808,6 +831,8 @@ final class Coordinator {
 
         lastSnapshots = backends.map { $0.currentSnapshot }
         evaluatePower(p, cfg: cfg)
+        let visible = lastSnapshots.filter { isEnabled($0.backendID) }
+        sessionRemote.update(sessions: visible.flatMap(\.sessions), pending: visible.flatMap(\.pendingInterventions))
 
         hasTicked = true
         maybeSync()

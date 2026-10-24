@@ -1101,6 +1101,130 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         }
     }
 
+    // MARK: Phone sessions view (SessionRemote)
+
+    /// The thread's record from the last listing (cwd, source, rollout
+    /// path, model provider), for the phone's list. Never asks the
+    /// app-server.
+    func remoteThread(_ id: String) -> ThreadSummary? {
+        locked { threads[id] }
+    }
+
+    /// Text typed on the phone's Sessions screen, on `replyQueue` (one at a
+    /// time with replies and the battery pause). After the turn: typed
+    /// with the composer verified empty. Mid-turn: only into a cmux pane
+    /// whose composer cmux reads as empty (the battery queue path). Never
+    /// `exec resume`. `completion` runs on `replyQueue`.
+    func remoteInput(threadId: String, text raw: String, interventionId: String?,
+                     completion: @escaping (SessionCommandResult) -> Void) {
+        replyQueue.async { [weak self] in
+            guard let self else { return completion(.failed("Codex isn't being watched any more")) }
+            let text: String
+            switch SessionInputGate.validateText(raw) {
+            case .failure(let refusal): return completion(refusal)
+            case .success(let t): text = t
+            }
+            guard let t = self.locked({ self.threads[threadId] }), let cwd = t.cwd, !cwd.isEmpty,
+                  let path = t.path, !path.isEmpty else {
+                return completion(.refused(.notFound, "Page no longer knows this Codex session"))
+            }
+            let rollout = URL(fileURLWithPath: path)
+            let summary = CodexRollout.summarizeTail(of: rollout)
+            let reach = Self.remoteTerminal(thread: t, cwd: cwd, path: path)
+            // Right before the keys (after the slow lookups above).
+            let recheck = {
+                SessionInputGate.codexRecheck(planned: summary.phase, now: CodexRollout.summarizeTail(of: rollout),
+                                              interrupt: false, interventionId: interventionId)
+            }
+            let step = SessionInputGate.codexPlan(phase: summary.phase, hasPendingRequest: summary.pendingRequest != nil,
+                                                  execResumeRunning: self.execGate.isThreadBusy(t.id),
+                                                  terminal: reach.terminal, targetProblem: reach.problem,
+                                                  interventionId: interventionId)
+            let clean = CodexInjector.sanitize(text)
+            switch step {
+            case .refuse(let r):
+                completion(r)
+            case .deliverIdle:
+                guard let terminal = reach.terminal else { return completion(.failed("Couldn't find the Codex session's terminal")) }
+                if let why = CodexInjector.composerRefusal(terminal) {
+                    return completion(SessionInputGate.codexResult(.failure(why, method: terminal.method), queued: false,
+                                                                   interventionId: interventionId))
+                }
+                if let changed = recheck() { return completion(changed) }
+                completion(SessionInputGate.codexResult(CodexInjector.type(clean, into: terminal), queued: false,
+                                                        interventionId: interventionId))
+            case .queueMidTurn:
+                guard let terminal = reach.terminal, let pid = reach.pid, ProcessRunner.isForeground(pid: pid) == true else {
+                    return completion(.refused(.notTypable, CodexInjector.notForegroundDetail))
+                }
+                if let changed = recheck() { return completion(changed) }
+                completion(SessionInputGate.codexResult(CodexInjector.type(clean, into: terminal), queued: true,
+                                                        interventionId: interventionId))
+            }
+        }
+    }
+
+    /// The phone's Stop button: Esc in a thread whose turn is running, in
+    /// tmux or cmux (cmux refuses while a dialog is open).
+    func remoteInterrupt(threadId: String, interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
+        replyQueue.async { [weak self] in
+            guard let self else { return completion(.failed("Codex isn't being watched any more")) }
+            guard let t = self.locked({ self.threads[threadId] }), let cwd = t.cwd, !cwd.isEmpty,
+                  let path = t.path, !path.isEmpty else {
+                return completion(.refused(.notFound, "Page no longer knows this Codex session"))
+            }
+            guard !self.execGate.isThreadBusy(t.id) else {
+                return completion(.refused(.interruptUnsupported, "Page's background resume is driving this turn"))
+            }
+            let rollout = URL(fileURLWithPath: path)
+            let summary = CodexRollout.summarizeTail(of: rollout)
+            if summary.pendingRequest != nil {
+                return completion(.refused(.waiting, SessionInputGate.codexWaitingMessage, interventionId: interventionId))
+            }
+            guard summary.phase == .inTurn else {
+                return completion(.refused(.interruptUnsupported, SessionInputGate.notIdleMessage))
+            }
+            let reach = Self.remoteTerminal(thread: t, cwd: cwd, path: path)
+            switch reach.terminal {
+            case .tmux?, .cmux?:
+                // Again right before Esc: tmux has no dialog check of its
+                // own, and Esc on an approval overlay denies it.
+                if let changed = SessionInputGate.codexRecheck(planned: summary.phase, now: CodexRollout.summarizeTail(of: rollout),
+                                                               interrupt: true, interventionId: interventionId) {
+                    return completion(changed)
+                }
+                let r = CodexInjector.interrupt(reach.terminal!)
+                completion(r.success
+                    ? SessionCommandResult(code: .delivered, reason: nil, detail: r.detail)
+                    : (r.detail == "A prompt is open in that pane"
+                        ? .refused(.waiting, r.detail, interventionId: interventionId)
+                        : .failed(r.detail)))
+            case .terminalApp?:
+                completion(.refused(.interruptUnsupported, "Page can't press Esc in Terminal.app"))
+            case .unavailable(let why)?:
+                completion(.refused(.interruptUnsupported, why))
+            case nil:
+                completion(reach.problem ?? .refused(.interruptUnsupported, "Couldn't find the Codex session's terminal"))
+            }
+        }
+    }
+
+    /// Where a thread's codex can be reached right now. Fresh ps + lsof.
+    private static func remoteTerminal(thread t: ThreadSummary, cwd: String, path: String)
+        -> (terminal: CodexInjector.Terminal?, pid: Int32?, problem: SessionCommandResult?) {
+        let table = ProcessRunner.processTable()
+        guard !table.isEmpty else {
+            return (nil, nil, .refused(.notTypable, "Couldn't check whether Codex is still open"))
+        }
+        let processes = CodexProcessScanner.liveSessions(table: table)
+        let target = CodexInjector.resolveTarget(cwd: CodexProcessScanner.canonicalPath(cwd), rolloutPath: path,
+                                                 processes: processes, cwdFallback: .forSource(mapSource(t.source)))
+        guard case .tty(let tty, let pid) = target else {
+            return (nil, nil, SessionInputGate.codexTargetProblem(target, project: CodexInjector.projectName(forCwd: cwd)))
+        }
+        return (CodexInjector.terminal(tty: tty, pid: pid, threadId: t.id, table: table), pid, nil)
+    }
+
     /// Thread record from the last listing, else asked of the app-server.
     private func lookupThread(_ id: String) -> ThreadSummary? {
         if let t = locked({ threads[id] }) { return t }

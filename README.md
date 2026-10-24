@@ -175,6 +175,33 @@ Page delivers a reply only into the exact terminal that owns the session (see
 | Anything else (Ghostty, VS Code's terminal, Warp, …) | ✗ "Page can't type into <App> yet — use tmux or Terminal.app" | ✗ | Run the agent inside tmux, or use the hooks |
 | **Session has exited** | Text replies run `claude --resume <id> --print` in the background (`headlessResumeFallbackEnabled`) | `codex exec resume` (the Codex Desktop / VS Code path) | Only when no live process owns the session. Output goes to a log, not a terminal. Approve/Deny are refused |
 
+### Active sessions on your phone
+
+The phone's **Sessions** tab lists every live Claude Code and Codex session
+on the Mac (what needs you first, then what's working), shows what each one
+is doing as a live transcript, and lets you type into a session or stop it
+at any time, not only when a page is open.
+
+- **End-to-end encrypted.** The pairing QR carries a 32-byte session key
+  (`sk`). Titles, folders, transcripts and anything you type are sealed with
+  it (AES-256-GCM); the relay only forwards opaque envelopes and never
+  stores them. Phones paired before this shipped need to scan the QR again.
+- **Only while you're looking.** The Mac sends the list only while the app
+  is open, and a transcript only for the session on screen. Tool output is
+  never included, and every line is redacted before it's cut.
+- **Typing goes through the same gate as replies.** Claude Code gets your
+  text as a message (Enter), queued behind the current step when it's
+  busy, never Esc and never a background resume. Page refuses while a
+  prompt is on screen, when the input box isn't empty, when it can't tell
+  what the session is doing, and when a busy session's message starts with
+  a digit (it could pick a menu option). Codex is typed into once its turn
+  ends, or mid-turn only in a cmux pane with an empty composer. **Stop**
+  presses Esc in a working session (tmux, iTerm2, cmux).
+- **Which sessions can be typed into** follows the table above; the phone
+  shows why when one can't. Turn the view off with
+  **Preferences ▸ Phone ▸ Show my live sessions on my phone**
+  (`remoteSessionsEnabled`). It needs a relay that speaks `sessions-v1`.
+
 ### Codex support level
 
 Codex support is real but narrower than Claude's:
@@ -401,6 +428,7 @@ Apply hand edits with **Reload Config** in the menu.
 | `idlePageOnlyWhenAwaySeconds` | `120` (0–3600) | Hold idle and rate-limit pages while you've used the Mac within this many seconds. `0` disables the check. Approvals and questions always page |
 | `holdAwakeForPendingPageMinutes` | `60` (0–1440) | Keep the Mac awake this long while a page waits for a reply (relay on only). `0` = don't hold |
 | `headlessResumeFallbackEnabled` | `true` | When the session's process has exited, deliver a text reply with `claude --resume --print` / `codex exec resume`. Never used while the session is still running |
+| `remoteSessionsEnabled` | `true` | Show live sessions on the paired phone (end-to-end encrypted) and let it type into them or stop them. See [Active sessions on your phone](#active-sessions-on-your-phone) |
 | `keepAwakeLidClosedOnAC` | `true` | While agents work on AC, also hold `PreventSystemSleep` so the lid can be closed |
 | `keepAwakeLidClosedOnBattery` | `false` | Opt-in lid-closed-on-battery via `pmset disablesleep`. Needs the power helper (installed from the app, or `--enable-power-helpers`) |
 | `lowBatteryCutoff` | `10` (0–100) | Battery % (on battery power) at which Page pauses agents and stops keeping the Mac awake |
@@ -587,6 +615,10 @@ travel, so "nothing leaves your devices" isn't true. What leaves your devices:
   Worker keeps pending pages, the last 300 closed pages (with their context
   and your reply text) and queued replies. [SECURITY.md](SECURITY.md) lists
   what is stored and for how long.
+- **Live sessions (Sessions tab).** Session titles, folders, transcripts and
+  what you type there are end-to-end encrypted with the pairing's session
+  key. The Worker forwards them while the app is open and stores none of
+  it; it sees only frame types, sizes and timing.
 - **To Apple's push service (APNs).** Each push carries the project name, the
   session id, the page kind and up to 180 characters of the context as the
   notification body.

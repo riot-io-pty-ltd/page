@@ -37,13 +37,21 @@ struct OutboundQueue {
     var count: Int { frames.count }
     var isEmpty: Bool { frames.isEmpty }
 
+    /// Frame types that are never queued or re-sent: live-sessions updates
+    /// are snapshots for whoever is looking right now (SESSIONS-PROTOCOL.md
+    /// rule 3). After an outage the phone gets a fresh list anyway, and a
+    /// backlog of stale transcripts would only pile up here.
+    static let ephemeralTypes: Set<String> = ["sessions.update"]
+
     /// Adds a frame produced while disconnected, applying the coalescing rules:
     /// - `intervention.closed` X removes a still-queued `intervention.opened` X
     ///   (the closed frame itself is kept: harmless if the Worker never saw
     ///   the page, and correct if an "unsent" open actually got through).
     /// - only the newest `intervention.opened` / `closed` per id is kept;
-    /// - only the newest `heartbeat`, and the newest `sync` per backend.
+    /// - only the newest `heartbeat`, and the newest `sync` per backend;
+    /// - `ephemeralTypes` are dropped.
     mutating func enqueue(_ frame: Frame) {
+        guard !Self.ephemeralTypes.contains(frame.type) else { return }
         coalesce(for: frame)
         frames.append(frame)
         expire(now: frame.enqueuedAt)
@@ -54,7 +62,7 @@ struct OutboundQueue {
     /// queued since, so it goes back in timestamp order — unless something
     /// newer already supersedes it (e.g. its page was closed meanwhile).
     mutating func requeueFailed(_ frame: Frame, now: Date) {
-        if supersedes(existingFor: frame) { return }
+        if Self.ephemeralTypes.contains(frame.type) || supersedes(existingFor: frame) { return }
         let index = frames.firstIndex { $0.enqueuedAt > frame.enqueuedAt } ?? frames.endIndex
         frames.insert(frame, at: index)
         expire(now: now)
@@ -139,8 +147,11 @@ struct OutboundQueue {
 /// Long-lived WebSocket client that talks to the Cloudflare Worker. There is
 /// exactly one per app, owned by the Coordinator and shared by every backend
 /// through `RelaySink`.
-/// - Sends `intervention.opened/closed`, `heartbeat`, `sync`, `reply.injected`
-/// - Receives `reply` frames from the user's phone
+/// - Sends `intervention.opened/closed`, `heartbeat`, `sync`, `reply.injected`,
+///   and (never queued) `sessions.update`
+/// - Receives `reply` frames from the user's phone, and `sessions.command` /
+///   `phones.status` from Workers that speak sessions-v1 (older ones never
+///   send them)
 /// - Reconnects with jittered exponential backoff; detects dead sockets
 ///   with a ping every 25 s
 ///
@@ -148,13 +159,13 @@ struct OutboundQueue {
 /// URLSession delegate queue is backed by that same queue, so delegate
 /// callbacks never race the send path. Public methods may be called from
 /// any thread and never block. Callbacks (`onReply`, `onConnect`,
-/// `onConnectionChange`) run on `queue`; set them before `start()` and
-/// don't block in them.
+/// `onConnectionChange`, `onSessionsCommand`, `onPhonesStatus`) run on
+/// `queue`; set them before `start()` and don't block in them.
 ///
 /// Lifecycle: `stop()` invalidates the URLSession (breaking its strong
 /// reference to us), so a stopped client is finished — build a new one to
 /// reconnect with a different URL or token.
-final class RelayClient: NSObject, RelaySink, URLSessionWebSocketDelegate {
+final class RelayClient: NSObject, RelaySink, SessionsUpdateSink, URLSessionWebSocketDelegate {
     typealias ReplyHandler = (RelayReply) -> Void
 
     static let pingInterval: TimeInterval = 25
@@ -200,6 +211,10 @@ final class RelayClient: NSObject, RelaySink, URLSessionWebSocketDelegate {
     /// flushed. The Coordinator sends a heartbeat and `sync` frames here.
     var onConnect: (() -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
+    /// A phone's encrypted live-sessions command (still sealed).
+    var onSessionsCommand: ((SessionEnvelope) -> Void)?
+    /// How many phone sockets the Worker has open.
+    var onPhonesStatus: ((Int) -> Void)?
 
     private static let isoFormatter = ISO8601DateFormatter()
 
@@ -552,10 +567,47 @@ final class RelayClient: NSObject, RelaySink, URLSessionWebSocketDelegate {
 
     // MARK: inbound (on `queue`)
 
+    /// What a sessions-v1 frame carries, decided without touching any
+    /// client state (unit-tested).
+    enum SessionsFrame: Equatable {
+        case command(SessionEnvelope)
+        case phones(Int)
+        /// A sessions-v1 frame type with a payload of the wrong shape.
+        case malformed
+    }
+
+    /// `sessions.command` → its envelope, `phones.status` → the count; nil
+    /// for every other frame type.
+    static func sessionsFrame(type: String, payload: Any?) -> SessionsFrame? {
+        switch type {
+        case "sessions.command":
+            guard let e = SessionEnvelope(json: (payload as? [String: Any])?["e"]) else { return .malformed }
+            return .command(e)
+        case "phones.status":
+            guard let n = ((payload as? [String: Any])?["phones"] as? NSNumber)?.intValue, n >= 0 else { return .malformed }
+            return .phones(n)
+        default:
+            return nil
+        }
+    }
+
+    /// `{"type":"sessions.update","payload":{"e":<envelope>}}`
+    static func sessionsUpdateFrame(_ envelope: SessionEnvelope) -> Data? {
+        try? JSONSerialization.data(withJSONObject: ["type": "sessions.update", "payload": ["e": envelope.jsonObject]])
+    }
+
     private func handleIncoming(_ data: Data) {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String else {
             Logger.shared.log("RelayClient: ignoring unparseable frame (\(data.count) bytes)")
+            return
+        }
+        if let frame = Self.sessionsFrame(type: type, payload: obj["payload"]) {
+            switch frame {
+            case .command(let e): onSessionsCommand?(e)
+            case .phones(let n): onPhonesStatus?(n)
+            case .malformed: Logger.shared.log("RelayClient: malformed \(type) frame (\(data.count) bytes)")
+            }
             return
         }
         switch type {
@@ -577,7 +629,7 @@ final class RelayClient: NSObject, RelaySink, URLSessionWebSocketDelegate {
         // Worker broadcasts to every socket, including the sender), the v2
         // delivery results and Mac-presence frames meant for phones, and
         // keepalives. Logging these used to be ~50% of all log volume.
-        case "reply.result", "mac.status", "ack", "ping", "pong", "heartbeat", "sync", "relay.retired":
+        case "reply.result", "mac.status", "ack", "ping", "pong", "heartbeat", "sync", "relay.retired", "sessions.update":
             break
         default:
             if type.hasPrefix("intervention.") { break }
@@ -665,6 +717,24 @@ final class RelayClient: NSObject, RelaySink, URLSessionWebSocketDelegate {
         if !trimmedDetail.isEmpty { payload["detail"] = String(trimmedDetail.prefix(200)) }
         if let output { payload["output"] = String(output.prefix(2000)) }
         send(type: "reply.injected", key: interventionId, payload: payload)
+    }
+
+    /// Sends one sealed live-sessions update if the socket is up right now.
+    /// Never queued, never re-sent after a failed send: it is a snapshot
+    /// for whoever is looking, and the next one replaces it. Logs sizes only.
+    func sendSessionsUpdate(_ envelope: SessionEnvelope) {
+        guard let data = Self.sessionsUpdateFrame(envelope) else { return }
+        queue.async { [weak self] in
+            guard let self, !self.stopped, self.connected, let t = self.task else { return }
+            t.send(.data(data)) { [weak self] err in
+                guard let self, let err else { return }
+                self.queue.async {
+                    guard !self.stopped else { return }
+                    Logger.shared.log("RelayClient send of sessions.update (\(data.count) bytes) failed: \(err.localizedDescription) — dropped")
+                    self.taskEnded(t, reason: "send failed")
+                }
+            }
+        }
     }
 
     private func send(type: String, key: String?, payload: [String: Any]) {

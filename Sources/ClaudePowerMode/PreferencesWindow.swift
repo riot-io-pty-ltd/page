@@ -12,6 +12,7 @@ struct PreferencesForm: Equatable {
     var idlePageDelaySeconds: Double
     var holdAwakeForPendingPageMinutes: Double
     var headlessResumeFallbackEnabled: Bool
+    var remoteSessionsEnabled: Bool
     // Power
     var lowBatteryCutoff: Int
     var recoveryThreshold: Int
@@ -43,6 +44,7 @@ struct PreferencesForm: Equatable {
         idlePageDelaySeconds = c.idlePageDelaySeconds
         holdAwakeForPendingPageMinutes = c.holdAwakeForPendingPageMinutes
         headlessResumeFallbackEnabled = c.headlessResumeFallbackEnabled
+        remoteSessionsEnabled = c.remoteSessionsEnabled
         lowBatteryCutoff = c.lowBatteryCutoff
         recoveryThreshold = c.recoveryThreshold
         recoveryRequiresAC = c.recoveryRequiresAC
@@ -99,6 +101,7 @@ struct PreferencesForm: Equatable {
         if idlePageDelaySeconds != baseline.idlePageDelaySeconds { c.idlePageDelaySeconds = idlePageDelaySeconds }
         if holdAwakeForPendingPageMinutes != baseline.holdAwakeForPendingPageMinutes { c.holdAwakeForPendingPageMinutes = holdAwakeForPendingPageMinutes }
         if headlessResumeFallbackEnabled != baseline.headlessResumeFallbackEnabled { c.headlessResumeFallbackEnabled = headlessResumeFallbackEnabled }
+        if remoteSessionsEnabled != baseline.remoteSessionsEnabled { c.remoteSessionsEnabled = remoteSessionsEnabled }
         if lowBatteryCutoff != baseline.lowBatteryCutoff { c.lowBatteryCutoff = lowBatteryCutoff }
         if recoveryThreshold != baseline.recoveryThreshold { c.recoveryThreshold = recoveryThreshold }
         if recoveryRequiresAC != baseline.recoveryRequiresAC { c.recoveryRequiresAC = recoveryRequiresAC }
@@ -143,6 +146,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     private let holdAwakeSlider = NSSlider()
     private let holdAwakeLabel = NSTextField(labelWithString: "")
     private let headlessToggle = NSButton(checkboxWithTitle: "If the session has exited, deliver text replies with a background “claude --resume”", target: nil, action: nil)
+    private let remoteSessionsToggle = NSButton(checkboxWithTitle: "Show my live sessions on my phone, and let it type into them or stop them", target: nil, action: nil)
 
     // Power
     private let lidACToggle = NSButton(checkboxWithTitle: "Keep the Mac awake with the lid closed while on AC power", target: nil, action: nil)
@@ -331,6 +335,12 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         headlessToggle.target = self
         headlessToggle.action = #selector(controlChanged)
         s.addArrangedSubview(headlessToggle)
+
+        s.addArrangedSubview(separator())
+        remoteSessionsToggle.target = self
+        remoteSessionsToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(remoteSessionsToggle)
+        s.addArrangedSubview(hint("End-to-end encrypted with the key in the pairing QR — the relay can’t read it. Phones paired before this need to scan the QR again."))
         return s
     }
 
@@ -511,6 +521,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         idleDelaySlider.doubleValue = f.idlePageDelaySeconds
         holdAwakeSlider.doubleValue = f.holdAwakeForPendingPageMinutes
         headlessToggle.state = f.headlessResumeFallbackEnabled ? .on : .off
+        remoteSessionsToggle.state = f.remoteSessionsEnabled ? .on : .off
         cutoffSlider.doubleValue = Double(f.lowBatteryCutoff)
         recoverySlider.doubleValue = Double(f.recoveryThreshold)
         recoveryACToggle.state = f.recoveryRequiresAC ? .on : .off
@@ -542,6 +553,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         f.idlePageDelaySeconds = idleDelaySlider.doubleValue.rounded()
         f.holdAwakeForPendingPageMinutes = holdAwakeSlider.doubleValue.rounded()
         f.headlessResumeFallbackEnabled = headlessToggle.state == .on
+        f.remoteSessionsEnabled = remoteSessionsToggle.state == .on
         f.lowBatteryCutoff = Int(cutoffSlider.doubleValue.rounded())
         f.recoveryThreshold = Int(recoverySlider.doubleValue.rounded())
         f.recoveryRequiresAC = recoveryACToggle.state == .on

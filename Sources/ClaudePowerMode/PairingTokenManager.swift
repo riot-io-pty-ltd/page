@@ -33,10 +33,22 @@ enum PairingTokenManager {
     private static let lock = NSLock()
 
     static var tokenFileURL: URL {
+        storageDirectory.appendingPathComponent("relay_token.txt")
+    }
+
+    /// The live-sessions root key (`sk` in the pairing QR,
+    /// SESSIONS-PROTOCOL.md §1), next to the token with the same 0600
+    /// atomic write. It is what lets the phone read session content and
+    /// type into a session, so it is regenerated with the token.
+    static var sessionKeyFileURL: URL {
+        storageDirectory.appendingPathComponent("session_key.txt")
+    }
+
+    private static var storageDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = appSupport.appendingPathComponent("ClaudePowerMode", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("relay_token.txt")
+        return dir
     }
 
     private static let legacyKeychainService = "local.ClaudePowerMode.relayToken"
@@ -68,6 +80,9 @@ enum PairingTokenManager {
         let fresh = generate()
         let ok = store(fresh)
         deleteFromKeychain()
+        // A new pairing gets a new session key too: a phone holding the
+        // old one must not keep reading (or typing into) sessions.
+        if ok { rotateSessionKey(at: sessionKeyFileURL) }
         lock.unlock()
         Logger.shared.log(ok
             ? "Pairing token regenerated — paired phones must re-scan"
@@ -87,15 +102,58 @@ enum PairingTokenManager {
     /// to start talking to the same Worker as this Mac. `relayBaseURL` must
     /// already be validated (`Config.relayBaseURL`) — it is always https
     /// (or http for a local `wrangler dev`), never ws/wss or the placeholder.
-    static func pairingPayloadJSON(relayBaseURL: URL, token: String = currentToken()) -> String {
-        let payload: [String: Any] = [
+    ///
+    /// `sessionKey` is the live-sessions root key (`currentSessionKey()`),
+    /// sent as `sk`; nil leaves it out (older phones ignore it either way).
+    /// Explicit rather than defaulted, so nothing builds a payload — a
+    /// test, say — without deciding which key goes in it.
+    static func pairingPayloadJSON(relayBaseURL: URL, token: String = currentToken(), sessionKey: Data?) -> String {
+        var payload: [String: Any] = [
             "v": 1,
             "token": token,
             "relay": relayBaseURL.absoluteString,
             "host": Host.current().localizedName ?? "Mac"
         ]
+        if let sessionKey, sessionKey.count == SessionCrypto.rootKeyLength {
+            payload["sk"] = SessionCrypto.base64URLEncode(sessionKey)
+        }
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    // MARK: session key
+
+    /// The live-sessions root key, generated and stored the first time it's
+    /// needed. nil only when a fresh key couldn't be written (it is never
+    /// handed out unsaved: the phone would get a key the Mac forgets).
+    static func currentSessionKey(at url: URL = sessionKeyFileURL) -> Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let key = readSessionKey(at: url) { return key }
+        return rotateSessionKey(at: url)
+    }
+
+    /// The stored key if the file holds exactly 32 base64url bytes.
+    static func readSessionKey(at url: URL) -> Data? {
+        guard let data = try? Data(contentsOf: url),
+              let s = String(data: data, encoding: .utf8),
+              let key = SessionCrypto.base64URLDecode(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+              key.count == SessionCrypto.rootKeyLength else { return nil }
+        return key
+    }
+
+    /// Writes a fresh key (caller holds `lock`). If the write fails the old
+    /// file is removed, so a key that belonged to a replaced pairing is
+    /// never used again; the next `currentSessionKey` tries once more.
+    @discardableResult
+    static func rotateSessionKey(at url: URL) -> Data? {
+        let key = Data(randomBytes(SessionCrypto.rootKeyLength))
+        guard store(SessionCrypto.base64URLEncode(key), at: url) else {
+            unlink(url.path)
+            Logger.shared.log("Couldn't write the live-sessions key file")
+            return nil
+        }
+        return key
     }
 
     // MARK: file storage
@@ -161,17 +219,18 @@ enum PairingTokenManager {
     // MARK: token generation
 
     private static func generate() -> String {
-        var bytes = [UInt8](repeating: 0, count: 32)
+        SessionCrypto.base64URLEncode(Data(randomBytes(32)))
+    }
+
+    private static func randomBytes(_ count: Int) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: count)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         if status != errSecSuccess {
-            // Never hand out a predictable token; fall back to the system CSPRNG.
+            // Never hand out a predictable secret; fall back to the system CSPRNG.
             var rng = SystemRandomNumberGenerator()
-            bytes = (0..<32).map { _ in UInt8.random(in: 0...255, using: &rng) }
+            bytes = (0..<count).map { _ in UInt8.random(in: 0...255, using: &rng) }
         }
-        return Data(bytes).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        return bytes
     }
 }
 

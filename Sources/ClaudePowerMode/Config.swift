@@ -53,6 +53,10 @@ struct Config: Codable, Equatable {
     /// background `claude --resume --print` (output goes to a log file).
     /// Never used while the session is still running.
     var headlessResumeFallbackEnabled: Bool = true
+    /// Show live sessions on the paired phone (end-to-end encrypted with
+    /// the pairing's session key) and let it type into them or stop them
+    /// through the same input gate as replies (SESSIONS-PROTOCOL.md).
+    var remoteSessionsEnabled: Bool = true
 
     // Keeping awake (v3).
     /// While agents are working on AC power, also hold a
@@ -96,6 +100,7 @@ struct Config: Codable, Equatable {
         case localModelsEnabled
         case idlePageOnlyWhenAwaySeconds, idlePageDelaySeconds
         case holdAwakeForPendingPageMinutes, headlessResumeFallbackEnabled
+        case remoteSessionsEnabled
         case keepAwakeLidClosedOnAC, keepAwakeLidClosedOnBattery
         case lowBatteryAction, lowBatteryPauseGraceSeconds, resumeAfterBatteryRecovery
     }
@@ -150,6 +155,7 @@ struct Config: Codable, Equatable {
         idlePageDelaySeconds = field(.idlePageDelaySeconds, d.idlePageDelaySeconds)
         holdAwakeForPendingPageMinutes = field(.holdAwakeForPendingPageMinutes, d.holdAwakeForPendingPageMinutes)
         headlessResumeFallbackEnabled = field(.headlessResumeFallbackEnabled, d.headlessResumeFallbackEnabled)
+        remoteSessionsEnabled = field(.remoteSessionsEnabled, d.remoteSessionsEnabled)
         keepAwakeLidClosedOnAC = field(.keepAwakeLidClosedOnAC, d.keepAwakeLidClosedOnAC)
         keepAwakeLidClosedOnBattery = field(.keepAwakeLidClosedOnBattery, d.keepAwakeLidClosedOnBattery)
         lowBatteryAction = field(.lowBatteryAction, d.lowBatteryAction)

@@ -41,6 +41,9 @@ the security model is about who can send replies and what Page will type.
   status-aware keys, staleness checks, fail closed. Those rules limit what a
   reply can do; they don't decide who may send one.
 
+The token alone can **not** read the live sessions view or type into a
+session from it: that needs the session key (next section).
+
 How the token is generated and handled:
 
 - **Generated** on the Mac: 32 random bytes from `SecRandomCopyBytes` (with
@@ -83,6 +86,40 @@ accepting the old token. Redeploy the Worker to get retirement.
   Durable Objects for tokens of their own. Add a Cloudflare rate-limiting
   rule or WAF rule if that matters to you.
 - **No account system.** There's no per-user identity beyond the token.
+
+## The live-sessions key (end-to-end)
+
+The phone's **Sessions** tab (docs/SESSIONS-PROTOCOL.md) is end-to-end
+encrypted with a second secret, the **session key**:
+
+- **Generated** on the Mac (32 bytes from `SecRandomCopyBytes`), stored next
+  to the token in `session_key.txt` with the same 0600 atomic write, and
+  sent to the phone only inside the pairing QR (`sk`). The phone keeps it in
+  the Keychain. **Regenerate token…** replaces it too.
+- **Directional keys.** Each direction has its own HKDF-SHA256 subkey
+  (`mac->phone`, `phone->mac`), and each frame is AES-256-GCM with a fresh
+  random nonce and the frame type as associated data. The relay can't
+  reflect a Mac frame back as a command or relabel one frame as another.
+- **What the relay sees:** that a list, transcript or command went by, its
+  size and timing, and how many phones are connected. **What it can't
+  see:** session titles, folders, transcripts, typed text, or even which
+  session a command targets. Nothing in this view is written to Worker
+  storage, history, logs or push payloads.
+- **Typing requires the key.** The Mac acts on a command only if it
+  decrypts with the phone→Mac key, is within ±5 minutes of the Mac's clock
+  and hasn't been seen in the last 15 minutes. A leaked relay token alone
+  can't type anything here. Every accepted command then goes through the
+  Mac's input gate, which never weakens the reply path's rules (no Esc on a
+  prompt, no typing over a draft, no background resume).
+- **Only while someone is looking.** The Mac sends the list only while a
+  phone socket is open, and transcripts only for sessions a phone is
+  viewing. Tool output is never sent; text is redacted before it's cut.
+  The Mac logs session id prefixes, the operation, the outcome and lengths,
+  never content.
+- **If the session key leaks** (a QR screenshot, a backup of the phone's
+  Keychain), regenerate the token: the old key stops working on the Mac at
+  once. Turn the view off entirely with `remoteSessionsEnabled: false`
+  (**Preferences ▸ Phone**); the Mac then refuses every command.
 
 ## What the Worker stores, and for how long
 
