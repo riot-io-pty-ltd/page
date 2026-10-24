@@ -157,7 +157,23 @@ final class LocalProcessScanner {
         let comm: String
     }
 
+    /// The system reads `scan` makes; tests swap in a fake process table.
+    struct Readers {
+        var allProcesses: () -> [LocalProcInfo.Entry] = { LocalProcInfo.allProcesses() }
+        var execPath: (Int32) -> String? = { LocalProcInfo.execPath($0) }
+        var procArgs: (Int32) -> ProcArgs.Info? = { ProcArgs.read(pid: $0, envKeys: LocalProcessClassifier.envKeys) }
+        var ttyName: (UInt32) -> String? = { LocalProcInfo.ttyName(tdev: $0) }
+        /// The live readers reuse one path buffer instead of allocating per pid.
+        static func live() -> Readers {
+            var buffer = [CChar](repeating: 0, count: LocalProcInfo.pathBufferSize)
+            var r = Readers()
+            r.execPath = { LocalProcInfo.execPath($0, buffer: &buffer) }
+            return r
+        }
+    }
+
     private let home: String
+    private var readers: Readers
     /// Executable path ("" = unreadable) and candidacy per process
     /// instance, so `proc_pidpath` and the name checks run once per new
     /// process, not once per pid per poll.
@@ -166,8 +182,9 @@ final class LocalProcessScanner {
     /// `devname` is slow (~1 ms) and a device's name never changes.
     private var ttyNames: [UInt32: String?] = [:]
 
-    init(home: String = NSHomeDirectory()) {
+    init(home: String = NSHomeDirectory(), readers: Readers = .live()) {
         self.home = home
+        self.readers = readers
     }
 
     func scan() -> [LocalProcess] {
@@ -176,13 +193,12 @@ final class LocalProcessScanner {
         var pending: [Int32] = []
         var livePaths: [Key: (path: String, candidacy: LocalProcessClassifier.Candidacy)] = [:]
         var result: [LocalProcess] = []
-        var pathBuffer = [CChar](repeating: 0, count: LocalProcInfo.pathBufferSize)
 
-        for entry in LocalProcInfo.allProcesses() {
+        for entry in readers.allProcesses() {
             let pid = entry.pid
             let key = Key(pid: pid, start: entry.info.startSeconds, startMicros: entry.startMicros, comm: entry.comm)
             let known = paths[key] ?? {
-                let path = LocalProcInfo.execPath(pid, buffer: &pathBuffer) ?? ""
+                let path = readers.execPath(pid) ?? ""
                 return (path, path.isEmpty ? .none : LocalProcessClassifier.candidacy(execPath: path, home: home))
             }()
             livePaths[key] = known
@@ -196,7 +212,7 @@ final class LocalProcessScanner {
                 continue
             }
             let readArgv = candidacy == .needsArgv || (candidacy == .needsArgvIfTTY && tty != nil)
-            let args = readArgv ? ProcArgs.read(pid: pid, envKeys: LocalProcessClassifier.envKeys) : nil
+            let args = readArgv ? readers.procArgs(pid) : nil
             facts[pid] = ProcessFacts(pid: pid, ppid: entry.info.ppid, execPath: path,
                                       argv: args?.argv ?? [], env: args?.env ?? [:], ttyName: tty)
             keys[pid] = key
@@ -225,7 +241,7 @@ final class LocalProcessScanner {
 
     private func ttyName(_ tdev: UInt32) -> String? {
         if let cached = ttyNames[tdev] { return cached }
-        let name = LocalProcInfo.ttyName(tdev: tdev)
+        let name = readers.ttyName(tdev)
         if ttyNames.count > 512 { ttyNames.removeAll() }
         ttyNames[tdev] = .some(name)
         return name

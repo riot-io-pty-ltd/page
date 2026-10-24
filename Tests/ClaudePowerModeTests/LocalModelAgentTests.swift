@@ -196,15 +196,38 @@ final class LocalModelAgentTests: XCTestCase {
         XCTAssertNil(ResumeProviderGate.refusal(for: event("")))
     }
 
-    func testScheduledJobsCancelledOnceSeenOffAnthropic() {
+    /// Armed jobs get the schedule-time rule: positive Anthropic evidence
+    /// or cancel — including jobs left by builds without the gate.
+    func testScheduledJobsCancelledWithoutPositiveAnthropicEvidence() {
         func job(_ id: String) -> ScheduledResume {
             ScheduledResume(sessionId: id, cwd: "/p", projectName: "p", resetTime: Date(), prompt: "", plistPath: "",
                             logPath: "", label: id, createdAt: Date())
         }
-        let stored: [String: ModelProvider] = ["a": .ollama, "b": .anthropic, "d": .cloudGateway, "e": .otherLocal]
-        let cancel = ResumeProviderGate.jobsToCancel([job("a"), job("b"), job("c"), job("d"), job("e")],
-                                                     stored: { stored[$0] })
-        XCTAssertEqual(cancel.map(\.sessionId), ["a", "d", "e"], "never seen (c) and Anthropic (b) are kept")
+        typealias E = ResumeProviderGate.Evidence
+        let evidence: [String: E] = [
+            "a": E(stored: .ollama, lastAssistantModel: "claude-opus-4"),   // seen on Ollama since
+            "b": E(stored: .anthropic, lastAssistantModel: "qwen3"),        // store wins
+            "c": E(stored: nil, lastAssistantModel: "claude-sonnet-4-5"),   // old build's job, Claude transcript
+            "d": E(stored: nil, lastAssistantModel: "qwen3:8b"),            // old build's job, local transcript
+            "e": E(stored: nil, lastAssistantModel: nil),                   // nothing positive
+            "f": E(stored: .otherLocal, lastAssistantModel: nil),
+        ]
+        let cancel = ResumeProviderGate.jobsToCancel(["a", "b", "c", "d", "e", "f"].map(job), evidence: { evidence[$0.sessionId]! })
+        XCTAssertEqual(cancel.map(\.sessionId), ["a", "d", "e", "f"])
+    }
+
+    /// The process environment pointing at a local server decides it even
+    /// when the settings can't be read (protected folder, no cwd, unreadable
+    /// --settings): the session is local, not unknown.
+    func testEnvironmentEvidenceBeatsUnreadableSettings() {
+        let env = ["ANTHROPIC_BASE_URL": "http://127.0.0.1:11434", "ANTHROPIC_AUTH_TOKEN": "ollama"]
+        let home = "/Users/alex"
+        XCTAssertEqual(ModelProviderClassifier.claudeLive(argv: ["claude"], env: env, cwd: "/Users/alex/Documents/p", home: home), .ollama)
+        XCTAssertEqual(ModelProviderClassifier.claudeLive(argv: ["claude"], env: env, cwd: nil, home: home), .ollama)
+        XCTAssertEqual(ModelProviderClassifier.claudeLive(argv: ["claude", "--settings", "/nonexistent/s.json"], env: env, cwd: "/tmp", home: home), .ollama)
+        XCTAssertEqual(ModelProviderClassifier.claudeLive(argv: ["claude"], env: ["CLAUDE_CODE_USE_BEDROCK": "1"], cwd: nil, home: home), .cloudGateway)
+        // Anthropic env with unreadable settings stays unknown.
+        XCTAssertEqual(ModelProviderClassifier.claudeLive(argv: ["claude"], env: [:], cwd: "/Users/alex/Documents/p", home: home), .unknown)
     }
 
     // MARK: Rate limits

@@ -249,8 +249,8 @@ final class ClaudeBackend: AgentBackend {
             scheduler.purgeStale()
         }
         // The registry has just recorded live sessions' providers.
-        for job in ResumeProviderGate.jobsToCancel(scheduler.listScheduled(), stored: { SessionProviderStore.provider(for: $0) }) {
-            Logger.shared.log("Cancelling the background resume for \(job.sessionId.prefix(8)): the session now runs on a non-Anthropic model")
+        for job in ResumeProviderGate.jobsToCancel(scheduler.listScheduled(), evidence: resumeEvidence) {
+            Logger.shared.log("Cancelling the background resume for \(job.sessionId.prefix(8)): \(ResumeProviderGate.message(resumeEvidence(job)))")
             scheduler.cancel(job)
         }
 
@@ -396,6 +396,9 @@ final class ClaudeBackend: AgentBackend {
             // sessions known to run on Anthropic.
             if let why = ResumeProviderGate.refusal(for: event) {
                 Logger.shared.log("Not scheduling a background resume for \(event.sessionId.prefix(8)): \(why)")
+                // An earlier job for this session (armed when the evidence
+                // still said Anthropic) would otherwise stay armed.
+                scheduler.cancel(sessionId: event.sessionId)
                 return
             }
             do {
@@ -404,6 +407,30 @@ final class ClaudeBackend: AgentBackend {
                 Logger.shared.log("Failed to schedule resume: \(error)")
             }
         }
+    }
+
+    /// Last-model reads per transcript, keyed by file and modification
+    /// time, so checking armed resumes every tick doesn't re-read a 2 MB
+    /// tail per job (tick queue only).
+    private var transcriptModelCache: [String: (modified: Date?, model: String?)] = [:]
+
+    /// The schedule-time evidence for an armed job. Sidecars from older
+    /// builds may lack the transcript path; the registry finds it.
+    private func resumeEvidence(_ job: ScheduledResume) -> ResumeProviderGate.Evidence {
+        let url = job.transcriptPath.map { URL(fileURLWithPath: $0) }
+            ?? registry.transcriptURL(forSessionId: job.sessionId, cwdHint: job.cwd)
+        var model: String?
+        if let url {
+            let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            if let hit = transcriptModelCache[url.path], hit.modified == modified {
+                model = hit.model
+            } else {
+                model = TranscriptParser.lastAssistantModel(transcript: url)
+                if transcriptModelCache.count > 64 { transcriptModelCache = [:] }
+                transcriptModelCache[url.path] = (modified, model)
+            }
+        }
+        return ResumeProviderGate.Evidence(stored: SessionProviderStore.provider(for: job.sessionId), lastAssistantModel: model)
     }
 
     static func rateLimitPage(for event: RateLimitEvent) -> InterventionEvent {

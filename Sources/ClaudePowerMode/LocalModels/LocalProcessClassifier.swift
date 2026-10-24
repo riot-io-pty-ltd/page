@@ -122,6 +122,7 @@ enum LocalProcessClassifier {
         }
         if isLMStudioPath(execPath, home: home) { return .pathOnly }
         if lower.hasPrefix("python") { return .needsArgv }
+        if isAPELoader(lower) { return .needsArgv }
         if isMLXExecutable(lower) || isLlamaCLI(lower) || terminalAgentNames.contains(lower) { return .pathOnly }
         if scriptHosts.contains(lower) { return .needsArgvIfTTY }
         return .none
@@ -173,6 +174,17 @@ enum LocalProcessClassifier {
         }
         if isLlamaCLI(lower) {
             return LocalProcess(kind: .llamaCLI, pid: p.pid, name: base, ttyName: p.ttyName)
+        }
+        if isAPELoader(lower) {
+            // A llamafile on Apple silicon runs under Cosmopolitan's APE
+            // loader (~/.ape-<ver>, or one in $TMPDIR), which execs with the
+            // program as an argument — so the executable is the loader and
+            // the llamafile shows up in argv (unverified: no llamafile here).
+            for arg in p.argv.prefix(3) {
+                let name = basename(arg)
+                if isLlamaCLI(name.lowercased()) { return LocalProcess(kind: .llamaCLI, pid: p.pid, name: name, ttyName: p.ttyName) }
+            }
+            return nil
         }
         if terminalAgentNames.contains(lower) {
             return p.ttyName == nil ? nil : agent(p, name: lower)
@@ -252,6 +264,11 @@ enum LocalProcessClassifier {
 
     private static func agent(_ p: ProcessFacts, name: String) -> LocalProcess {
         LocalProcess(kind: .terminalAgent, pid: p.pid, name: name, ttyName: p.ttyName)
+    }
+
+    /// Cosmopolitan's APE loader: ".ape", ".ape-1.10", "ape", "ape-arm64.elf".
+    private static func isAPELoader(_ lower: String) -> Bool {
+        lower == "ape" || lower == ".ape" || lower.hasPrefix(".ape-") || lower.hasPrefix("ape-")
     }
 
     private static func isLlamaCLI(_ lower: String) -> Bool {

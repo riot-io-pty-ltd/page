@@ -85,6 +85,11 @@ enum ModelProviderClassifier {
     /// taken as Anthropic evidence.
     static func claudeLive(argv: [String], env: [String: String], cwd: String?,
                            home: String = NSHomeDirectory()) -> ModelProvider {
+        // The process environment on its own pointing away from Anthropic
+        // decides it, whatever the settings say (`claude` fails closed the
+        // same way) — so a session in ~/Documents on Ollama is still local.
+        let fromEnv = classifyClaudeEnv(env)
+        if !fromEnv.isKnownAnthropic { return fromEnv }
         guard let cwd, !cwd.isEmpty else { return .unknown }
         // Project (or config-dir) settings Page won't read — inside a
         // privacy-protected folder — may hold any `env`.
@@ -402,13 +407,15 @@ enum ResumeProviderGate {
         Evidence(stored: stored(sessionId), lastAssistantModel: TranscriptParser.lastAssistantModel(transcript: transcript))
     }
 
-    /// Pure (given `stored`). Scheduled background resumes whose session
-    /// has since been seen running on a non-Anthropic provider (a later
-    /// `claude --resume` under Ollama, or a job left by a build without
-    /// this gate). They would fire on the user's Anthropic account.
+    /// Pure (given `evidence`). Armed background resumes that the
+    /// schedule-time rule would refuse now: the session has since run on a
+    /// non-Anthropic provider, or the job was left by a build without this
+    /// gate and nothing positively says Anthropic. The launchd script does
+    /// no provider check of its own, so these would fire on the user's
+    /// Anthropic account.
     static func jobsToCancel(_ scheduled: [ScheduledResume],
-                             stored: (String) -> ModelProvider?) -> [ScheduledResume] {
-        scheduled.filter { stored($0.sessionId)?.isKnownNonAnthropic == true }
+                             evidence: (ScheduledResume) -> Evidence) -> [ScheduledResume] {
+        scheduled.filter { refusal(evidence($0)) != nil }
     }
 
     /// For a rate-limit event (scheduled resume): nil when allowed.

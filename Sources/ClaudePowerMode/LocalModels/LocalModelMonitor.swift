@@ -141,7 +141,9 @@ final class LocalModelMonitor: @unchecked Sendable {
     }
 
     private func scheduleNext(anyCandidate: Bool) {
-        timer?.schedule(deadline: .now() + (anyCandidate ? pollInterval : discoveryInterval), leeway: .seconds(1))
+        let interval = anyCandidate ? pollInterval : discoveryInterval
+        // Leeway lets macOS coalesce wake-ups; 10% of the interval, at most 1 s.
+        timer?.schedule(deadline: .now() + interval, leeway: .milliseconds(Int(min(1, interval * 0.1) * 1000)))
     }
 
     private func runPoll(completion: (() -> Void)?) {
