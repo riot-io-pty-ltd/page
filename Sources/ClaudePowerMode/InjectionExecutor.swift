@@ -1480,13 +1480,20 @@ enum InjectionExecutor {
     /// scheduled job), a live background job's sessions file for it
     /// (`backgroundOwnerPids`, from ClaudeSessionRegistry), a live
     /// cmux-recorded process for it, or a transcript written moments ago.
+    ///
+    /// `providerEvidence` (ResumeProviderGate): the background run doesn't
+    /// carry the session's environment, so it always goes to the user's
+    /// Anthropic account — refused unless the session positively ran on
+    /// Anthropic. nil skips that check; the reply path always passes it.
     static func headlessBlocker(sessionId: String,
                                 processTable: [ProcessRunner.ProcessInfoRow],
                                 transcript: URL?,
                                 now: Date = Date(),
                                 cmuxEntry: CmuxBridge.HookSession? = nil,
                                 backgroundOwnerPids: [Int32] = [],
+                                providerEvidence: ResumeProviderGate.Evidence? = nil,
                                 startSeconds: (Int32) -> Int? = CmuxBridge.processStartSeconds) -> String? {
+        if let providerEvidence, let why = ResumeProviderGate.refusal(providerEvidence) { return why }
         guard !processTable.isEmpty else { return "Couldn't check whether the session is still running" }
         if !backgroundOwnerPids.isEmpty { return backgroundJobMessage }
         let sid = sessionId.lowercased()

@@ -166,11 +166,13 @@ final class ClaudeBackend: AgentBackend {
         let prime = needsRateLimitPrime && cfg.rateLimitWatcherEnabled
         needsRateLimitPrime = false
         lock.unlock()
-        if prime { rateWatcher.primeWithExistingEvents(transcriptDirectory: cfg.transcriptDirectory) }
 
         // One process-table snapshot for the whole tick.
         let table = ProcessRunner.processTable()
         let sessions = registry.refresh(processTable: table)
+        // After the registry has recorded live sessions' providers: the
+        // index classifies (and caches) limits against them on first read.
+        if prime { rateWatcher.primeWithExistingEvents(transcriptDirectory: cfg.transcriptDirectory) }
         // A battery-paused session that's busy again was resumed by someone
         // (the user, or a phone reply) — its idle pages are fair game again.
         let busyIds = Set(sessions.filter { $0.status == .busy }.map(\.sessionId))
@@ -244,6 +246,11 @@ final class ClaudeBackend: AgentBackend {
         if now.timeIntervalSince(lastPurgeAt) >= 3600 {
             lastPurgeAt = now
             scheduler.purgeStale()
+        }
+        // The registry has just recorded live sessions' providers.
+        for job in ResumeProviderGate.jobsToCancel(scheduler.listScheduled(), stored: { SessionProviderStore.provider(for: $0) }) {
+            Logger.shared.log("Cancelling the background resume for \(job.sessionId.prefix(8)): the session now runs on a non-Anthropic model")
+            scheduler.cancel(job)
         }
 
         let relayAvailable = cfg.relayEnabled && relay != nil
@@ -384,6 +391,12 @@ final class ClaudeBackend: AgentBackend {
             // The launchd job covers the Mac being asleep or the session
             // having exited at reset time; it skips sessions that are still
             // live, which this backend resumes itself (refreshRateLimitPages).
+            // It runs without the session's environment, so only for
+            // sessions known to run on Anthropic.
+            if let why = ResumeProviderGate.refusal(for: event) {
+                Logger.shared.log("Not scheduling a background resume for \(event.sessionId.prefix(8)): \(why)")
+                return
+            }
             do {
                 try scheduler.schedule(event: event, prompt: cfg.carryOnPrompt, wakeViaPmset: cfg.wakeViaPmsetEnabled)
             } catch {
@@ -554,7 +567,8 @@ final class ClaudeBackend: AgentBackend {
                         if let why = InjectionExecutor.headlessBlocker(
                             sessionId: req.sessionId, processTable: table, transcript: transcript,
                             cmuxEntry: CmuxBridge.readHookSessions(agent: .claude)?.entries[req.sessionId.lowercased()],
-                            backgroundOwnerPids: registry.liveBackgroundOwnerPids(forSessionId: req.sessionId, processTable: table)) {
+                            backgroundOwnerPids: registry.liveBackgroundOwnerPids(forSessionId: req.sessionId, processTable: table),
+                            providerEvidence: ResumeProviderGate.evidence(sessionId: req.sessionId, transcript: transcript)) {
                             self?.finishReply(id, InjectionResult(method: .none, success: false, output: "headless blocked: \(why)", detail: why))
                             return
                         }
@@ -673,9 +687,15 @@ final class ClaudeBackend: AgentBackend {
 
     // MARK: manual resume
 
+    struct NonAnthropicResumeError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
     @discardableResult
     func scheduleResumeManually(for event: RateLimitEvent, prompt: String? = nil) throws -> ScheduledResume {
         let cfg = config
+        if let why = ResumeProviderGate.refusal(for: event) { throw NonAnthropicResumeError(message: why) }
         return try scheduler.schedule(
             event: event,
             prompt: prompt ?? cfg.carryOnPrompt,
@@ -839,8 +859,13 @@ extension ClaudeBackend: BatteryPausable {
 
     /// Pure. Interrupt only where a lone Esc can be pressed and the user
     /// chose "pause now"; otherwise queue the message behind the turn.
+    ///
+    /// A session on a local model (`isLocal`) only ever gets Esc: asking it
+    /// for a summary would have the local model generate one on battery.
+    /// Where Esc can't be pressed (Terminal.app), or the user chose "after
+    /// the current step", it is left alone — the Mac sleeps at the cutoff.
     static func pauseStrategy(status: ClaudeSessionStatus, host: InjectionExecutor.TerminalHost,
-                              mode: LowBatteryAction) -> PauseStrategy {
+                              mode: LowBatteryAction, isLocal: Bool = false) -> PauseStrategy {
         guard mode != .off else { return .skip("low-battery action is off") }
         // Waiting (a prompt on screen) and idle sessions are left alone:
         // they aren't burning battery, and Esc on a menu would deny it.
@@ -850,6 +875,11 @@ extension ClaudeBackend: BatteryPausable {
         case .unreachable(let detail): return .skip(detail)
         case .unknown: return .skip("terminal not found")
         case .tmux, .terminalApp, .iTerm, .cmux: break
+        }
+        if isLocal {
+            if mode == .afterTurn { return .skip("local model — Page doesn't queue a summary request on battery") }
+            if !host.canSendLoneEscape { return .skip("local model, and \(host.label) can't press Esc") }
+            return .interrupt
         }
         if mode == .afterTurn { return .queue(reason: "it stops after the current step") }
         if host.canSendLoneEscape { return .interrupt }
@@ -897,7 +927,7 @@ extension ClaudeBackend: BatteryPausable {
         var work: [PauseWork] = []
         for s in registry.allLiveSessions(processTable: table) where s.status == .busy {
             let host = InjectionExecutor.resolveHost(for: s, processTable: table)
-            let strategy = pauseStrategy(status: s.status, host: host, mode: mode)
+            let strategy = pauseStrategy(status: s.status, host: host, mode: mode, isLocal: s.provider.isLocal)
             if case .skip(let why) = strategy {
                 Logger.shared.log("Low-battery pause: skipped \(s.sessionId.prefix(8)) — \(why)")
                 continue
@@ -927,7 +957,10 @@ extension ClaudeBackend: BatteryPausable {
                 work[i].escSent = true
             } else {
                 Logger.shared.log("Low-battery pause: Esc failed for \(work[i].session.sessionId.prefix(8)): \(r.detail) [\(r.output.prefix(160))]")
-                work[i].strategy = .queue(reason: "Page couldn't press Esc there, so it stops after this turn")
+                // Local model: Esc only, never a queued summary request.
+                work[i].strategy = work[i].session.provider.isLocal
+                    ? .skip("local model, and Page couldn't press Esc there")
+                    : .queue(reason: "Page couldn't press Esc there, so it stops after this turn")
             }
         }
 
@@ -954,6 +987,18 @@ extension ClaudeBackend: BatteryPausable {
                 continue
             }
             let pausedAt = w.escSent ? w.pausedAt : Date()
+            let cwd = w.session.cwd ?? ""
+            let projectName = cwd.isEmpty ? "Claude" : InterventionDetector.projectName(forCwd: cwd)
+            // Local model: the Esc was the whole pause — no message typed,
+            // so the model doesn't spend battery writing a summary.
+            if w.session.provider.isLocal {
+                guard w.escSent else { continue }
+                let detail = BatteryPauseSupport.localModelPauseDetail(stopped: !w.stillBusyAfterEsc)
+                Logger.shared.log("Low-battery pause: \(w.session.sessionId.prefix(8)) — \(detail)")
+                paused.append(PausedSession(backend: .claude, sessionId: w.session.sessionId, projectName: projectName,
+                                            cwd: cwd, pausedAt: pausedAt, detail: detail))
+                continue
+            }
             let req = InjectionExecutor.ClaudeReplyRequest(
                 interventionId: "\(w.session.sessionId)-low_battery_pause", sessionId: w.session.sessionId,
                 action: "custom", text: message, kind: .idle,
@@ -985,11 +1030,10 @@ extension ClaudeBackend: BatteryPausable {
                 continue
             }
             Logger.shared.log("Low-battery pause: \(w.session.sessionId.prefix(8)) — \(detail)")
-            let cwd = w.session.cwd ?? ""
             paused.append(PausedSession(
                 backend: .claude,
                 sessionId: w.session.sessionId,
-                projectName: cwd.isEmpty ? "Claude" : InterventionDetector.projectName(forCwd: cwd),
+                projectName: projectName,
                 cwd: cwd,
                 pausedAt: pausedAt,
                 detail: detail

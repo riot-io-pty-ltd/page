@@ -66,6 +66,14 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
     /// A turn with no rollout writes for this long is treated as stalled
     /// (crashed TUI, or a long-unanswered approval) and stops holding power.
     static let stalledTurnSeconds: TimeInterval = 15 * 60
+    /// The same for a thread on a local model (Ollama, LM Studio): a long
+    /// prompt evaluation or a slow generation on the Mac's own GPU can go
+    /// many minutes between rollout writes without being stuck.
+    static let localStalledTurnSeconds: TimeInterval = 60 * 60
+
+    static func stalledTurnSeconds(isLocal: Bool) -> TimeInterval {
+        isLocal ? localStalledTurnSeconds : stalledTurnSeconds
+    }
     static let listPageSize = 50
     static let maxListPages = 4
     /// Rate-limit snapshots older than this aren't trusted to describe now.
@@ -128,6 +136,9 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
     private let execGate = CodexExecResumeGate()
     /// scanQueue only.
     private var rolloutCache: [String: CachedRollout] = [:]
+    /// scanQueue only. pid → model provider of that codex process (from its
+    /// argv, read once per pid and start time; argv itself is dropped).
+    private var processProviders: [Int32: (start: Int?, provider: ModelProvider)] = [:]
     /// scanQueue only. Thread cwd → canonical path (realpath is disk I/O).
     private var canonicalCwds: [String: String] = [:]
 
@@ -523,9 +534,11 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
                 continue
             }
             activity[id] = rollout.mtime
+            let local = Self.threadIsLocal(t, rolloutPath: path, processes: processes, providerOf: processProvider)
             var state = Self.deriveState(summary: rollout.summary,
                                          rolloutAge: now.timeIntervalSince(rollout.mtime),
-                                         activeWindow: cfg.transcriptActivityWindowSeconds)
+                                         activeWindow: cfg.transcriptActivityWindowSeconds,
+                                         isLocal: local)
             if let hint = hints[id], hint.at > rollout.mtime { state = hint.state }
             states[id] = state
             if let page = Self.idlePage(thread: t, summary: rollout.summary, rolloutMtime: rollout.mtime,
@@ -543,6 +556,8 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
             }
         }
         rolloutCache = rolloutCache.filter { scannedPaths.contains($0.key) }
+        let livePids = Set(processes.map(\.pid))
+        processProviders = processProviders.filter { livePids.contains($0.key) }
 
         // Idle pages wait until the user has walked away from the Mac (they
         // can see the terminal themselves). Approvals never wait.
@@ -616,6 +631,29 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         return c
     }
 
+    /// scanQueue only. The provider of one live codex process, classified
+    /// from its argv the first time its (pid, start time) is seen.
+    private func processProvider(_ pid: Int32) -> ModelProvider {
+        let start = CmuxBridge.processStartSeconds(pid)
+        if let hit = processProviders[pid], hit.start == start, start != nil { return hit.provider }
+        let provider = ModelProviderClassifier.codex(argv: ProcArgs.read(pid: pid, envKeys: [])?.argv ?? [],
+                                                     threadModelProvider: nil)
+        if start != nil { processProviders[pid] = (start, provider) }
+        return provider
+    }
+
+    /// Pure (given `providerOf`). Whether a thread runs on a local model:
+    /// the thread's own `modelProvider`, else the argv of a codex process
+    /// holding its rollout open.
+    static func threadIsLocal(_ t: ThreadSummary, rolloutPath: String, processes: [CodexProcess],
+                              providerOf: (Int32) -> ModelProvider) -> Bool {
+        if ModelProviderClassifier.codex(argv: [], threadModelProvider: t.modelProvider).isLocal { return true }
+        let name = (rolloutPath as NSString).lastPathComponent
+        return processes.contains { p in
+            p.openRollouts.contains { ($0 as NSString).lastPathComponent == name } && providerOf(p.pid).isLocal
+        }
+    }
+
     /// scanQueue only. Re-reads the tail only when the file changed.
     private func rolloutState(path: String) -> (mtime: Date, summary: CodexRollout.Summary)? {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
@@ -635,9 +673,12 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
 
     // MARK: State derivation (pure)
 
+    /// `isLocal`: the thread runs on a local model, so a quiet turn is given
+    /// `localStalledTurnSeconds` before it stops counting as active.
     static func deriveState(summary: CodexRollout.Summary,
                             rolloutAge: TimeInterval,
-                            activeWindow: TimeInterval) -> AgentSessionState {
+                            activeWindow: TimeInterval,
+                            isLocal: Bool = false) -> AgentSessionState {
         if let request = summary.pendingRequest, rolloutAge < maxIdlePageAge {
             switch request {
             case .approval: return .waitingOnApproval
@@ -646,7 +687,7 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         }
         switch summary.phase {
         case .inTurn:
-            return rolloutAge <= stalledTurnSeconds ? .active : .interrupted
+            return rolloutAge <= stalledTurnSeconds(isLocal: isLocal) ? .active : .interrupted
         case .unknown:
             // No turn markers in view (brand-new session, or a giant tool
             // output filled the tail): fall back to plain write recency.
@@ -1383,8 +1424,21 @@ extension CodexBackend: BatteryPausable {
         case skip(String)
     }
 
-    /// Pure.
-    static func pauseStrategy(terminal: CodexInjector.Terminal, mode: LowBatteryAction) -> PauseStrategy {
+    /// Pure. A thread on a local model (`isLocal`) only ever gets Esc — no
+    /// summary request for the local model to generate on battery — so it
+    /// is skipped wherever Esc can't be pressed or the user chose "after
+    /// the current step"; the Mac sleeps at the cutoff anyway.
+    static func pauseStrategy(terminal: CodexInjector.Terminal, mode: LowBatteryAction,
+                              isLocal: Bool = false) -> PauseStrategy {
+        if isLocal, mode != .off {
+            switch terminal {
+            case .unavailable(let why): return .skip(why)
+            case .tmux, .cmux:
+                return mode == .pause ? .interrupt : .skip("local model — Page doesn't queue a summary request on battery")
+            case .terminalApp:
+                return .skip("local model, and Terminal.app can't press Esc")
+            }
+        }
         switch (mode, terminal) {
         case (.off, _):
             return .skip("low-battery action is off")
@@ -1427,6 +1481,7 @@ extension CodexBackend: BatteryPausable {
         let pid: Int32
         let terminal: CodexInjector.Terminal
         var strategy: PauseStrategy
+        var isLocal = false
         var pausedAt = Date()
         var escSent = false
         var turnEnded = false
@@ -1457,12 +1512,15 @@ extension CodexBackend: BatteryPausable {
                 continue
             }
             let terminal = CodexInjector.terminal(tty: tty, pid: pid, threadId: t.id, table: table)
-            let strategy = Self.pauseStrategy(terminal: terminal, mode: mode)
+            let isLocal = ModelProviderClassifier.codex(argv: ProcArgs.read(pid: pid, envKeys: [])?.argv ?? [],
+                                                        threadModelProvider: t.modelProvider).isLocal
+            let strategy = Self.pauseStrategy(terminal: terminal, mode: mode, isLocal: isLocal)
             if case .skip(let why) = strategy {
                 Logger.shared.log("CodexBackend: low-battery pause skipped \(id.prefix(8)) — \(why)")
                 continue
             }
-            work.append(PauseWork(thread: t, path: path, cwd: cwd, pid: pid, terminal: terminal, strategy: strategy))
+            work.append(PauseWork(thread: t, path: path, cwd: cwd, pid: pid, terminal: terminal, strategy: strategy,
+                                  isLocal: isLocal))
         }
         guard !work.isEmpty else { return [] }
 
@@ -1500,6 +1558,9 @@ extension CodexBackend: BatteryPausable {
             case .skip(let why):
                 Logger.shared.log("CodexBackend: low-battery pause skipped \(w.thread.id.prefix(8)) — \(why)")
                 continue
+            case .interrupt where w.isLocal:
+                // Local model: the Esc was the whole pause — no message.
+                detail = BatteryPauseSupport.localModelPauseDetail(stopped: w.turnEnded)
             case .interrupt where !w.turnEnded:
                 detail = "Pressed Esc in \(label), but couldn't confirm Codex stopped — no pause message sent"
             case .interrupt where ProcessRunner.isForeground(pid: w.pid) != true:

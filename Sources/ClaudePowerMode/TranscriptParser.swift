@@ -84,11 +84,18 @@ enum TranscriptParser {
     ///
     /// `launchDirectory` maps the record's own `cwd` (may be a subdirectory)
     /// to the session's launch directory; nil means unknown.
+    ///
+    /// `providerFor` gives the session's model provider. A session known to
+    /// run elsewhere (Ollama `:cloud`, a gateway, a local server) can get
+    /// 429s with that server's own wording; without a real reset time those
+    /// are `.transient`, not a guessed 5-hour Anthropic wall. Structured
+    /// `resetsAt` walls are kept whatever the provider.
     static func classifyRateLimitRecord(
         _ obj: [String: Any],
         transcriptPath: String,
         defaultTimeZone: TimeZone = .current,
-        launchDirectory: (String?) -> String? = { _ in nil }
+        launchDirectory: (String?) -> String? = { _ in nil },
+        providerFor: (String) -> ModelProvider = { _ in .unknown }
     ) -> RateLimitRecord {
         guard isRateLimitRecord(obj) else { return .ignored }
         // Skip subagent (Task-spawned) rate-limits — resuming the parent on a
@@ -112,6 +119,7 @@ enum TranscriptParser {
         var estimated = false
         if resetTime == nil {
             guard isUsageLimitWall(obj, text: text) else { return .transient(text) }
+            if providerFor(sessionId).isKnownNonAnthropic { return .transient(text) }
             resetTime = eventTime.addingTimeInterval(estimatedResetInterval)
             estimated = true
         }
@@ -160,6 +168,33 @@ enum TranscriptParser {
         guard t.contains("limit") else { return false }
         return t.contains("hit your") || t.contains("usage limit") || t.contains("limit reached")
             || t.contains("reached your") || t.contains("reset")
+    }
+
+    // MARK: - Model
+
+    /// The newest real assistant `message.model` in a transcript tail
+    /// (oldest line first). Skips Claude Code's "<synthetic>" messages, API
+    /// error records (a rate-limited transcript ends in one) and subagent
+    /// records, so the answer is the model the main conversation ran on.
+    static func lastAssistantModel<S: StringProtocol>(tailLines: [S]) -> String? {
+        for line in tailLines.reversed() {
+            guard line.contains("\"assistant\""),
+                  let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  obj["type"] as? String == "assistant" else { continue }
+            if obj["isSidechain"] as? Bool == true || obj["agentId"] != nil { continue }
+            if obj["error"] != nil || obj["isApiErrorMessage"] as? Bool == true || obj["apiErrorStatus"] != nil { continue }
+            guard let model = (obj["message"] as? [String: Any])?["model"] as? String else { continue }
+            let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == "<synthetic>" { continue }
+            return trimmed
+        }
+        return nil
+    }
+
+    /// Reads the last `maxBytes` of a transcript for `lastAssistantModel`.
+    static func lastAssistantModel(transcript: URL?, maxBytes: Int = 2 * 1024 * 1024) -> String? {
+        guard let transcript, let tail = CodexRollout.readTail(of: transcript, maxBytes: maxBytes) else { return nil }
+        return lastAssistantModel(tailLines: tail.text.split(separator: "\n", omittingEmptySubsequences: true))
     }
 
     private static func extractResetText(from obj: [String: Any]) -> String? {
@@ -526,7 +561,9 @@ enum TranscriptParser {
 /// - lines are filtered on raw bytes (memmem) before any JSON decoding.
 /// One directory walk per scan; `subagents/` trees are never descended.
 final class RateLimitTranscriptIndex {
-    static let shared = RateLimitTranscriptIndex()
+    /// Classifies against the providers recorded for live sessions, so an
+    /// estimated wall from a non-Anthropic session reads as transient.
+    static let shared = RateLimitTranscriptIndex(providerFor: { SessionProviderStore.provider(for: $0) ?? .unknown })
 
     struct ScanResult {
         /// Events from the lookback window plus older ones still in effect.
@@ -550,11 +587,13 @@ final class RateLimitTranscriptIndex {
     private var entries: [String: Entry] = [:]
     private let lock = NSLock()
     private let defaultTimeZone: TimeZone
+    private let providerFor: (String) -> ModelProvider
     /// Read granularity; bounds memory on the first pass over a large file.
     var chunkSize = 8 << 20
 
-    init(defaultTimeZone: TimeZone = .current) {
+    init(defaultTimeZone: TimeZone = .current, providerFor: @escaping (String) -> ModelProvider = { _ in .unknown }) {
         self.defaultTimeZone = defaultTimeZone
+        self.providerFor = providerFor
     }
 
     private static let rateMarkers = [Data(#""rate_limit""#.utf8), Data(#""apiErrorStatus":429"#.utf8)]
@@ -697,7 +736,8 @@ final class RateLimitTranscriptIndex {
                 obj,
                 transcriptPath: path,
                 defaultTimeZone: defaultTimeZone,
-                launchDirectory: { hint in self.launchDirectory(path: path, hintCwd: hint, entry: &entry) }
+                launchDirectory: { hint in self.launchDirectory(path: path, hintCwd: hint, entry: &entry) },
+                providerFor: providerFor
             )
             switch record {
             case .event(let event):
