@@ -56,8 +56,8 @@ struct Config: Codable, Equatable {
     /// nothing on battery.
     var keepAwakeLidClosedOnAC: Bool = true
     /// Opt-in: keep working with the lid closed on battery, via
-    /// `sudo -n pmset -a disablesleep 1` (needs `./install.sh
-    /// --enable-power-helpers`). Only while agents are working, the battery
+    /// `sudo -n pmset -a disablesleep 1` (needs the power helper, installed
+    /// from the app or by `./install.sh --enable-power-helpers`). Only while agents are working, the battery
     /// is comfortably above the cutoff and the Mac isn't hot; a LaunchAgent
     /// watchdog undoes it if Page dies.
     var keepAwakeLidClosedOnBattery: Bool = false

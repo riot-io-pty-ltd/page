@@ -818,7 +818,7 @@ final class ResumeScheduler {
             return stamp
         }
         let output = (r.stderr + r.stdout).trimmingCharacters(in: .whitespacesAndNewlines)
-        Logger.shared.log("pmset schedule wake failed (\(r.status)). Output: \(output). Hint: run `./install.sh --enable-power-helpers` to allow passwordless pmset.")
+        Logger.shared.log("pmset schedule wake failed (\(r.status)). Output: \(output). Hint: install the power helper (Preferences ▸ Power ▸ Install…) to allow passwordless pmset.")
         return nil
     }
 

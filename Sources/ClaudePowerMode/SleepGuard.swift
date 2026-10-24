@@ -23,7 +23,8 @@ import Foundation
 ///   within a minute if the marker exists and Page isn't running at all, or
 ///   if Page has stopped refreshing the marker (hung) for 3 minutes.
 ///
-/// The sudoers rule (`./install.sh --enable-power-helpers`) allows exactly
+/// The sudoers rule (installed from Preferences ▸ Power, or by
+/// `./install.sh --enable-power-helpers`) allows exactly
 /// `/usr/bin/pmset -a disablesleep 0` and `... 1` — nothing else.
 enum SleepGuardPolicy {
     /// Turning the flag on needs the battery this many points above the
@@ -181,9 +182,11 @@ final class SleepGuard {
     static let sudo = "/usr/bin/sudo"
     static let pmset = "/usr/bin/pmset"
     static let launchctl = "/bin/launchctl"
-    static let installCommand = "./install.sh --enable-power-helpers"
+    /// Where the user installs the helper (the command line alternative is
+    /// `./install.sh --enable-power-helpers`).
+    static let installHint = "Preferences ▸ Power ▸ Install…, or the menu’s lid-closed toggle"
     /// How long a helper check is trusted. The rule only changes when the
-    /// user runs install.sh, so re-asking sudo every tick would be waste.
+    /// user installs or removes it, so re-asking sudo every tick would be waste.
     static let helperCacheSeconds: TimeInterval = 300
 
     /// While the helper is missing, a failing clear is retried at most this
@@ -384,7 +387,7 @@ final class SleepGuard {
             Logger.shared.log("Lid-closed-on-battery ON (pmset disablesleep 1) — \(reason)")
             return
         }
-        Logger.shared.log("Lid-closed-on-battery: pmset disablesleep 1 failed (status \(r.status)\(r.timedOut ? ", timed out" : "")) — is the power helper installed? (\(Self.installCommand))")
+        Logger.shared.log("Lid-closed-on-battery: pmset disablesleep 1 failed (status \(r.status)\(r.timedOut ? ", timed out" : "")) — is the power helper installed? (\(Self.installHint))")
         // Assume the rule is gone so we don't retry every tick, and make
         // sure a half-applied (e.g. timed-out) call didn't leave the flag
         // on. Page never knew the flag to be on, so `_flagOn` stays false;

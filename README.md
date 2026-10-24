@@ -50,9 +50,10 @@ There are three pieces, all of which you run yourself:
 - **Lid closed on AC, by default.** While agents work on AC power, Page also
   holds a `PreventSystemSleep` assertion so the Mac keeps running with the lid
   shut (`keepAwakeLidClosedOnAC`). macOS honours that assertion on AC only.
-- **Lid closed on battery: opt-in, with a watchdog.** Run
-  `./install.sh --enable-power-helpers` once, then turn on
-  Preferences ▸ Power ▸ "Also with the lid closed on battery (advanced)". Page then runs
+- **Lid closed on battery: opt-in, with a watchdog.** Turn on "Keep awake with
+  the lid closed on battery" in the menu (or Preferences ▸ Power). The first
+  time, macOS asks for your password once so Page can install its power helper
+  (the same rule `./install.sh --enable-power-helpers` installs). Page then runs
   `sudo -n pmset -a disablesleep 1`, and only while all of these hold: agents
   are mid-turn, you're on battery, the charge is more than 5 points above your
   cutoff when it turns on (it stays on down to the cutoff, never at or below
@@ -206,7 +207,8 @@ With `autoResumeEnabled` on:
   exits without running if the session is live again.
 
 `wakeViaPmsetEnabled` adds a `pmset schedule wake` one minute before the job
-fires. This needs `--enable-power-helpers`.
+fires. This needs the power helper (Preferences ▸ Power ▸ Install…, or
+`--enable-power-helpers`).
 
 ## Getting started
 
@@ -367,7 +369,7 @@ Apply hand edits with **Reload Config** in the menu.
 | `holdAwakeForPendingPageMinutes` | `60` (0–1440) | Keep the Mac awake this long while a page waits for a reply (relay on only). `0` = don't hold |
 | `headlessResumeFallbackEnabled` | `true` | When the session's process has exited, deliver a text reply with `claude --resume --print` / `codex exec resume`. Never used while the session is still running |
 | `keepAwakeLidClosedOnAC` | `true` | While agents work on AC, also hold `PreventSystemSleep` so the lid can be closed |
-| `keepAwakeLidClosedOnBattery` | `false` | Opt-in lid-closed-on-battery via `pmset disablesleep`. Needs `--enable-power-helpers` |
+| `keepAwakeLidClosedOnBattery` | `false` | Opt-in lid-closed-on-battery via `pmset disablesleep`. Needs the power helper (installed from the app, or `--enable-power-helpers`) |
 | `lowBatteryCutoff` | `10` (0–100) | Battery % (on battery power) at which Page pauses agents and stops keeping the Mac awake |
 | `lowBatteryAction` | `"pause"` | `pause` (interrupt and summarise), `afterTurn` (finish the step, then summarise), or `off` (don't message the agents, just let the Mac sleep) |
 | `lowBatteryPauseGraceSeconds` | `90` (15–600) | How long to stay awake after the pause so the agents can write their summary |
@@ -384,7 +386,7 @@ Apply hand edits with **Reload Config** in the menu.
 | `holdAssertionUntilReset` | `true` | Keep the Mac awake while a rate limit is active |
 | `autoResumeEnabled` | `false` | After a Claude rate limit resets, continue the conversation (see [Rate limits](#rate-limits)) |
 | `carryOnPrompt` | `"carry on"` | The prompt used for that auto-resume |
-| `wakeViaPmsetEnabled` | `false` | Schedule a system wake before a scheduled resume. Needs `--enable-power-helpers` |
+| `wakeViaPmsetEnabled` | `false` | Schedule a system wake before a scheduled resume. Needs the power helper |
 | `codexBackendEnabled` | `false` | Watch Codex sessions as well |
 | `codexPath` | `""` | Absolute path to `codex`. Empty = auto-discover (`~/.local/bin`, Homebrew, `/usr/local/bin`, npm-global, nvm) |
 

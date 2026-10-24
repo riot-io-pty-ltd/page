@@ -134,12 +134,18 @@ that can reach your Worker and, in part, Apple.
 
 ## Local privileges Page installs
 
-### sudoers (only with `./install.sh --enable-power-helpers`)
+### sudoers (only when you turn on the power helper)
 
-A plain install never uses sudo. `--enable-power-helpers` writes
-`/etc/sudoers.d/claude-power-mode` (mode 0440, root:wheel). It validates the
-fragment with `visudo -c` before installing it and re-checks the whole sudoers
-configuration afterwards. The fragment allows your user, without a password,
+A plain install never uses sudo. The power helper is installed either from the
+app (turning on lid-closed-on-battery, or Preferences ▸ Power ▸ Install…, which
+shows the standard macOS admin prompt) or by `./install.sh
+--enable-power-helpers`. Both write the same `/etc/sudoers.d/claude-power-mode`
+(mode 0440, root:wheel; a test keeps the two identical). The fragment is
+validated with `visudo -c` before it goes live and the whole sudoers
+configuration is re-checked afterwards, rolling back on failure. The app embeds
+the fragment in the root script itself and stages it under a dotted name in
+`/etc/sudoers.d` (which sudo ignores), so no user-writable file is ever copied
+into place. The fragment allows your user, without a password,
 **exactly** these commands:
 
 ```

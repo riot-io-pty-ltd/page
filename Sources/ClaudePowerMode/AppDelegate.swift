@@ -53,6 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let coordinator = Coordinator()
     private var lastSnapshot: Coordinator.Snapshot?
     private var prefsController: PreferencesWindowController?
+    /// True while the power-helper admin prompt is up (menu item disabled).
+    private var installingPowerHelper = false
     private let launchedAt = Date()
     /// Ids already bannered this run (bounded). Backends can re-report a
     /// page (e.g. after a config reload); one banner per page is enough.
@@ -440,6 +442,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             if s.power.hasBattery {
                 menu.addItem(.separator())
                 addInfo(menu, Self.batteryRuleLine(cfg))
+                let lid = addAction(menu, "Keep awake with the lid closed on battery", #selector(toggleLidClosedOnBattery), key: "")
+                lid.state = cfg.keepAwakeLidClosedOnBattery ? .on : .off
+                lid.isEnabled = !installingPowerHelper
             }
             menu.addItem(.separator())
         } else {
@@ -567,6 +572,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func openHookInstaller() {
         HookInstallerWindowController.shared.show()
+    }
+
+    /// Menu toggle for lid-closed-on-battery. Turning it on explains the
+    /// trade-off once, installs the power helper behind the macOS admin
+    /// prompt if it's missing, then saves the setting.
+    @objc private func toggleLidClosedOnBattery() {
+        guard !installingPowerHelper else { return }
+        if coordinator.config.keepAwakeLidClosedOnBattery {
+            if !coordinator.setLidClosedOnBattery(false) { lidSettingFailed() }
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Keep agents running with the lid closed on battery?"
+        alert.informativeText = "While an agent is mid-turn, Page will stop the Mac sleeping when you close the lid on battery. "
+            + "At your low-battery level it asks the agents to pause, then lets the Mac sleep. "
+            + "A closed MacBook in a bag will stay awake and warm while agents work."
+            + (coordinator.sleepGuardHelperMissing ? "\n\nmacOS will ask for your password once to allow this." : "")
+        alert.addButton(withTitle: "Turn On")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        installingPowerHelper = true
+        coordinator.checkPowerHelper(refresh: true) { [weak self] status in
+            guard let self else { return }
+            guard status != .available else {
+                self.installingPowerHelper = false
+                if !self.coordinator.setLidClosedOnBattery(true) { self.lidSettingFailed() }
+                return
+            }
+            self.coordinator.installPowerHelper { [weak self] outcome, status in
+                guard let self else { return }
+                self.installingPowerHelper = false
+                switch outcome {
+                case .installed where status == .available:
+                    if !self.coordinator.setLidClosedOnBattery(true) { self.lidSettingFailed() }
+                case .cancelled:
+                    break
+                case .installed:
+                    self.showSimpleAlert("Couldn’t turn this on", "The power helper was installed but sudo still doesn’t allow it. Check the log.")
+                case .failed(let why):
+                    self.showSimpleAlert("Couldn’t install the power helper", why)
+                }
+            }
+        }
+    }
+
+    private func lidSettingFailed() {
+        showSimpleAlert("Couldn’t save the setting", "config.json couldn’t be read or written. Open Preferences to fix it.")
+    }
+
+    private func showSimpleAlert(_ title: String, _ text: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     @objc private func openResumeLog(_ sender: NSMenuItem) {

@@ -419,6 +419,35 @@ final class Coordinator {
         }
     }
 
+    /// Cached only (never spawns sudo): true unless the last check found
+    /// the power helper installed.
+    var sleepGuardHelperMissing: Bool { sleepGuard.cachedHelperStatus != .available }
+
+    /// Installs the power helper behind the macOS admin prompt (see
+    /// PowerHelperInstaller), then re-checks it. `completion` on main with
+    /// the install outcome and the fresh helper status.
+    func installPowerHelper(completion: @escaping (PowerHelperInstaller.Outcome, SleepGuard.HelperStatus) -> Void) {
+        let guardRef = sleepGuard
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = PowerHelperInstaller.install()
+            let status = guardRef.helperStatus(refresh: true)
+            DispatchQueue.main.async { completion(outcome, status) }
+        }
+    }
+
+    /// Turns lid-closed-on-battery on or off from the menu: writes just that
+    /// key to config.json and applies it. Returns false (and changes nothing)
+    /// when config.json can't be read or written, so a broken file is never
+    /// replaced with defaults behind the user's back.
+    @discardableResult
+    func setLidClosedOnBattery(_ on: Bool) -> Bool {
+        guard var cfg = Config.loadResult().config else { return false }
+        cfg.keepAwakeLidClosedOnBattery = on
+        guard cfg.save() else { return false }
+        reloadConfig()
+        return true
+    }
+
     // MARK: config application (tick queue)
 
     private func apply(_ cfg: Config) {

@@ -145,7 +145,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     private let lidACToggle = NSButton(checkboxWithTitle: "Keep the Mac awake with the lid closed while on AC power", target: nil, action: nil)
     private let lidBatteryToggle = NSButton(checkboxWithTitle: "Also with the lid closed on battery (advanced)", target: nil, action: nil)
     private let helperStatusLabel = NSTextField(wrappingLabelWithString: "")
-    private let helperCopyButton = NSButton(title: "Copy command", target: nil, action: nil)
+    private let helperInstallButton = NSButton(title: "Install…", target: nil, action: nil)
+    private var helperInstalling = false
     private let helperRecheckButton = NSButton(title: "Check again", target: nil, action: nil)
     private var helperStatus: SleepGuard.HelperStatus = .unknown
     private var helperCheckGeneration = 0
@@ -176,7 +177,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     private let autoResumeToggle = NSButton(checkboxWithTitle: "Auto-schedule a resume at the reset time", target: nil, action: nil)
     private let carryOnField = NSTextField(string: "")
     private let holdAssertionToggle = NSButton(checkboxWithTitle: "Keep the Mac awake through the reset wait", target: nil, action: nil)
-    private let wakePmsetToggle = NSButton(checkboxWithTitle: "Schedule a pmset wake before the resume (needs ./install.sh --enable-power-helpers)", target: nil, action: nil)
+    private let wakePmsetToggle = NSButton(checkboxWithTitle: "Schedule a pmset wake before the resume (uses the power helper — Power tab)", target: nil, action: nil)
 
     private var relayProbeGeneration = 0
 
@@ -335,18 +336,18 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         lidACToggle.action = #selector(controlChanged)
         s.addArrangedSubview(lidACToggle)
         lidBatteryToggle.target = self
-        lidBatteryToggle.action = #selector(controlChanged)
+        lidBatteryToggle.action = #selector(lidBatteryChanged)
         s.addArrangedSubview(lidBatteryToggle)
         s.addArrangedSubview(hint("On battery macOS always sleeps when the lid closes, so this uses “pmset disablesleep” — only while an agent is actually mid-turn (not while waiting on a rate-limit reset, a page or a prompt) and the Mac isn’t running hot. It turns on only above your low-battery level + 5%, and stays on down to that level so agents can pause and write their summary with the lid closed; then the Mac sleeps. Risk: a closed MacBook in a bag stays awake and warm. Page turns it off the moment any of that changes, when it quits, and a watchdog turns it off within a minute if Page crashes (a few minutes if it hangs)."))
         helperStatusLabel.font = .systemFont(ofSize: 11)
         helperStatusLabel.preferredMaxLayoutWidth = 360
-        helperCopyButton.target = self
-        helperCopyButton.action = #selector(copyHelperCommand)
-        helperCopyButton.bezelStyle = .rounded
+        helperInstallButton.target = self
+        helperInstallButton.action = #selector(installHelper)
+        helperInstallButton.bezelStyle = .rounded
         helperRecheckButton.target = self
         helperRecheckButton.action = #selector(recheckHelper)
         helperRecheckButton.bezelStyle = .rounded
-        let helperRow = NSStackView(views: [helperStatusLabel, helperCopyButton, helperRecheckButton])
+        let helperRow = NSStackView(views: [helperStatusLabel, helperInstallButton, helperRecheckButton])
         helperRow.orientation = .horizontal
         helperRow.spacing = 8
         s.addArrangedSubview(helperRow)
@@ -605,23 +606,30 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     /// Shows whether the sudo rule for lid-closed-on-battery is installed,
-    /// and the exact command if not.
+    /// with an Install button (admin prompt) if not.
     private func refreshHelperLabel() {
         let wanted = lidBatteryToggle.state == .on
+        helperInstallButton.isEnabled = !helperInstalling
+        if helperInstalling {
+            helperStatusLabel.stringValue = "Waiting for your password…"
+            helperStatusLabel.textColor = .secondaryLabelColor
+            helperInstallButton.isHidden = true
+            return
+        }
         switch helperStatus {
         case .available:
             helperStatusLabel.stringValue = "✓ Power helper installed."
             helperStatusLabel.textColor = .systemGreen
-            helperCopyButton.isHidden = true
+            helperInstallButton.isHidden = true
         case .missing:
             helperStatusLabel.stringValue = "Power helper not installed\(wanted ? " — this option does nothing until it is" : "")."
-                + " In the Page folder run:  \(SleepGuard.installCommand)"
+                + " Click Install and enter your Mac password once."
             helperStatusLabel.textColor = wanted ? .systemRed : .secondaryLabelColor
-            helperCopyButton.isHidden = false
+            helperInstallButton.isHidden = false
         case .unknown:
             helperStatusLabel.stringValue = "Checking the power helper…"
             helperStatusLabel.textColor = .secondaryLabelColor
-            helperCopyButton.isHidden = true
+            helperInstallButton.isHidden = true
         }
     }
 
@@ -643,10 +651,37 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
 
     @objc private func recheckHelper() { checkHelper(refresh: true) }
 
-    @objc private func copyHelperCommand() {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(SleepGuard.installCommand, forType: .string)
+    /// Ticking lid-closed-on-battery without the helper goes straight to
+    /// the admin prompt; cancelling it unticks the box again.
+    @objc private func lidBatteryChanged() {
+        refreshLabels()
+        guard lidBatteryToggle.state == .on, helperStatus == .missing else { return }
+        runHelperInstall(untickOnCancel: true)
+    }
+
+    @objc private func installHelper() { runHelperInstall(untickOnCancel: false) }
+
+    private func runHelperInstall(untickOnCancel: Bool) {
+        guard !helperInstalling else { return }
+        helperInstalling = true
+        helperCheckGeneration += 1   // drop any check still in flight
+        refreshHelperLabel()
+        coordinator.installPowerHelper { [weak self] outcome, status in
+            guard let self else { return }
+            self.helperInstalling = false
+            self.helperStatus = status
+            switch outcome {
+            case .installed:
+                break
+            case .cancelled:
+                if untickOnCancel { self.lidBatteryToggle.state = .off }
+            case .failed(let why):
+                if untickOnCancel { self.lidBatteryToggle.state = .off }
+                self.showAlert("Couldn’t install the power helper", why)
+            }
+            self.refreshLabels()
+            self.refreshHelperLabel()
+        }
     }
 
     @objc private func cutoffChanged() {
