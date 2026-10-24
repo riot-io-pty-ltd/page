@@ -100,7 +100,8 @@ export interface InboundEnvelope {
     | "reply.injected"
     | "device.register"
     | "sync"
-    | "relay.retire";       // Mac: this token was replaced, shut it down
+    | "relay.retire"        // Mac: this token was replaced, shut it down
+    | "sessions.update";    // Mac → phones: opaque sessions-v1 envelope (Mac socket only)
   payload: unknown;
 }
 
@@ -113,7 +114,10 @@ export interface OutboundEnvelope {
     | "heartbeat"           // → phones
     | "reply.result"        // → phones
     | "mac.status"          // → phones
-    | "relay.retired";      // → phones: re-pair needed
+    | "relay.retired"       // → phones: re-pair needed
+    | "sessions.update"     // → phones: the Mac's sessions-v1 envelope, never decrypted
+    | "sessions.command"    // → Mac: phone's opaque sessions-v1 envelope (POST /sessions/command)
+    | "phones.status";      // → Mac: number of open phone sockets
   payload: unknown;
 }
 

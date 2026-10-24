@@ -28,6 +28,7 @@ working against newer peers (see [Compatibility rules](#15-compatibility-rules))
 13. [Close reasons](#13-close-reasons)
 14. [Limits and timers](#14-limits-and-timers)
 15. [Compatibility rules](#15-compatibility-rules)
+16. [Live sessions](#16-live-sessions)
 
 ## 1. Parties and transport
 
@@ -625,6 +626,10 @@ generic label for anything new.
 | phone "Mac online" threshold | heartbeat within 90 s | iOS |
 | hook default wait / installed agent timeout | 540 s / 570 s (wait ends ≥ 30 s before the timeout) | hook |
 | headless resume timeout | 15 min | Mac |
+| `sessions.update` payload (serialised) | 256 KiB | Worker |
+| `POST /sessions/command` body | 64 KiB (`413 too_large`) | Worker |
+| `sessions.command` rate | 120 per minute per relay (in-memory token bucket, `429 rate_limited`) | Worker |
+| sessions envelope nonce `n` | ≤ 64 chars | Worker |
 
 ## 15. Compatibility rules
 
@@ -652,3 +657,29 @@ generic label for anything new.
 - **Timestamps.** Write whole seconds; read with or without fractions.
 - **Wrangler migrations are append-only.** Never rename the `UserRelay` class
   or edit the `v1` migration tag.
+
+## 16. Live sessions
+
+The **Active sessions** view (`sessions-v1`) is specified in
+[SESSIONS-PROTOCOL.md](SESSIONS-PROTOCOL.md), including its crypto envelope,
+plaintext kinds and the Mac's input gate. It changes nothing above. The
+Worker only relays opaque envelopes `{"v":1,"n":"<b64url>","c":"<b64url>"}`:
+it never decrypts them, never stores them (zero storage writes, no APNs) and
+logs only their size.
+
+| Direction | Frame / route | Worker behaviour |
+|---|---|---|
+| Mac → Worker (WS) | `sessions.update` `{e}` | Mac sockets only. Unlike older Mac frames it never tags an untagged socket as the Mac: from an untagged socket it's refused and dropped. Over `POST /intervention` it gets `403 mac_socket_only`. Checks `e.v == 1` and that `n`/`c` are base64url strings, rebuilds `{v, n, c}`, broadcasts to phone sockets only. Doesn't flush the reply queue or set `macEverSeen` |
+| Worker → phone (WS) | `sessions.update` `{e}` | As above. Never sent to Macs |
+| Phone → Worker | `POST /sessions/command` `{e}` | `202 {ok:true}`: forwarded as `sessions.command` `{e}` to every Mac socket. `503 mac_offline` with no Mac socket (never queued), `400 invalid_envelope` (bad shape) / `invalid_json`, `413 too_large`, `429 rate_limited`, `410 token_retired` |
+| Worker → Mac (WS) | `sessions.command` `{e}` | Never sent to phones |
+| Worker → Mac (WS) | `phones.status` `{phones}` | When a Mac socket connects (or a legacy socket is tagged as the Mac), and when a phone socket opens, closes or errors. `phones` counts open, non-Mac sockets from `state.getWebSockets()`, so it's right after hibernation |
+| `GET /status` | `features: ["sessions-v1"]` | Lets the phone tell "relay too old" from "no sessions" |
+
+Check order for `POST /sessions/command`: size (413), JSON and shape (400),
+Mac online (503), rate (429). Oversized, malformed and Mac-offline commands
+don't use up the rate budget. The bucket lives in
+memory, so it starts full again after the object hibernates.
+Phone-originated types (`sessions.command`, `phones.status`) are not Mac
+frame types: a phone sending them over its socket is ignored (logged and
+dropped) and never tagged as the Mac.

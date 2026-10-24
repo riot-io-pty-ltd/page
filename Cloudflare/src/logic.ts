@@ -549,6 +549,87 @@ export function selectStaleForSync(pending: PendingRecord[], sync: ParsedSync, n
   return stale;
 }
 
+// MARK: live sessions (sessions-v1)
+
+/// Live sessions (docs/SESSIONS-PROTOCOL.md). The Worker never decrypts
+/// these frames and never stores them: it checks the envelope's shape and
+/// size, forwards it and forgets it. Advertised in GET /status `features`.
+export const SESSIONS_FEATURE = "sessions-v1";
+/// Largest serialised `sessions.update` payload a Mac may send.
+export const MAX_SESSIONS_UPDATE_BYTES = 256 * 1024;
+/// Largest POST /sessions/command body.
+export const MAX_SESSIONS_COMMAND_BYTES = 64 * 1024;
+/// Commands forwarded per minute per relay (an in-memory token bucket).
+export const SESSIONS_COMMAND_RATE = 120;
+export const SESSIONS_COMMAND_WINDOW_MS = 60 * 1000;
+/// AES-GCM nonces are 12 bytes (16 base64url chars); generous headroom.
+const MAX_SESSIONS_NONCE_LENGTH = 64;
+/// base64url, unpadded or padded (readers accept both).
+const B64URL_RE = /^[A-Za-z0-9_-]+={0,2}$/;
+
+/// The only part of a sessions-v1 frame the Worker sees: AES-GCM nonce and
+/// ciphertext‖tag, both base64url.
+export interface SessionsEnvelope {
+  v: 1;
+  n: string;
+  c: string;
+}
+
+/// Shape check for `e`. Rebuilt field by field, so nothing but `{v, n, c}`
+/// is ever relayed.
+export function parseSessionsEnvelope(raw: unknown): SessionsEnvelope | null {
+  if (!isObject(raw) || raw.v !== 1) return null;
+  const { n, c } = raw;
+  if (typeof n !== "string" || typeof c !== "string") return null;
+  if (n.length > MAX_SESSIONS_NONCE_LENGTH || !B64URL_RE.test(n) || !B64URL_RE.test(c)) return null;
+  return { v: 1, n, c };
+}
+
+export type ParsedSessionsUpdate =
+  | { ok: true; e: SessionsEnvelope; bytes: number }
+  | { ok: false; error: "too_large" | "invalid_envelope" };
+
+/// `sessions.update` payload `{e}` from the Mac. `bytes` is the serialised
+/// payload size: the only thing about the frame that may be logged.
+export function parseSessionsUpdate(raw: unknown): ParsedSessionsUpdate {
+  if (!isObject(raw)) return { ok: false, error: "invalid_envelope" };
+  const bytes = utf8Length(JSON.stringify(raw));
+  if (bytes > MAX_SESSIONS_UPDATE_BYTES) return { ok: false, error: "too_large" };
+  const e = parseSessionsEnvelope(raw.e);
+  return e ? { ok: true, e, bytes } : { ok: false, error: "invalid_envelope" };
+}
+
+/// POST /sessions/command body `{e}` (its size is checked while reading it).
+export function parseSessionsCommand(body: unknown): SessionsEnvelope | null {
+  return isObject(body) ? parseSessionsEnvelope(body.e) : null;
+}
+
+export interface TokenBucket {
+  tokens: number;
+  at: number;                      // ms epoch of the last refill
+}
+
+/// Takes one token from `bucket` (full when undefined), refilling at
+/// `capacity` per `windowMs`. Returns whether the call is allowed and the
+/// bucket to keep. A clock that steps backwards refills nothing.
+export function takeToken(
+  bucket: TokenBucket | undefined, now: number,
+  capacity: number = SESSIONS_COMMAND_RATE, windowMs: number = SESSIONS_COMMAND_WINDOW_MS
+): { allowed: boolean; bucket: TokenBucket } {
+  const prev = bucket ?? { tokens: capacity, at: now };
+  const refill = Math.max(0, now - prev.at) * capacity / windowMs;
+  const tokens = Math.min(capacity, prev.tokens + refill);
+  // Never move `at` back: a clock step back would otherwise refill the
+  // whole skew on the next call.
+  const at = Math.max(prev.at, now);
+  if (tokens < 1) return { allowed: false, bucket: { tokens, at } };
+  return { allowed: true, bucket: { tokens: tokens - 1, at } };
+}
+
+export function utf8Length(s: string): number {
+  return new TextEncoder().encode(s).length;
+}
+
 // MARK: devices
 
 export type ParsedDevice =

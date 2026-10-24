@@ -38,11 +38,12 @@ All routes except `/health` need `Authorization: Bearer <relayToken>`. Every res
 | `GET /ws` | Mac, phone | WebSocket upgrade (hibernation API). On a retired token the upgrade gets `410`; WebSocket clients (e.g. `URLSessionWebSocketTask`) usually see only the status, not the body, so treat HTTP 410 on `/ws` as `token_retired` without parsing JSON |
 | `GET /interventions` | phone, hook | Pending interventions, newest first |
 | `GET /history?limit=N&all=1` | phone, hook | Closed interventions, newest first. `limit` 1–300 (default 100). Bookkeeping closes (`superseded`, `evicted`) are hidden unless `all=1` |
-| `GET /status` | phone | Mac presence: `{macConnected, macEverSeen, lastHeartbeatAt?, activeSessions?, battery?, onAC?, pendingCount, queuedReplies, devices, apnsConfigured, lastPushError?}`. `macEverSeen` is `false` until any Mac-side traffic (a Mac socket frame, or a Mac/hook `POST /intervention`) has reached this relay token; it is persisted. `false` means no Mac has ever used this pairing code (a stale QR screenshot, a typo), as opposed to "the Mac is offline" |
+| `GET /status` | phone | Mac presence: `{macConnected, macEverSeen, lastHeartbeatAt?, activeSessions?, battery?, onAC?, pendingCount, queuedReplies, devices, apnsConfigured, lastPushError?, features}`. `features` is `["sessions-v1"]` (see [Live sessions](#live-sessions)). `macEverSeen` is `false` until any Mac-side traffic (a Mac socket frame, or a Mac/hook `POST /intervention`) has reached this relay token; it is persisted. `false` means no Mac has ever used this pairing code (a stale QR screenshot, a typo), as opposed to "the Mac is offline" |
 | `POST /reply/:id` | phone | `{text, action}` — see [Replies](#replies) |
 | `POST /device/register` | phone | `{apnsToken, appVersion, apnsEnv?}` — `apnsEnv` is `"development"` or `"production"`; missing → `APNS_ENV` (and learned from Apple's answer) |
 | `POST /device/unregister` | phone | `{apnsToken}` → `{ok, removed}` |
 | `POST /intervention` | hook | A Mac-style frame (`{type, payload}`) over HTTPS; `400` on a malformed frame |
+| `POST /sessions/command` | phone | `{e: envelope}` → `202 {ok: true}`; see [Live sessions](#live-sessions) |
 
 ## Wire protocol
 
@@ -118,6 +119,14 @@ Text `"ping"` is answered with `"pong"` without waking the Durable Object. Phone
 | `too_late` | hook | A reply arrived too close to the agent's hook timeout to apply safely |
 | `not_a_decision`, `hook_fallback`, `hook_exited` | hook | The reply wasn't a decision / the hook gave up for another reason / the hook was killed |
 | others (`resolved`, `user_resolved_in_terminal`, …) | Mac | The Mac's own reasons |
+
+## Live sessions
+
+The phone's **Active sessions** view (`sessions-v1`, spec: [`docs/SESSIONS-PROTOCOL.md`](../docs/SESSIONS-PROTOCOL.md)). Session content is end-to-end encrypted between the Mac and the phone; the Worker only relays envelopes `{"v": 1, "n": "<b64url nonce>", "c": "<b64url ciphertext>"}`. It never decrypts them, never writes them (or anything else) to storage, never pushes them over APNs and logs only their size.
+
+- **`sessions.update` (Mac → phones).** `{"type": "sessions.update", "payload": {"e": envelope}}` from a Mac socket (it's a Mac frame type, so it tags an untagged socket like the others; over `POST /intervention` it gets `403 mac_socket_only`). Shape-checked (`v == 1`, `n`/`c` base64url, payload ≤ 256 KiB), rebuilt as `{v, n, c}` and broadcast to phone sockets only. It doesn't flush the reply queue or set `macEverSeen`.
+- **`POST /sessions/command` (phone → Mac).** Body `{"e": envelope}` (≤ 64 KiB). Forwarded as `{"type": "sessions.command", "payload": {"e": envelope}}` to every Mac socket, never to phones. `202 {ok: true}`; `503 mac_offline` with no Mac socket (never queued); `400 invalid_envelope` / `invalid_json`; `413 too_large`; `429 rate_limited` above 120 commands a minute (in-memory token bucket per relay, reset by hibernation).
+- **`phones.status` (Worker → Mac).** `{"type": "phones.status", "payload": {"phones": N}}` when a Mac socket connects and when a phone socket opens, closes or errors. `N` counts open non-Mac sockets from `state.getWebSockets()`, so it's right after hibernation. The Mac sends sessions only while `N > 0`.
 
 ## Token retirement
 

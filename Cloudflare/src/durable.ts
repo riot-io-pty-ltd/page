@@ -10,7 +10,8 @@ import {
   normalizeIntervention, parseDeviceRegistration, parseHeartbeat, parseReplyBody,
   parseReplyInjected, parseSync, prefixes, queueEntryExpired, selectStaleForSync,
   TOMBSTONE_TTL_MS, CLOSED_REPLY_WINDOW_MS, QUEUE_TTL_MS, HOOK_EXPIRY_MARGIN_MS, HOOK_MAX_HOLD_MS,
-  isoSeconds
+  isoSeconds, type TokenBucket, MAX_SESSIONS_COMMAND_BYTES, SESSIONS_FEATURE, parseSessionsCommand,
+  parseSessionsUpdate, takeToken, utf8Length
 } from "./logic.ts";
 
 /// Storage layout (one Durable Object per relay token). Every record has its
@@ -123,9 +124,18 @@ const WS_OPEN = 1;                  // WebSocket.READY_STATE_OPEN
 const HIDDEN_HISTORY_REASONS = new Set(["superseded", "evicted"]);
 
 /// Frames only a Mac sends; an untagged socket sending one is a Mac.
+/// Phone-originated types (sessions.command) must never join this set, or a
+/// phone could get itself tagged as the Mac by sending one.
 const MAC_FRAME_TYPES = new Set([
-  "intervention.opened", "intervention.closed", "heartbeat", "reply.injected", "sync", "relay.retire"
+  "intervention.opened", "intervention.closed", "heartbeat", "reply.injected", "sync", "relay.retire",
+  "sessions.update"
 ]);
+
+/// Mac frames that are forwarded and forgotten (sessions-v1): accepted only
+/// from a Mac socket, and they never touch storage — no macEverSeen write, no
+/// reply-queue flush. A sessions-v1 Mac sends `sync` / a heartbeat on connect,
+/// which do both.
+const EPHEMERAL_FRAME_TYPES = new Set(["sessions.update"]);
 
 /// What a retired token answers to everything (see Meta.retired).
 export const TOKEN_RETIRED_WHY = "This pairing was replaced on your Mac — scan the new QR code";
@@ -153,6 +163,9 @@ export class UserRelay {
   private macEverSeen = false;
   /// meta.retired, loaded at startup and set by retire().
   private retired = false;
+  /// POST /sessions/command rate limit. In memory only (a wake starts full):
+  /// commands must never cost a storage write.
+  private commandBucket?: TokenBucket;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -311,11 +324,17 @@ export class UserRelay {
         return jsonResponse(out.body, out.status);
       }
 
+      if (req.method === "POST" && path === "/sessions/command") {
+        return await this.handleSessionsCommand(req);
+      }
+
       if (req.method === "POST" && path === "/intervention") {
         const body = await readJson(req);
         if ("error" in body) return errorResponse(body.error, body.status);
         const env = body.value;
         if (!isObject(env) || typeof env.type !== "string") return errorResponse("bad_request", 400);
+        // Socket-only frames: refused before anything is written.
+        if (EPHEMERAL_FRAME_TYPES.has(env.type)) return errorResponse("mac_socket_only", 403);
         // Mac-side frames over HTTP come from the Mac's hook script (or an
         // older Mac): proof the Mac has used this pairing.
         if (MAC_FRAME_TYPES.has(env.type)) await this.noteMacSeen();
@@ -352,14 +371,22 @@ export class UserRelay {
   attachSocket(ws: WebSocket, isMac: boolean): void {
     this.state.acceptWebSocket(ws);
     if (isMac) this.markMac(ws);
+    // Counted explicitly: a socket accepted mid-upgrade needn't read as open yet.
+    else this.sendPhonesStatus(ws, 1);
   }
 
+  /// Also the legacy path (an untagged socket that sent a Mac frame): it was
+  /// counted as a phone until now, so the Macs hear the new count either way.
   private markMac(ws: WebSocket): void {
     ws.serializeAttachment({ role: "mac" } satisfies WSAttachment);
     this.broadcastToPhones({
       type: "mac.status",
       payload: { macConnected: true, lastHeartbeatAt: this.presence?.lastHeartbeatAt }
     });
+    // The new Mac gets the count directly (it may not read as open yet).
+    const status = JSON.stringify({ type: "phones.status", payload: { phones: this.phoneCount(ws) } } satisfies OutboundEnvelope);
+    this.sendToMac(status, ws);
+    try { ws.send(status); } catch (err) { console.warn("phones.status to the new Mac failed:", err); }
   }
 
   // MARK: hibernation-API WS handlers (Cloudflare-invoked)
@@ -385,15 +412,19 @@ export class UserRelay {
 
     const attachment = (ws.deserializeAttachment() ?? {}) as WSAttachment;
     let isMac = attachment.role === "mac";
-    if (!isMac && MAC_FRAME_TYPES.has(env.type)) {
+    if (!isMac && MAC_FRAME_TYPES.has(env.type) && !EPHEMERAL_FRAME_TYPES.has(env.type)) {
       // Legacy path: a Mac that connected without the page-mac User-Agent.
+      // Not for sessions.update: every Mac that sends it also sends the
+      // page-mac User-Agent, so a socket sending it untagged is a phone (or
+      // a token holder) and must not get the Mac role or its commands.
       this.markMac(ws);
       isMac = true;
     }
 
-    if (isMac) await this.noteMacSeen();
+    const ephemeral = EPHEMERAL_FRAME_TYPES.has(env.type);
+    if (isMac && !ephemeral) await this.noteMacSeen();
     try {
-      const out = await this.handleInbound(env as unknown as InboundEnvelope);
+      const out = await this.handleInbound(env as unknown as InboundEnvelope, { role: isMac ? "mac" : "phone" });
       if (out.status >= 400) console.warn(`WS ${env.type} rejected: ${String(out.body.error)}`);
     } catch (err) {
       console.error(`WS ${env.type} failed:`, err);
@@ -401,7 +432,7 @@ export class UserRelay {
     // After the frame, so a `sync` has already closed pages the Mac no
     // longer has before we decide which queued replies are still deliverable.
     // Never after a relay.retire: nothing goes out on a retired token.
-    if (isMac && !this.retired) await this.flushReplyQueue();
+    if (isMac && !ephemeral && !this.retired) await this.flushReplyQueue();
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string, _wasClean: boolean): Promise<void> {
@@ -416,11 +447,16 @@ export class UserRelay {
     await this.onSocketGone(ws);
   }
 
+  /// `ws` is excluded explicitly: after webSocketError (or before the
+  /// runtime has finished closing it) it can still read as open.
   private async onSocketGone(ws: WebSocket): Promise<void> {
     await this.ready;
     if (this.retired) return;
-    const role = (ws.deserializeAttachment() as WSAttachment | null)?.role;
-    if (role !== "mac" || this.macConnected(ws)) return;
+    if (this.roleOf(ws) !== "mac") {
+      this.sendPhonesStatus(ws);
+      return;
+    }
+    if (this.macConnected(ws)) return;
     this.broadcastToPhones({
       type: "mac.status",
       payload: { macConnected: false, lastHeartbeatAt: this.presence?.lastHeartbeatAt }
@@ -455,7 +491,11 @@ export class UserRelay {
 
   // MARK: inbound dispatch
 
-  private async handleInbound(env: InboundEnvelope, ctx: { userAgent?: string } = {}): Promise<Outcome> {
+  /// `ctx.role`: the sending socket's role (WebSocket frames only; absent
+  /// for HTTP). `userAgent`: HTTP only.
+  private async handleInbound(
+    env: InboundEnvelope, ctx: { userAgent?: string; role?: WSAttachment["role"] } = {}
+  ): Promise<Outcome> {
     switch (env.type) {
       case "intervention.opened": return this.openIntervention(env.payload, ctx.userAgent);
       case "intervention.closed": return this.closeIntervention(env.payload);
@@ -464,6 +504,8 @@ export class UserRelay {
       case "device.register":     return this.registerDevice(env.payload);
       case "sync":                return this.handleSync(env.payload);
       case "relay.retire":        return this.retire(env.payload);
+      case "sessions.update":
+        return ctx.role === "mac" ? this.forwardSessionsUpdate(env.payload) : fail("mac_socket_only", 403);
       default:
         console.warn("Unknown inbound type", (env as { type: string }).type);
         return fail("unknown_type");
@@ -978,6 +1020,53 @@ export class UserRelay {
     }
   }
 
+  // MARK: live sessions (sessions-v1, see docs/SESSIONS-PROTOCOL.md)
+  //
+  // Forward and forget: no storage reads or writes, no APNs, and nothing
+  // about the envelope is logged except its size.
+
+  /// `sessions.update` from a Mac socket → every phone socket.
+  private forwardSessionsUpdate(raw: unknown): Outcome {
+    const p = parseSessionsUpdate(raw);
+    if (!p.ok) return fail(p.error, p.error === "too_large" ? 413 : 400);
+    const phones = this.phoneCount();
+    if (phones) this.broadcastToPhones({ type: "sessions.update", payload: { e: p.e } });
+    console.log(`sessions.update ${p.bytes}B → ${phones} phone(s)`);
+    return ok();
+  }
+
+  /// POST /sessions/command: the phone's envelope → every Mac socket. Never
+  /// queued: with no Mac online the phone hears 503 and can retry.
+  private async handleSessionsCommand(req: Request): Promise<Response> {
+    const body = await readJson(req, MAX_SESSIONS_COMMAND_BYTES, "too_large");
+    if ("error" in body) return errorResponse(body.error, body.status);
+    const e = parseSessionsCommand(body.value);
+    if (!e) return errorResponse("invalid_envelope", 400);
+    // Before the rate limit, so retries while the Mac is away don't drain
+    // the bucket it needs once it's back.
+    if (!this.macConnected()) return errorResponse("mac_offline", 503);
+    const taken = takeToken(this.commandBucket, Date.now());
+    this.commandBucket = taken.bucket;
+    if (!taken.allowed) {
+      console.warn("sessions.command rate limited");
+      return errorResponse("rate_limited", 429);
+    }
+    if (!this.sendToMac({ type: "sessions.command", payload: { e } })) {
+      return errorResponse("mac_offline", 503);
+    }
+    console.log(`sessions.command ${e.n.length + e.c.length}B forwarded`);
+    return jsonResponse({ ok: true }, 202);
+  }
+
+  /// Tells every Mac socket how many phone sockets are open (the Mac sends
+  /// live sessions only while someone is looking). Counted from
+  /// getWebSockets, so it's right after hibernation too.
+  /// `ws` / `adjust`: a socket to leave out of the count, then added back
+  /// as `adjust` (1 for one just opened, 0 for one going away).
+  private sendPhonesStatus(ws?: WebSocket, adjust: 0 | 1 = 0): void {
+    this.sendToMac({ type: "phones.status", payload: { phones: this.phoneCount(ws) + adjust } });
+  }
+
   // MARK: phone registration
 
   private async registerDevice(raw: unknown): Promise<Outcome> {
@@ -1079,7 +1168,8 @@ export class UserRelay {
       pendingCount: pending.size,
       queuedReplies: queue.size,
       devices: devices.size,
-      apnsConfigured: apnsConfigured(this.env)
+      apnsConfigured: apnsConfigured(this.env),
+      features: [SESSIONS_FEATURE]
     };
     if (p.lastHeartbeatAt) out.lastHeartbeatAt = p.lastHeartbeatAt;
     if (typeof p.activeSessions === "number") out.activeSessions = p.activeSessions;
@@ -1303,6 +1393,11 @@ export class UserRelay {
     return this.openSockets().some(ws => this.roleOf(ws) !== "mac");
   }
 
+  /// Open phone sockets: every open socket that isn't tagged as a Mac.
+  private phoneCount(excluding?: WebSocket): number {
+    return this.openSockets().filter(ws => ws !== excluding && this.roleOf(ws) !== "mac").length;
+  }
+
   private broadcastToPhones(env: OutboundEnvelope): void {
     const msg = JSON.stringify(env);
     for (const ws of this.openSockets()) {
@@ -1314,11 +1409,12 @@ export class UserRelay {
   /// Sends to every open Mac socket. v2 Macs hold one shared socket; older
   /// builds opened one per backend and filter replies by id prefix, so they
   /// still need the broadcast. Returns whether any socket accepted it.
-  private sendToMac(env: OutboundEnvelope): boolean {
-    const msg = JSON.stringify(env);
+  /// `env` may come pre-serialised; `skip` leaves one socket out.
+  private sendToMac(env: OutboundEnvelope | string, skip?: WebSocket): boolean {
+    const msg = typeof env === "string" ? env : JSON.stringify(env);
     let delivered = 0;
     for (const ws of this.openSockets()) {
-      if (this.roleOf(ws) !== "mac") continue;
+      if (ws === skip || this.roleOf(ws) !== "mac") continue;
       try { ws.send(msg); delivered++; } catch (err) { console.warn("sendToMac failed:", err); }
     }
     return delivered > 0;
@@ -1398,12 +1494,19 @@ function truncateUtf8(s: string, maxBytes: number): string {
   return out;
 }
 
-async function readJson(req: Request): Promise<{ value: unknown } | { error: string; status: number }> {
+/// `maxBytes` / `tooLarge`: the route's body limit and its 413 error code.
+async function readJson(
+  req: Request, maxBytes: number = MAX_BODY_BYTES, tooLarge: string = "body_too_large"
+): Promise<{ value: unknown } | { error: string; status: number }> {
   const declared = Number(req.headers.get("content-length") ?? "0");
-  if (declared > MAX_BODY_BYTES) return { error: "body_too_large", status: 413 };
+  if (declared > maxBytes) return { error: tooLarge, status: 413 };
   let text: string;
   try { text = await req.text(); } catch { return { error: "bad_request", status: 400 }; }
-  if (text.length > MAX_BODY_BYTES) return { error: "body_too_large", status: 413 };
+  // UTF-16 length is a lower bound on the byte count; count exactly only
+  // when it could matter.
+  if (text.length > maxBytes || (text.length * 3 > maxBytes && utf8Length(text) > maxBytes)) {
+    return { error: tooLarge, status: 413 };
+  }
   if (!text.trim()) return { value: undefined };
   try { return { value: JSON.parse(text) }; } catch { return { error: "invalid_json", status: 400 }; }
 }
