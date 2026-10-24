@@ -31,6 +31,8 @@ enum Theme {
         // MARK: Backend brand tints — pill text, background and stroke.
         static let backendClaude = Color(lightHex: "#9A3412", darkHex: "#E89E64")  // copper
         static let backendCodex  = Color(lightHex: "#047857", darkHex: "#10A37F")  // green
+        /// Any other backend (local models, future agents): neutral slate.
+        static let backendOther  = Color(lightHex: "#475467", darkHex: "#A3ADC2")
 
         /// The signature gradient. Cyan→teal in dark, amber→chartreuse in light.
         static func pulseGradient(_ scheme: ColorScheme) -> LinearGradient {
@@ -96,6 +98,32 @@ extension InterventionBackend {
         switch self {
         case .claude: return Theme.Colour.backendClaude
         case .codex:  return Theme.Colour.backendCodex
+        }
+    }
+}
+
+extension AgentBackend {
+    /// Brand tint for Claude and Codex, neutral for anything else.
+    var tint: Color {
+        switch self {
+        case .known(let b): return b.tint
+        case .other: return Theme.Colour.backendOther
+        }
+    }
+}
+
+extension LiveSessionState {
+    /// State dot and chip colour. Waiting states reuse the matching page
+    /// kind's hue, so a session and its page read as the same thing.
+    var color: Color {
+        switch self {
+        case .waitingOnApproval: return Theme.Colour.kindApproval
+        case .waitingOnUser:     return Theme.Colour.kindUserInput
+        case .active:            return Theme.Colour.success
+        case .rateLimited:       return Theme.Colour.kindRateLimit
+        case .interrupted:       return Theme.Colour.warning
+        case .failed:            return Theme.Colour.destructiveText
+        case .idle, .offline, .unknown: return Theme.Colour.textMuted
         }
     }
 }

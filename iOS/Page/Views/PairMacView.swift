@@ -75,13 +75,17 @@ struct PairMacView: View {
         .onAppear {
             // `-PageDevPairing` launch argument: same as tapping "Skip
             // pairing (DEV)", for simulator screenshots and UI checks.
-            // `-PageDevOpen <id>` then opens that mock page's reply screen.
+            // `-PageDevOpen <id>` then opens that mock page's reply screen,
+            // and `-PageDevSession` a mock session's detail screen.
             let args = ProcessInfo.processInfo.arguments
             if args.contains("-PageDevPairing") {
-                pairing.adoptDev(DevBypass.fakeMac())
-                api.seedDevInbox(DevBypass.fakeInterventions())
+                DevBypass.start(pairing: pairing, api: api)
                 if let i = args.firstIndex(of: "-PageDevOpen"), i + 1 < args.count {
                     AppRouter.shared.open(interventionId: args[i + 1])
+                }
+                // `-PageDevSession <id|active>` opens a mock session's detail.
+                if let i = args.firstIndex(of: "-PageDevSession"), i + 1 < args.count {
+                    AppRouter.shared.openSession(args[i + 1] == "active" ? DevBypass.activeSessionId : args[i + 1])
                 }
             }
         }
@@ -140,8 +144,7 @@ struct PairMacView: View {
 
             #if DEBUG
             Button("Skip pairing (DEV)") {
-                pairing.adoptDev(DevBypass.fakeMac())
-                api.seedDevInbox(DevBypass.fakeInterventions())
+                DevBypass.start(pairing: pairing, api: api)
             }
             .font(Theme.Font.caption12)
             .foregroundStyle(Theme.Colour.textMuted)

@@ -166,7 +166,7 @@ extension Intervention: Decodable {
     }
 }
 
-private extension KeyedDecodingContainer {
+extension KeyedDecodingContainer {
     /// A string if present and actually a string; nil for missing, null or
     /// the wrong type.
     func lenientString(_ key: Key) -> String? {

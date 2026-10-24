@@ -1,8 +1,8 @@
 import Foundation
 import Security
 
-/// Keychain-backed string storage for the relay token, relay URL, paired-Mac
-/// record and APNs device token.
+/// Keychain-backed string storage for the relay token, relay URL, live-sessions
+/// key, paired-Mac record and APNs device token.
 ///
 /// Items use `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: readable by
 /// lock-screen notification actions and background pushes once the phone
@@ -141,5 +141,27 @@ struct RelayCredentials: Equatable {
         comps?.scheme = "wss"
         comps?.percentEncodedPath += "/ws"
         return comps?.url
+    }
+}
+
+/// The live-sessions key (`sk`) from the pairing QR, stored beside the relay
+/// token with the same Keychain protection (never backed up, readable after
+/// first unlock). Absent for pairings made with a Mac that predates live
+/// sessions. Never logged.
+enum SessionKeyStore {
+    static let keychainKey = "page.sessionKey"
+
+    static func current() -> Data? {
+        KeychainStore.get(keychainKey).flatMap(Base64URL.decode).flatMap(SessionCrypto.validRootKey)
+    }
+
+    @discardableResult
+    static func save(_ key: Data) -> Bool {
+        guard SessionCrypto.validRootKey(key) != nil else { return false }
+        return KeychainStore.set(Base64URL.encode(key), for: keychainKey)
+    }
+
+    static func clear() {
+        KeychainStore.delete(keychainKey)
     }
 }

@@ -143,6 +143,8 @@ struct SettingsView: View {
             }
             Divider().opacity(0.4)
             row("Push", value: pushText)
+            Divider().opacity(0.4)
+            LiveSessionsRow { label, value in row(label, value: value) }
         }
         .cardStyle()
     }
@@ -232,5 +234,36 @@ struct SettingsView: View {
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "\(short) (\(build))"
+    }
+}
+
+/// Settings' "Live sessions" row: whether the Sessions tab works, and if not
+/// the step that fixes it. Watches `SessionStore` on its own so session
+/// updates re-render this row, not the whole Settings screen.
+private struct LiveSessionsRow<Row: View>: View {
+    let row: (String, String) -> Row
+    @EnvironmentObject var api: APIClient
+    @EnvironmentObject var sessions: SessionStore
+
+    init(@ViewBuilder row: @escaping (String, String) -> Row) {
+        self.row = row
+    }
+
+    var body: some View {
+        row("Live sessions", text)
+    }
+
+    private var text: String {
+        let availability = sessions.availability(presence: MacPresence.evaluate(api.macStatus, now: Date()),
+                                                 socketConnected: api.connection == .connected, now: Date())
+        switch availability {
+        case .ready:
+            let n = sessions.sessions.count
+            return "\(n) live session\(n == 1 ? "" : "s") · end-to-end encrypted"
+        case .needsRepair:
+            return "Re-pair with your Mac to turn on live sessions"
+        default:
+            return SessionAvailabilityCopy(availability).shortStatus
+        }
     }
 }

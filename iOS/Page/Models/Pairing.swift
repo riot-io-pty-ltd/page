@@ -6,6 +6,10 @@ struct ValidatedPairing: Equatable {
     /// Normalised HTTPS base URL of the relay (no trailing `/ws` or slash).
     let relayBaseURL: URL
     let macName: String
+    /// `sk`: the 32-byte key that end-to-end encrypts live sessions. Nil
+    /// for a Mac that predates them (or a malformed value): the pairing
+    /// still works, the Sessions tab asks for a re-pair.
+    var sessionKey: Data? = nil
 
     var relayHost: String { relayBaseURL.host ?? relayBaseURL.absoluteString }
 }
@@ -40,7 +44,8 @@ enum PairingValidationError: Error, Equatable {
 }
 
 /// Parses and validates the JSON the Mac shows as a QR code or copies to the
-/// clipboard: `{"v":1,"token":"…","relay":"https://…","host":"Roy's MacBook"}`.
+/// clipboard: `{"v":1,"token":"…","relay":"https://…","host":"Roy's MacBook"}`,
+/// plus an optional `"sk"` (base64url, 32 bytes) from Macs with live sessions.
 ///
 /// There is deliberately no allow-list of relay hosts: every deployment is
 /// self-hosted and its URL only arrives through this payload. What we can
@@ -82,7 +87,15 @@ enum PairingValidator {
 
         let host = ((dict["host"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let name = host.isEmpty ? "Your Mac" : String(host.prefix(60))
-        return .success(ValidatedPairing(token: token, relayBaseURL: relay, macName: name))
+        return .success(ValidatedPairing(token: token, relayBaseURL: relay, macName: name,
+                                         sessionKey: sessionKey(dict["sk"])))
+    }
+
+    /// `sk` must decode to exactly 32 bytes; anything else is ignored rather
+    /// than failing the pairing, since the inbox works without it.
+    static func sessionKey(_ raw: Any?) -> Data? {
+        guard let s = raw as? String else { return nil }
+        return SessionCrypto.validRootKey(Base64URL.decode(s))
     }
 
     /// `wss://x/ws` and `https://x` both mean the same relay; REST needs the

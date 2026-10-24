@@ -10,12 +10,14 @@ import UIKit
 /// a prompt that's no longer there.
 struct ReplyView: View {
     let interventionId: String
+    /// "Open session" handler. Nil (from the inbox) hands over to the
+    /// session's detail screen through the router; a reply screen opened
+    /// from that detail screen passes one that just closes itself.
+    var onOpenSession: ((String) -> Void)? = nil
 
     @EnvironmentObject var api: APIClient
+    @EnvironmentObject var router: AppRouter
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) private var buttonHeight: CGFloat = 44
-    @ScaledMetric(relativeTo: .body) private var sendSize: CGFloat = 36
 
     /// Last known copy, so content stays readable after the page closes.
     @State private var snapshot: Intervention?
@@ -280,6 +282,15 @@ struct ReplyView: View {
                     .foregroundStyle(Theme.Colour.textMuted)
                     .textSelection(.enabled)
             }
+            OpenSessionLink(sessionId: iv.sessionId) { openSession(iv.sessionId) }
+        }
+    }
+
+    private func openSession(_ sessionId: String) {
+        if let onOpenSession {
+            onOpenSession(sessionId)
+        } else {
+            router.openSession(sessionId)
         }
     }
 
@@ -330,22 +341,22 @@ struct ReplyView: View {
         case .open, .loading, .missing:
             EmptyView()
         case .sending:
-            strip(icon: nil, text: "Sending…", color: Theme.Colour.textMuted)
+            StatusStrip(icon: nil, text: "Sending…", color: Theme.Colour.textMuted)
         case .sent(let queued, let slow):
             if queued {
-                strip(icon: "clock", text: "Queued — your Mac is offline. It'll be typed in when the Mac reconnects (within an hour).", color: Theme.Colour.warning)
+                StatusStrip(icon: "clock", text: "Queued — your Mac is offline. It'll be typed in when the Mac reconnects (within an hour).", color: Theme.Colour.warning)
             } else if slow {
-                strip(icon: nil, text: legacyRelay
+                StatusStrip(icon: nil, text: legacyRelay
                       ? "Sent — waiting for your Mac to confirm…"
                       : "Sent — waiting for your Mac. It hasn't confirmed this reply yet; if it reports a failure, or hasn't confirmed within 20 minutes, you can answer again.",
                       color: Theme.Colour.textMuted)
             } else {
-                strip(icon: nil, text: "Sent — waiting for your Mac to confirm…", color: Theme.Colour.textMuted)
+                StatusStrip(icon: nil, text: "Sent — waiting for your Mac to confirm…", color: Theme.Colour.textMuted)
             }
         case .checkingClose:
-            strip(icon: nil, text: "This page closed — checking whether your reply landed…", color: Theme.Colour.textMuted)
+            StatusStrip(icon: nil, text: "This page closed — checking whether your reply landed…", color: Theme.Colour.textMuted)
         case .delivered(let detail):
-            strip(icon: "checkmark.circle.fill", text: "Delivered — \(detail ?? "typed into the session on your Mac").", color: Theme.Colour.success)
+            StatusStrip(icon: "checkmark.circle.fill", text: "Delivered — \(detail ?? "typed into the session on your Mac").", color: Theme.Colour.success)
         case .failed(let message):
             HStack(alignment: .top, spacing: Theme.Space.s) {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -364,29 +375,12 @@ struct ReplyView: View {
             }
             .stripStyle()
         case .unconfirmed:
-            strip(icon: "questionmark.circle", text: "Your Mac never confirmed this reply. If the session is still waiting, you can answer again.", color: Theme.Colour.warning)
+            StatusStrip(icon: "questionmark.circle", text: "Your Mac never confirmed this reply. If the session is still waiting, you can answer again.", color: Theme.Colour.warning)
         case .alreadyReplied:
-            strip(icon: "checkmark.circle", text: "Already answered — another reply (maybe from your lock screen) got there first.", color: Theme.Colour.textMuted)
+            StatusStrip(icon: "checkmark.circle", text: "Already answered — another reply (maybe from your lock screen) got there first.", color: Theme.Colour.textMuted)
         case .resolved(let why):
-            strip(icon: "checkmark.circle", text: "Resolved — \(why)", color: Theme.Colour.textMuted)
+            StatusStrip(icon: "checkmark.circle", text: "Resolved — \(why)", color: Theme.Colour.textMuted)
         }
-    }
-
-    private func strip(icon: String?, text: String, color: Color) -> some View {
-        HStack(alignment: .top, spacing: Theme.Space.s) {
-            if let icon {
-                Image(systemName: icon).foregroundStyle(color).accessibilityHidden(true)
-            } else {
-                ProgressView().controlSize(.small)
-            }
-            Text(text)
-                .font(Theme.Font.caption12)
-                .foregroundStyle(Theme.Colour.text)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .stripStyle()
-        .accessibilityElement(children: .combine)
     }
 
     // MARK: Actions
@@ -398,9 +392,9 @@ struct ReplyView: View {
             switch iv.kind {
             case .approval:
                 HStack(spacing: Theme.Space.s) {
-                    quickButton(iv.subtype == "plan" ? "Approve plan" : "Approve",
+                    QuickButton(iv.subtype == "plan" ? "Approve plan" : "Approve",
                                 style: .accent, enabled: enabled) { tapQuick(.approve) }
-                    quickButton(iv.subtype == "plan" ? "Keep planning" : "Deny",
+                    QuickButton(iv.subtype == "plan" ? "Keep planning" : "Deny",
                                 style: .destructive, enabled: enabled) { tapQuick(.deny) }
                 }
                 if iv.acceptsDecisionsOnly {
@@ -410,82 +404,23 @@ struct ReplyView: View {
                         .foregroundStyle(Theme.Colour.textMuted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
-                    replyField(placeholder: "Deny with instructions…", enabled: enabled)
+                    ReplyField(text: $replyText, placeholder: "Deny with instructions…", enabled: enabled) { send(.custom, text: $0) }
                 }
             case .userInput:
-                replyField(placeholder: "Type your answer…", enabled: enabled)
+                ReplyField(text: $replyText, placeholder: "Type your answer…", enabled: enabled) { send(.custom, text: $0) }
             case .idle:
-                quickButton("Carry on", style: .outline, enabled: enabled) { tapQuick(.carryOn) }
-                replyField(placeholder: "Tell it what to do next…", enabled: enabled)
+                QuickButton("Carry on", style: .outline, enabled: enabled) { tapQuick(.carryOn) }
+                ReplyField(text: $replyText, placeholder: "Tell it what to do next…", enabled: enabled) { send(.custom, text: $0) }
             case .rateLimit:
                 Text("Nothing to answer. Page on your Mac resumes the session when the limit resets if auto-resume is on.")
                     .font(Theme.Font.caption12)
                     .foregroundStyle(Theme.Colour.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                quickButton("Close", style: .outline, enabled: true) { dismiss() }
+                QuickButton("Close", style: .outline, enabled: true) { dismiss() }
             }
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.top, Theme.Space.m)
-    }
-
-    private enum QuickStyle { case accent, destructive, outline }
-
-    private func quickButton(_ label: String, style: QuickStyle, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(Theme.Font.button17)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: buttonHeight)
-                .background {
-                    let shape = RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous)
-                    switch style {
-                    case .accent: shape.fill(Theme.Colour.pulseGradient(scheme))
-                    case .destructive: shape.fill(Theme.Colour.destructive)
-                    case .outline: shape.strokeBorder(Theme.Colour.hairline, lineWidth: 1)
-                    }
-                }
-                .foregroundStyle(style == .outline ? Theme.Colour.text : Theme.Colour.onAccent)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.45)
-    }
-
-    private func replyField(placeholder: String, enabled: Bool) -> some View {
-        let hasText = !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return HStack(alignment: .bottom, spacing: Theme.Space.s) {
-            TextField(placeholder, text: $replyText, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.plain)
-                .font(Theme.Font.body15)
-                .padding(.horizontal, Theme.Space.l)
-                .padding(.vertical, Theme.Space.m)
-                .disabled(!enabled)
-            Button { send(.custom, text: replyText.trimmingCharacters(in: .whitespacesAndNewlines)) } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(.body, design: .default, weight: .bold))
-                    .foregroundStyle(Theme.Colour.onAccent)
-                    .frame(width: sendSize, height: sendSize)
-                    .background(
-                        hasText && enabled
-                            ? AnyShapeStyle(Theme.Colour.pulseGradient(scheme))
-                            : AnyShapeStyle(Theme.Colour.textMuted.opacity(0.5))
-                    )
-                    .clipShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 6)
-            .padding(.bottom, 6)
-            .disabled(!enabled || !hasText)
-            .accessibilityLabel("Send reply")
-        }
-        .background(Theme.Colour.surfaceRaised)
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.input).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.input))
     }
 
     private func footer(_ iv: Intervention) -> some View {
@@ -561,15 +496,24 @@ struct ReplyView: View {
     }
 }
 
-private extension View {
-    func stripStyle() -> some View {
-        self
-            .padding(Theme.Space.m)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.Colour.surfaceRaised)
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .padding(.horizontal, Theme.Space.xl)
-            .padding(.top, Theme.Space.s)
+/// "Open session", shown while the page's session is live on the Mac. The
+/// only part of the reply screen that watches `SessionStore`, so session
+/// updates (every second while the Mac is busy) re-render this link, not the
+/// whole screen.
+private struct OpenSessionLink: View {
+    let sessionId: String
+    let action: () -> Void
+    @EnvironmentObject var sessions: SessionStore
+
+    var body: some View {
+        if sessions.session(sessionId) != nil {
+            Button(action: action) {
+                Label("Open session", systemImage: "terminal")
+                    .font(Theme.Font.bodyEm)
+                    .foregroundStyle(Theme.Colour.text)
+                    .frame(minHeight: 32)
+            }
+            .accessibilityHint("Shows this session's live transcript")
+        }
     }
 }

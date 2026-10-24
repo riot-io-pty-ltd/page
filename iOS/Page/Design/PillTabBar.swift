@@ -1,13 +1,15 @@
 import SwiftUI
 
+/// Four tabs: Stats lives inside History as a segment, which keeps the bar
+/// at four and the Dynamic Type cap below workable.
 enum AppTab: Hashable, CaseIterable {
-    case inbox, history, stats, settings
+    case inbox, sessions, history, settings
 
     var label: String {
         switch self {
         case .inbox: return "INBOX"
+        case .sessions: return "SESSIONS"
         case .history: return "HISTORY"
-        case .stats: return "STATS"
         case .settings: return "SETTINGS"
         }
     }
@@ -15,8 +17,8 @@ enum AppTab: Hashable, CaseIterable {
     var accessibilityName: String {
         switch self {
         case .inbox: return "Inbox"
+        case .sessions: return "Sessions"
         case .history: return "History"
-        case .stats: return "Stats"
         case .settings: return "Settings"
         }
     }
@@ -24,8 +26,8 @@ enum AppTab: Hashable, CaseIterable {
     var systemImage: String {
         switch self {
         case .inbox: return "tray.fill"
+        case .sessions: return "terminal.fill"
         case .history: return "clock.arrow.circlepath"
-        case .stats: return "chart.bar.fill"
         case .settings: return "gearshape.fill"
         }
     }
@@ -34,6 +36,8 @@ enum AppTab: Hashable, CaseIterable {
 struct PillTabBar: View {
     @Binding var selection: AppTab
     var inboxCount: Int = 0
+    /// Live sessions waiting on the user, read out on the Sessions tab.
+    var sessionsNeedingYou: Int = 0
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
@@ -66,7 +70,7 @@ struct PillTabBar: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(tab.accessibilityName)
-                .accessibilityValue(tab == .inbox && inboxCount > 0 ? "\(inboxCount) waiting" : "")
+                .accessibilityValue(accessibilityValue(tab))
                 .accessibilityAddTraits(selection == tab ? .isSelected : [])
             }
         }
@@ -86,5 +90,13 @@ struct PillTabBar: View {
         )
         .padding(.horizontal, 21)
         .padding(.bottom, 21)
+    }
+
+    private func accessibilityValue(_ tab: AppTab) -> String {
+        switch tab {
+        case .inbox where inboxCount > 0: return "\(inboxCount) waiting"
+        case .sessions where sessionsNeedingYou > 0: return "\(sessionsNeedingYou) need\(sessionsNeedingYou == 1 ? "s" : "") you"
+        default: return ""
+        }
     }
 }

@@ -3,9 +3,10 @@ import Combine
 
 /// Client for the Cloudflare Worker relay:
 /// - REST: GET /interventions, /history, /status; POST /reply/:id,
-///   /device/register, /device/unregister
+///   /device/register, /device/unregister, /sessions/command
 /// - WebSocket /ws: live `intervention.opened` / `intervention.closed`,
-///   `heartbeat`, `mac.status`, `reply.result` and `relay.retired` frames
+///   `heartbeat`, `mac.status`, `reply.result` and `relay.retired` frames,
+///   plus encrypted `sessions.update` frames, which go to `SessionStore`
 ///
 /// Credentials are read from the Keychain on every call (`RelayCredentials`),
 /// so this works the same from a lock-screen action on a cold background
@@ -187,6 +188,11 @@ final class APIClient: NSObject, ObservableObject {
         inboxEvents = []
         statusEndpointAvailable = nil
         reconnectAttempt = 0
+        // The live-sessions key belongs to the pairing being reset. Adopting
+        // a new pairing calls this before it writes its own key, so a pairing
+        // without `sk` can't inherit the previous Mac's.
+        SessionKeyStore.clear()
+        SessionStore.shared.reset()
     }
 
     /// Foreground + paired: open the socket and pull fresh state.
@@ -325,15 +331,22 @@ final class APIClient: NSObject, ObservableObject {
             case 200..<300:
                 statusEndpointAvailable = true
                 if let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    // `features` tells "relay too old" apart from "no sessions".
+                    SessionStore.shared.relayFeaturesUpdated((json["features"] as? [Any])?.compactMap { $0 as? String } ?? [])
+                    let wasConnected = macStatus?.macConnected == true
                     var snap = MacStatusSnapshot.from(json: json)
                     // Keep a newer heartbeat we got over the socket.
                     if let mine = macStatus?.lastHeartbeatAt, mine > (snap.lastHeartbeatAt ?? .distantPast) {
                         snap.lastHeartbeatAt = mine
                     }
                     macStatus = snap
+                    if snap.macConnected == true, !wasConnected { SessionStore.shared.macCameOnline() }
                 }
             case 404:
                 statusEndpointAvailable = false
+                // Predates /status, so it predates live sessions too. Set
+                // here: later refreshes return early once this is known.
+                SessionStore.shared.relayFeaturesUpdated([])
             case 401, 403:
                 authRejected = true
             default:
@@ -412,6 +425,33 @@ final class APIClient: NSObject, ObservableObject {
             markRetired(why)
         case .failed(let message):
             setDelivery(interventionId, .failed(message))
+        }
+        return outcome
+    }
+
+    /// POST /sessions/command with an already-encrypted `{"e": …}` body.
+    /// The relay only forwards it; what the Mac did arrives later as a
+    /// `result` inside `sessions.update`. 401/403 and 410 `token_retired`
+    /// are handled like every other call.
+    func postSessionCommand(body: Data) async -> SessionCommandOutcome {
+        guard let creds = credentials(), let url = creds.url("sessions", "command") else {
+            return .failed("Page isn't paired with a Mac.")
+        }
+        var req = request(url, method: "POST", token: creds.token)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = body
+        let outcome: SessionCommandOutcome
+        do {
+            let (data, status) = try await perform(req)
+            outcome = SessionCommandOutcome.from(status: status, body: data)
+        } catch {
+            outcome = .failed("Couldn't reach your relay: \(Self.describe(error))")
+        }
+        guard creds == credentials() else { return outcome }  // unpaired / re-paired meanwhile
+        switch outcome {
+        case .unauthorized: authRejected = true
+        case .retired(let why): markRetired(why)
+        default: break
         }
         return outcome
     }
@@ -707,6 +747,7 @@ final class APIClient: NSObject, ObservableObject {
         reconnectAttempt = 0
         lastInboundAt = Date()
         startPinging(task)
+        SessionStore.shared.socketOpened()
         // Anything broadcast while we were disconnected is gone; resync.
         Task {
             await refreshInbox()
@@ -788,12 +829,18 @@ final class APIClient: NSObject, ObservableObject {
 
         case "mac.status":
             var snap = macStatus ?? MacStatusSnapshot()
+            let wasConnected = snap.macConnected == true
             if let connected = payload["macConnected"] as? Bool {
                 snap.macConnected = connected
                 if connected { snap.macEverSeen = true }
             }
             if let hb = PageDate.parse(any: payload["lastHeartbeatAt"]) { snap.lastHeartbeatAt = hb }
             macStatus = snap
+            if snap.macConnected == true, !wasConnected { SessionStore.shared.macCameOnline() }
+
+        case "sessions.update":
+            // Opaque to the relay; SessionStore decrypts and applies it.
+            SessionStore.shared.handleUpdate(payload: payload)
 
         case "reply.result":
             guard let id = payload["interventionId"] as? String else { return }

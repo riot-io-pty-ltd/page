@@ -85,7 +85,7 @@ There are no accounts. The phone and the Mac share one relay token.
 
 Unpairing (Settings → Unpair) closes the live connection and asks the relay
 to forget this phone's push token (`POST /device/unregister`). It also clears
-the inbox, history and delivered notifications.
+the inbox, history, delivered notifications and the live-sessions key.
 
 ## How it works
 
@@ -167,6 +167,46 @@ the inbox, history and delivered notifications.
   the screen shows the relay's `why` text.
 - **Deep links.** `page://intervention/<id>` opens that page's reply screen.
 
+## Sessions tab
+
+The Sessions tab lists every live agent session on your Mac (Claude Code,
+Codex, and other terminal agents), grouped **Needs you**, **Working** and
+**Idle**. Tap a session to see its recent transcript and type into it at any
+time, not only when it pages you. The wire contract is
+`docs/SESSIONS-PROTOCOL.md`.
+
+- **End-to-end encrypted.** The pairing QR carries a 32-byte session key
+  (`sk`). It is stored in the Keychain beside the relay token and deleted on
+  unpair or when the pairing is retired. Lists, transcripts and your typed
+  text are sealed with AES-GCM under per-direction keys derived from it, so
+  the relay only forwards opaque envelopes. Nothing is stored on the relay.
+- **Live only while you look.** The Mac sends the list while the app's
+  socket is open, and a transcript only for the session on screen (the
+  detail screen re-sends `watch` every 30 seconds).
+- **Typing.** Each message shows its delivery state: Sending, then Typed,
+  Queued (the agent reads it after its current step) or Refused with the
+  reason and what to do. With no answer from the Mac within 20 seconds it
+  says so. The Mac decides what is safe to type: it refuses while a prompt is
+  on screen (use **Open page**), while there's a half-typed draft in the
+  terminal, or where it can't type at all, in which case the composer is
+  replaced by the reason.
+- **Stop** appears while a session is working and its terminal supports it.
+  After a confirmation it presses Esc in the session.
+- The reply screen shows **Open session** when the page's session is live.
+
+### Re-pairing for live sessions
+
+Pairings made before live sessions existed, or with an older Page on the
+Mac, have no session key. The Sessions tab then says **Re-pair with your Mac
+to see live sessions**. Update Page on the Mac, unpair in Settings (or tap
+**Re-pair…**), then on the Mac open **Pair phone…** and scan the new code.
+The inbox keeps working meanwhile.
+
+The tab also tells you when the relay needs updating (its `/status` lacks
+`sessions-v1`), when the Mac is offline, when the Mac is online but sends no
+list within 5 seconds (update Page on the Mac), and when the two clocks
+disagree by more than 10 minutes.
+
 ## Files
 
 ```
@@ -181,15 +221,18 @@ Page/
   Page-Push.entitlements       aps-environment, for paid teams
   Design/                      Theme (adaptive colours, Dynamic Type fonts), PulseMark, PillTabBar
   Models/                      Foundation-only: Intervention + lenient decoding, pairing
-                               validation, ordering, presence, stats, notification decisions
+                               validation, ordering, presence, stats, notification decisions,
+                               live sessions (decoding, crypto, delivery, availability)
   Services/
     APIClient.swift            REST + WebSocket client, delivery tracking
+    SessionStore.swift         Live sessions: decrypts updates, sends commands
     NotificationService.swift  Permission, categories, APNs registration, action handling
     PairingStore.swift         Pair / unpair
     KeychainStore.swift        Keychain storage + RelayCredentials
     AppRouter.swift            Tab + "open this intervention" state
     DevBypass.swift            DEBUG-only mock data ("Skip pairing (DEV)")
-  Views/                       Pair, Inbox, Reply, History, Stats, Settings, shared components
+  Views/                       Pair, Inbox, Sessions, Session detail, Reply, History (with
+                               Stats), Settings, shared components
 Tests/
   LogicTests.swift             Tests for Page/Models
   run-logic-tests.sh           Builds and runs them with swiftc
@@ -197,9 +240,10 @@ Tests/
 
 ## Testing the pure logic
 
-The code in `Page/Models` only depends on Foundation. It covers wire
-decoding, ordering, pairing validation, notification-action decisions,
-presence and stats. Its tests run without a simulator:
+The code in `Page/Models` only depends on Foundation (and CryptoKit for the
+sessions envelope). It covers wire decoding, ordering, pairing validation,
+notification-action decisions, presence, stats and live sessions, including
+the protocol's crypto test vector. Its tests run without a simulator:
 
 ```sh
 ./Tests/run-logic-tests.sh
@@ -208,11 +252,14 @@ presence and stats. Its tests run without a simulator:
 ## Development shortcuts
 
 Debug builds show **Skip pairing (DEV)** on the pairing screen. It loads mock
-pages and simulates replies in memory. It never writes credentials or
+pages and live sessions, and simulates replies and typed messages in memory.
+The `-PageDevPairing` launch argument does the same; add `-PageDevSession
+active` to open a mock session's detail screen. It never writes credentials or
 touches the network, and it isn't compiled into Release builds.
 
 ## Not supported yet
 
 - More than one Mac per phone.
 - End-to-end encryption of page contents. Pages pass through your Worker and,
-  for push notifications, through Apple's APNs.
+  for push notifications, through Apple's APNs. (Live sessions are
+  end-to-end encrypted.)

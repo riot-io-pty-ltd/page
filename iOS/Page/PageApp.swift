@@ -7,6 +7,7 @@ struct PageApp: App {
     @StateObject private var api = APIClient.shared
     @StateObject private var notifications = NotificationService.shared
     @StateObject private var router = AppRouter.shared
+    @StateObject private var sessions = SessionStore.shared
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +16,7 @@ struct PageApp: App {
                 .environmentObject(api)
                 .environmentObject(notifications)
                 .environmentObject(router)
+                .environmentObject(sessions)
                 .onOpenURL { url in
                     // page://intervention/<id> opens that page's reply screen.
                     router.handle(url: url)
@@ -41,6 +43,8 @@ struct RootView: View {
             switch phase {
             case .active:
                 pairing.reloadIfNeeded()
+                // Unreadable before the first unlock after a reboot.
+                if !SessionStore.shared.hasKey { SessionStore.shared.reloadKey() }
                 Task { await notifications.refreshAuthorization() }
                 if pairing.isPaired {
                     api.activate()
@@ -67,12 +71,17 @@ struct MainTabView: View {
             Group {
                 switch router.tab {
                 case .inbox:    InboxView()
+                case .sessions: SessionsView()
                 case .history:  HistoryView()
-                case .stats:    StatsView()
                 case .settings: SettingsView()
                 }
             }
-            PillTabBar(selection: $router.tab, inboxCount: api.inbox.count)
+            // A second sheet host: only one sheet can be up at a time, and
+            // AppRouter hands over between this one and the reply sheet.
+            .sheet(item: $router.presentedSession, onDismiss: router.sheetDismissed) { item in
+                SessionDetailView(sessionId: item.id)
+            }
+            TabBarHost(selection: $router.tab, inboxCount: api.inbox.count)
         }
         .ignoresSafeArea(.keyboard)
         .task {
@@ -80,8 +89,21 @@ struct MainTabView: View {
             api.activate()
             await notifications.requestAuthorizationIfNeeded()
         }
-        .sheet(item: $router.presented) { item in
+        .sheet(item: $router.presented, onDismiss: router.sheetDismissed) { item in
             ReplyView(interventionId: item.id)
         }
+    }
+}
+
+/// The tab bar plus the one thing it needs from live sessions (how many
+/// need you), so session updates re-render the bar, not every tab.
+private struct TabBarHost: View {
+    @Binding var selection: AppTab
+    let inboxCount: Int
+    @EnvironmentObject var sessions: SessionStore
+
+    var body: some View {
+        PillTabBar(selection: $selection, inboxCount: inboxCount,
+                   sessionsNeedingYou: SessionGrouping.needsYouCount(sessions.sessions))
     }
 }

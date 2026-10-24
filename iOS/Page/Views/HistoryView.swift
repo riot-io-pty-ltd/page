@@ -1,7 +1,15 @@
 import SwiftUI
 
+/// Resolved pages, with Stats as a second segment.
 struct HistoryView: View {
     @EnvironmentObject var api: APIClient
+    @State private var segment: Segment = .history
+
+    enum Segment: String, CaseIterable, Identifiable {
+        case history = "History"
+        case stats = "Stats"
+        var id: String { rawValue }
+    }
 
     var body: some View {
         ZStack {
@@ -9,15 +17,26 @@ struct HistoryView: View {
             ScrollView {
                 TimelineView(.periodic(from: .now, by: 30)) { context in
                     VStack(spacing: Theme.Space.xxl) {
-                        headerRow
-                        if api.history.isEmpty {
-                            emptyState
-                        } else {
-                            LazyVStack(spacing: Theme.Space.m) {
-                                ForEach(api.history) { item in
-                                    HistoryCard(intervention: item, now: context.date)
+                        VStack(spacing: Theme.Space.l) {
+                            headerRow
+                            Picker("Show", selection: $segment) {
+                                ForEach(Segment.allCases) { Text($0.rawValue).tag($0) }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                        switch segment {
+                        case .history:
+                            if api.history.isEmpty {
+                                emptyState
+                            } else {
+                                LazyVStack(spacing: Theme.Space.m) {
+                                    ForEach(api.history) { item in
+                                        HistoryCard(intervention: item, now: context.date)
+                                    }
                                 }
                             }
+                        case .stats:
+                            StatsContent(now: context.date)
                         }
                         Spacer().frame(height: 120)
                     }
@@ -37,7 +56,7 @@ struct HistoryView: View {
                 .foregroundStyle(Theme.Colour.text)
                 .accessibilityAddTraits(.isHeader)
             Spacer()
-            if !api.history.isEmpty {
+            if segment == .history, !api.history.isEmpty {
                 Text("\(api.history.count)")
                     .font(Theme.Font.caption12)
                     .tracking(0.5)

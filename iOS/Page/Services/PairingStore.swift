@@ -75,6 +75,11 @@ final class PairingStore: ObservableObject {
               KeychainStore.set(macJSON, for: Self.pairedKey) else {
             return false
         }
+        // After the reset above, which cleared the previous Mac's key. A
+        // failed write leaves the pairing usable: the Sessions tab then
+        // asks for a re-pair.
+        if let key = pairing.sessionKey { SessionKeyStore.save(key) } else { SessionKeyStore.clear() }
+        SessionStore.shared.reloadKey()
         #if DEBUG
         isDevPairing = false
         #endif
@@ -93,6 +98,7 @@ final class PairingStore: ObservableObject {
         KeychainStore.delete(Self.pairedKey)
         KeychainStore.delete(RelayCredentials.relayURLKey)
         KeychainStore.delete(RelayCredentials.relayTokenKey)
+        SessionKeyStore.clear()
         #if DEBUG
         isDevPairing = false
         #endif
@@ -117,6 +123,7 @@ final class PairingStore: ObservableObject {
         KeychainStore.delete(Self.pairedKey)
         KeychainStore.delete(RelayCredentials.relayURLKey)
         KeychainStore.delete(RelayCredentials.relayTokenKey)
+        SessionKeyStore.clear()
         #if DEBUG
         isDevPairing = false
         #endif

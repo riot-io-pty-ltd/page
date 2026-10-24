@@ -299,5 +299,355 @@ check(PushPayload.projectName(userInfo: ["projectName": "api"], title: "web page
 check(MacPresence.evaluate(MacStatusSnapshot.from(json: ["macConnected": false, "macEverSeen": true, "pendingCount": 0]), now: now) == .offline(lastSeen: nil), "macEverSeen true -> offline, not never-connected")
 check(!MacStatusSnapshot.from(json: ["macConnected": false, "macEverSeen": true, "pendingCount": 0]).looksUnused, "macEverSeen true wins over the pending heuristic")
 
+
+// MARK: - Live sessions (docs/SESSIONS-PROTOCOL.md)
+
+// Base64URL: no padding written, padding and the standard alphabet accepted.
+check(Base64URL.encode(Data([0xfb, 0xff])) == "-_8", "b64url alphabet, no padding")
+check(Base64URL.decode("-_8") == Data([0xfb, 0xff]), "b64url decode unpadded")
+check(Base64URL.decode("-_8=") == Data([0xfb, 0xff]), "b64url decode padded")
+check(Base64URL.decode("+/8=") == Data([0xfb, 0xff]), "standard alphabet accepted")
+check(Base64URL.decode("A") == nil, "impossible length")
+
+// Spec test vector (§2): both directions, byte for byte.
+let vecRoot = Data((0...31).map { UInt8($0) })
+let vecNonce = Data((0xa0...0xab).map { UInt8($0) })
+check(Base64URL.encode(vecRoot) == "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8", "vector root")
+check(Base64URL.encode(vecNonce) == "oKGio6Slpqeoqaqr", "vector nonce")
+check(SessionCrypto.subkey(root: vecRoot, direction: .macToPhone).withUnsafeBytes { Base64URL.encode(Data($0)) } == "ofSfPY2KtPqbs29ecqGVJzfSrP61BvMETQTitpTwtYE", "mac->phone subkey")
+check(SessionCrypto.subkey(root: vecRoot, direction: .phoneToMac).withUnsafeBytes { Base64URL.encode(Data($0)) } == "s_XovkSs3InwR9tqHVrGlT_dVvTJeDPPtd0r-wC1qp4", "phone->mac subkey")
+let vecListPT = #"{"kind":"list","seq":1,"ts":1761300000000,"sessions":[]}"#
+let vecListC = "izpLGj9N9Rpxuzq00howYI0D93aMC4vbU3Un38nzkzaX6rpd2wEiAvuseOahsZ9_zyivF1z2cuLwWX3k6Coa8QEvrfguLaN3"
+let vecCmdPT = #"{"op":"input","clientId":"c1","ts":1761300000000,"sessionId":"s1","text":"hi","viewer":"v1"}"#
+let vecCmdC = "sfJ3_bSsO7l16uEp6oH6PFnwlSLI8D_5PtVk8-InyYs-UxcC40NUQDmbHrttBjpm5nJaeQFIgITtiHUF1c6EvBs3hEB0DiBSSIlItp7XAqPjYgLckNcOihF1sKMrZVv8vgUfNIaRAtrMrd_k"
+if let e = try? SessionCrypto.seal(Data(vecListPT.utf8), root: vecRoot, direction: .macToPhone, aad: SessionFrameType.update, nonce: vecNonce) {
+    check(Base64URL.encode(e.sealed) == vecListC, "vector mac->phone ciphertext")
+    check(e.json["n"] as? String == "oKGio6Slpqeoqaqr" && (e.json["v"] as? Int) == 1, "envelope shape")
+} else { check(false, "vector seal mac->phone") }
+if let e = try? SessionCrypto.seal(Data(vecCmdPT.utf8), root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command, nonce: vecNonce) {
+    check(Base64URL.encode(e.sealed) == vecCmdC, "vector phone->mac ciphertext")
+} else { check(false, "vector seal phone->mac") }
+
+// Opening: the vector decrypts, and every wrong key, direction or AAD fails.
+let vecEnv = SessionCrypto.Envelope(json: ["v": 1, "n": "oKGio6Slpqeoqaqr", "c": vecListC])
+check(vecEnv != nil, "vector envelope parses")
+if let env = vecEnv {
+    check(SessionCrypto.open(env, root: vecRoot, direction: .macToPhone, aad: SessionFrameType.update) == Data(vecListPT.utf8), "vector opens")
+    check(SessionCrypto.open(env, root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.update) == nil, "wrong direction fails")
+    check(SessionCrypto.open(env, root: vecRoot, direction: .macToPhone, aad: SessionFrameType.command) == nil, "relabelled frame type fails")
+    check(SessionCrypto.open(env, root: Data(repeating: 7, count: 32), direction: .macToPhone, aad: SessionFrameType.update) == nil, "wrong key fails")
+    var tampered = env.sealed; tampered[0] ^= 1
+    check(SessionCrypto.open(SessionCrypto.Envelope(nonce: env.nonce, sealed: tampered), root: vecRoot, direction: .macToPhone, aad: SessionFrameType.update) == nil, "tampered fails")
+}
+check(SessionCrypto.Envelope(json: ["v": 1, "n": "oKGio6Slpqeoqaqr=", "c": vecListC + "=="]) != nil, "padded envelope accepted")
+check(SessionCrypto.Envelope(json: ["v": 2, "n": "oKGio6Slpqeoqaqr", "c": vecListC]) == nil, "v2 envelope rejected")
+check(SessionCrypto.Envelope(json: ["v": 1, "n": "oKGio6Sl", "c": vecListC]) == nil, "short nonce rejected")
+check(SessionCrypto.Envelope(json: ["v": 1, "n": "oKGio6Slpqeoqaqr", "c": "AAAA"]) == nil, "ciphertext shorter than a tag rejected")
+check(SessionCrypto.Envelope(json: ["v": 1, "n": 5, "c": vecListC]) == nil, "non-string nonce rejected")
+// Production nonces are random.
+let r1 = try! SessionCrypto.seal(Data("x".utf8), root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command)
+let r2 = try! SessionCrypto.seal(Data("x".utf8), root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command)
+check(r1.nonce.count == 12 && r1.nonce != r2.nonce, "random nonce per message")
+check(SessionCrypto.open(r1, root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command) == Data("x".utf8), "round trip")
+
+// Command plaintext + request body: the Mac's side of the vector decrypts it.
+let cmdNow = Date(timeIntervalSince1970: 1_761_300_000)
+let inputPT = SessionCommand.input(sessionId: "s1", text: "hi").plaintext(clientId: "c1", viewer: "v1", now: cmdNow)
+let inputObj = (try? JSONSerialization.jsonObject(with: inputPT)) as? [String: Any]
+check(inputObj?["op"] as? String == "input" && inputObj?["text"] as? String == "hi" && inputObj?["sessionId"] as? String == "s1", "input plaintext")
+check((inputObj?["ts"] as? NSNumber)?.int64Value == 1_761_300_000_000 && inputObj?["viewer"] as? String == "v1" && inputObj?["clientId"] as? String == "c1", "ts ms + viewer + clientId")
+let watchNull = (try? JSONSerialization.jsonObject(with: SessionCommand.watch(sessionId: nil).plaintext(clientId: "c", viewer: "v", now: cmdNow))) as? [String: Any]
+check(watchNull?["sessionId"] is NSNull && watchNull?["op"] as? String == "watch", "watch null stops viewing")
+let refreshObj = (try? JSONSerialization.jsonObject(with: SessionCommand.refresh.plaintext(clientId: "c", viewer: "v", now: cmdNow))) as? [String: Any]
+check(refreshObj?["op"] as? String == "refresh" && refreshObj?["sessionId"] == nil, "refresh has no session")
+let interruptObj = (try? JSONSerialization.jsonObject(with: SessionCommand.interrupt(sessionId: "s9").plaintext(clientId: "c", viewer: "v", now: cmdNow))) as? [String: Any]
+check(interruptObj?["op"] as? String == "interrupt" && interruptObj?["sessionId"] as? String == "s9", "interrupt plaintext")
+if let body = try? SessionCommand.requestBody(plaintext: inputPT, root: vecRoot),
+   let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+   let e = obj["e"] as? [String: Any], let env = SessionCrypto.Envelope(json: e) {
+    check(SessionCrypto.open(env, root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command) == inputPT, "request body round-trips")
+    check(obj.count == 1, "body is only {e}")
+} else { check(false, "request body") }
+
+// Pairing `sk`: optional, exactly 32 bytes, ignored otherwise.
+let skGood = Base64URL.encode(Data(repeating: 9, count: 32))
+func pairingJSON(_ sk: String?) -> String {
+    var s = #"{"v":1,"token":"abcdefghijklmnopqrstuvwxyz","relay":"https://r.example.com""#
+    if let sk { s += #","sk":"# + sk }
+    return s + "}"
+}
+if case .success(let p) = PairingValidator.validate(pairingJSON("\"\(skGood)\"")) { check(p.sessionKey == Data(repeating: 9, count: 32), "sk read") } else { check(false, "sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON("\"\(skGood)=\"")) { check(p.sessionKey?.count == 32, "padded sk read") } else { check(false, "padded sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON(nil)) { check(p.sessionKey == nil, "no sk: still pairs") } else { check(false, "no sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON("\"\(Base64URL.encode(Data(repeating: 1, count: 31)))\"")) { check(p.sessionKey == nil, "31-byte sk ignored") } else { check(false, "31 sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON("\"\(Base64URL.encode(Data(repeating: 1, count: 33)))\"")) { check(p.sessionKey == nil, "33-byte sk ignored") } else { check(false, "33 sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON("\"not base64 !!\"")) { check(p.sessionKey == nil, "garbage sk ignored") } else { check(false, "garbage sk pairing") }
+if case .success(let p) = PairingValidator.validate(pairingJSON("12345")) { check(p.sessionKey == nil, "numeric sk ignored") } else { check(false, "numeric sk pairing") }
+check(SessionCrypto.validRootKey(Data(count: 32)) != nil && SessionCrypto.validRootKey(nil) == nil, "validRootKey")
+// PairedMac stays decodable from older Keychain records.
+check((try? JSONDecoder().decode(PairedMac.self, from: Data(#"{"name":"Mac","hostname":"x","connected":true}"#.utf8)))?.name == "Mac", "old PairedMac decodes")
+
+// Plaintext decoding: the spec's list (no `boot`) decodes.
+if let p = SessionsPlaintext.decode(Data(vecListPT.utf8)) {
+    check(p.seq == 1 && p.boot == "" && p.ts == Date(timeIntervalSince1970: 1_761_300_000), "vector list header")
+    check(p.update == .list(macName: nil, sessions: []), "vector list empty")
+} else { check(false, "vector list decodes") }
+
+let listJSON = """
+{"kind":"list","boot":"b1","seq":12,"ts":1761300000000,"macName":"Roy's MacBook","futureField":{"x":1},
+ "sessions":[
+  {"id":"s-claude","backend":"claude","title":"mac-on-claude-code","cwd":"~/projects/mac-on-claude-code","state":"waitingOnApproval","host":"cmux","canType":true,"typeBlocker":"ignored when typable","canInterrupt":true,"provider":"anthropic","lastActivityAt":"2026-10-24T12:00:00Z","interventionId":"iv-1","preview":"Bash: npm test"},
+  {"id":"s-ollama","backend":"ollama","cwd":"~/code/llm-play","state":"thinkingHard","host":"Ghostty","canType":false,"typeBlocker":"Page can't type into Ghostty yet","canInterrupt":"yes","lastActivityAt":"bad"},
+  {"id":"s-min"},
+  {"id":""},
+  {"title":"no id"},
+  {"id":"s-codex","backend":"CODEX","title":5,"cwd":"~","state":"active","canType":true,"canInterrupt":false,"lastActivityAt":"2026-10-24T11:00:00.123Z","interventionId":""}
+ ]}
+"""
+if let p = SessionsPlaintext.decode(Data(listJSON.utf8)), case .list(let name, let ss) = p.update {
+    check(p.boot == "b1" && p.seq == 12, "list header")
+    check(name == "Roy's MacBook", "macName")
+    check(ss.map(\.id) == ["s-claude", "s-ollama", "s-min", "s-codex"], "bad sessions dropped, rest kept \(ss.map(\.id))")
+    let a = ss[0], b = ss[1], m = ss[2], x = ss[3]
+    check(a.backend == .known(.claude) && a.state == .waitingOnApproval && a.canType && a.typeBlocker == nil, "claude session")
+    check(a.openPageId == "iv-1" && a.lastActivityAt == PageDate.parse("2026-10-24T12:00:00Z") && a.preview == "Bash: npm test", "claude fields")
+    check(b.backend == .other("ollama") && b.backend.badge == "OLLAMA" && b.backend.displayName == "Ollama", "other backend kept raw")
+    check(b.state == .unknown && b.state.group == .idle, "unknown state -> unknown, grouped idle")
+    check(b.title == "llm-play", "title from cwd")
+    check(!b.canType && b.blockerText == "Page can't type into Ghostty yet", "type blocker")
+    check(!b.canInterrupt && !b.isStoppable, "non-bool canInterrupt -> false")
+    check(b.lastActivityAt == nil, "bad date tolerated")
+    check(m.title == "Session s-min" && !m.canType && m.blockerText == LiveSession.defaultBlocker && m.host == "unknown" && m.hostLabel == "Unknown host", "minimal session safe defaults")
+    check(m.backend == .other("unknown") && m.backend.displayName == "Your agent", "missing backend")
+    check(x.backend == .known(.codex) && x.title == "Session s-codex" && x.interventionId == nil, "codex: case-insensitive backend, ~ cwd, empty intervention id")
+    check(x.isStoppable == false && x.state == .active, "active but not interruptible")
+} else { check(false, "list decodes") }
+
+check(SessionsPlaintext.decode(Data(#"{"kind":"list","seq":1,"ts":1761300000000}"#.utf8)) == nil, "list without sessions is malformed, not empty")
+check(SessionsPlaintext.decode(Data(#"{"kind":"sparkles","seq":1,"ts":1761300000000}"#.utf8)) == nil, "unknown kind ignored")
+check(SessionsPlaintext.decode(Data(#"{"kind":"list","ts":1761300000000,"sessions":[]}"#.utf8)) == nil, "missing seq rejected")
+check(SessionsPlaintext.decode(Data(#"{"kind":"list","seq":1,"sessions":[]}"#.utf8)) == nil, "missing ts rejected")
+check(SessionsPlaintext.decode(Data("not json".utf8)) == nil, "garbage")
+let many = "{\"kind\":\"list\",\"seq\":1,\"ts\":1761300000000,\"sessions\":[" + (0..<150).map { "{\"id\":\"s\($0)\"}" }.joined(separator: ",") + "]}"
+if let p = SessionsPlaintext.decode(Data(many.utf8)), case .list(_, let ss) = p.update { check(ss.count == 100, "capped at 100 sessions") } else { check(false, "many sessions") }
+
+let transcriptJSON = """
+{"kind":"transcript","boot":"b1","seq":13,"ts":1761300000000,"sessionId":"s-claude","truncated":true,
+ "entries":[{"id":"u1","role":"user","text":"run the tests","at":"2026-10-24T12:00:00Z"},
+            {"id":42,"role":"tool","text":"Bash: npm test","tool":"Bash"},
+            {"id":"a1","role":"assistant","text":"All green."},
+            {"id":"x1","role":"narrator","text":"odd role"},
+            {"role":"user","text":"no id"}]}
+"""
+if let p = SessionsPlaintext.decode(Data(transcriptJSON.utf8)), case .transcript(let t) = p.update {
+    check(t.sessionId == "s-claude" && t.truncated, "transcript header")
+    check(t.entries.map(\.id) == ["u1", "42", "a1", "x1"], "entries \(t.entries.map(\.id))")
+    check(t.entries[0].role == .user && t.entries[0].at != nil, "user entry")
+    check(t.entries[1].role == .tool && t.entries[1].tool == "Bash", "tool entry, numeric id")
+    check(t.entries[3].role == .system, "unknown role -> system, never user")
+} else { check(false, "transcript decodes") }
+check(SessionsPlaintext.decode(Data(#"{"kind":"transcript","seq":1,"ts":1761300000000,"entries":[]}"#.utf8)) == nil, "transcript needs sessionId")
+
+let resultJSON = #"{"kind":"result","boot":"b1","seq":14,"ts":1761300000000,"clientId":"c1","ok":false,"code":"refused","reason":"waiting","detail":"Answer the prompt","interventionId":"iv-1"}"#
+if let p = SessionsPlaintext.decode(Data(resultJSON.utf8)), case .result(let r) = p.update {
+    check(r == CommandResult(clientId: "c1", ok: false, code: .refused, reason: "waiting", detail: "Answer the prompt", interventionId: "iv-1"), "result decodes")
+} else { check(false, "result decodes") }
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"result","seq":1,"ts":1761300000000,"clientId":"c2","ok":true,"code":"teleported"}"#.utf8)), case .result(let r) = p.update {
+    check(r.code == .delivered, "unknown code with ok -> delivered")
+} else { check(false, "unknown code") }
+check(SessionsPlaintext.decode(Data(#"{"kind":"result","seq":1,"ts":1761300000000,"ok":true}"#.utf8)) == nil, "result needs clientId")
+
+// Acceptance: ts guard, per-boot list seq, boot reset, per-session transcripts.
+func pt(_ update: SessionsUpdate, boot: String = "b1", seq: Int, age: TimeInterval = 0, now: Date = cmdNow) -> SessionsPlaintext {
+    SessionsPlaintext(boot: boot, seq: seq, ts: now.addingTimeInterval(-age), update: update)
+}
+let emptyList = SessionsUpdate.list(macName: nil, sessions: [])
+var gate = SessionUpdateGate()
+check(gate.admit(pt(emptyList, seq: 5), now: cmdNow) == .accept, "first list")
+check(gate.admit(pt(emptyList, seq: 5), now: cmdNow) == .outOfOrder, "same seq dropped")
+check(gate.admit(pt(emptyList, seq: 4), now: cmdNow) == .outOfOrder, "older seq dropped")
+check(gate.admit(pt(emptyList, seq: 6), now: cmdNow) == .accept, "newer seq")
+check(gate.admit(pt(emptyList, seq: 7, age: 601), now: cmdNow) == .tooOld, "older than 10 min dropped")
+check(gate.admit(pt(emptyList, seq: 7, age: 599), now: cmdNow) == .accept, "just under 10 min ok")
+check(gate.admit(pt(emptyList, seq: 99, age: -3600), now: cmdNow) == .accept, "Mac clock ahead is not a replay")
+check(gate.admit(pt(emptyList, boot: "b2", seq: 900, age: 700), now: cmdNow) == .tooOld && gate.boot == "b1", "stale frame from a new boot doesn't reset tracking")
+check(gate.admit(pt(emptyList, boot: "b2", seq: 1), now: cmdNow) == .accept && gate.boot == "b2", "new boot resets seq")
+check(gate.admit(pt(emptyList, boot: "b2", seq: 2), now: cmdNow) == .accept, "new boot continues")
+let tA = SessionsUpdate.transcript(SessionTranscript(sessionId: "A", entries: [], truncated: false))
+let tB = SessionsUpdate.transcript(SessionTranscript(sessionId: "B", entries: [], truncated: false))
+check(gate.admit(pt(tA, boot: "b2", seq: 10), now: cmdNow) == .accept, "transcript A")
+check(gate.admit(pt(tB, boot: "b2", seq: 8), now: cmdNow) == .accept, "transcript B tracked separately")
+check(gate.admit(pt(tA, boot: "b2", seq: 9), now: cmdNow) == .outOfOrder, "older transcript A dropped")
+check(gate.admit(pt(emptyList, boot: "b2", seq: 3), now: cmdNow) == .accept, "list seq independent of transcripts")
+let res = SessionsUpdate.result(CommandResult(clientId: "c", ok: true, code: .delivered, reason: nil, detail: nil, interventionId: nil))
+check(gate.admit(pt(res, boot: "b2", seq: 1), now: cmdNow) == .accept, "results aren't seq-gated")
+check(gate.admit(pt(res, boot: "b2", seq: 1, age: 1200), now: cmdNow) == .tooOld, "results are age-gated")
+check(gate.admit(pt(tA, boot: "b3", seq: 1), now: cmdNow) == .accept, "new boot resets transcript tracking")
+gate.reset()
+check(gate.boot == nil && gate.lastListSeq == nil && gate.admit(pt(emptyList, boot: "b3", seq: 1), now: cmdNow) == .accept, "reset clears")
+
+// Grouping and ordering.
+func ls(_ id: String, _ state: LiveSessionState, _ t: TimeInterval?, title: String = "p") -> LiveSession {
+    LiveSession(id: id, backend: .known(.claude), title: title, cwd: "", state: state, host: "cmux", canType: true,
+                typeBlocker: nil, canInterrupt: true, provider: nil,
+                lastActivityAt: t.map { Date(timeIntervalSince1970: $0) }, interventionId: nil, preview: "")
+}
+let sections = SessionGrouping.sections([
+    ls("idle-old", .idle, 10), ls("act", .active, 50), ls("wait-u", .waitingOnUser, 20), ls("rl", .rateLimited, 90),
+    ls("wait-a", .waitingOnApproval, 30), ls("unk", .unknown, nil), ls("act2", .active, 60), ls("off", .offline, 70)
+])
+check(sections.map(\.group) == [.needsYou, .working, .idle], "group order")
+check(sections[0].sessions.map(\.id) == ["wait-a", "wait-u"], "needs you by recency")
+check(sections[1].sessions.map(\.id) == ["act2", "act"], "working by recency")
+check(sections[2].sessions.map(\.id) == ["rl", "off", "idle-old", "unk"], "idle by recency, undated last")
+check(SessionGrouping.sections([ls("a", .idle, 1)]).map(\.group) == [.idle], "empty groups left out")
+check(SessionGrouping.sections([]).isEmpty, "no sessions")
+check(SessionGrouping.needsYouCount([ls("a", .waitingOnUser, 1), ls("b", .active, 1), ls("c", .waitingOnApproval, 1)]) == 2, "needs-you count")
+check(LiveSessionState.allCases.allSatisfy { !$0.label.isEmpty }, "every state has a label")
+check(ls("x", .active, 1).isStoppable && !ls("x", .idle, 1).isStoppable, "Stop only while active")
+check(ls("x", .idle, 1).openPageId == nil, "open page only while waiting")
+
+// Delivery state machine.
+let cmdSentAt = cmdNow
+func result(_ code: CommandResult.Code, reason: String? = nil, detail: String? = nil) -> CommandResult {
+    CommandResult(clientId: "c", ok: code == .delivered || code == .queued, code: code, reason: reason, detail: detail, interventionId: nil)
+}
+var d = SessionDeliveryState.sending
+check(d.isPending && d.label(.input) == "Sending…" && d.label(.interrupt) == "Stopping…", "sending labels")
+check(d.timedOut(sentAt: cmdSentAt, now: cmdSentAt.addingTimeInterval(19.9)) == .sending, "not yet timed out")
+check(d.timedOut(sentAt: cmdSentAt, now: cmdSentAt.addingTimeInterval(20)) == .noAnswer, "no answer after 20 s")
+check(d.applying(result(.delivered, detail: "Typed into cmux"), agent: "Claude") == .typed("Typed into cmux"), "delivered -> typed")
+check(d.applying(result(.queued), agent: "Claude") == .queued(nil), "queued")
+check(SessionDeliveryState.queued(nil).explanation(.input, agent: "Claude") == "Queued — Claude reads it after the current step.", "queued copy")
+if case .refused(let reason, let message) = d.applying(result(.refused, reason: "digit_while_busy"), agent: "Claude") {
+    check(reason == "digit_while_busy" && message == "Starts with a number: wait for Claude to finish, or add a word first.", "digit refusal copy")
+} else { check(false, "refused") }
+check(d.applying(result(.failed, detail: "tmux went away"), agent: "Claude") == .failed("tmux went away"), "failed uses detail")
+check(SessionDeliveryState.noAnswer.applying(result(.delivered), agent: "Claude") == .typed(nil), "late result beats giving up")
+check(SessionDeliveryState.failed("lost").applying(result(.queued), agent: "Claude") == .queued(nil), "result beats a lost HTTP response")
+check(SessionDeliveryState.typed(nil).applying(result(.refused, reason: "replay"), agent: "Claude") == .typed(nil), "first result wins")
+check(SessionDeliveryState.typed(nil).timedOut(sentAt: cmdSentAt, now: cmdSentAt.addingTimeInterval(99)) == .typed(nil), "settled never times out")
+check(d.afterPost(.accepted) == .sending, "202 keeps waiting for the result")
+check(d.afterPost(.macOffline) == .failed(SessionCommandOutcome.macOffline.failureMessage!), "503 -> not sent")
+check(SessionDeliveryState.typed(nil).afterPost(.macOffline) == .typed(nil), "result that beat the POST is kept")
+check(SessionDeliveryState.typed(nil).label(.interrupt) == "Stopped" && SessionDeliveryState.noAnswer.label(.input) == "No answer from your Mac", "labels")
+d = .noAnswer
+check(d.explanation(.input, agent: "Claude")?.contains("20 seconds") == true, "no-answer copy")
+// VoiceOver hears the same status and explanation the bubble shows.
+let draftRefusal = SessionDeliveryState.sending.applying(result(.refused, reason: "draft"), agent: "Claude")
+check(draftRefusal.spokenBubbleStatus(.input, agent: "Claude") == "Refused. " + SessionResultCopy.refusal(reason: "draft", detail: nil, agent: "Claude"), "spoken refusal says why")
+check(SessionDeliveryState.noAnswer.spokenBubbleStatus(.input, agent: "Claude").hasPrefix("No answer from your Mac. ") && SessionDeliveryState.noAnswer.spokenBubbleStatus(.input, agent: "Claude").contains("check the transcript"), "spoken no-answer guidance")
+check(SessionDeliveryState.failed("tmux went away").spokenBubbleStatus(.input, agent: "Claude") == "Not sent. tmux went away", "spoken failure")
+check(SessionDeliveryState.typed("Typed into cmux").bubbleExplanation(.input, agent: "Claude") == nil && SessionDeliveryState.typed("Typed into cmux").spokenBubbleStatus(.input, agent: "Claude") == "Typed", "typed detail not shown or spoken")
+check(SessionDeliveryState.sending.spokenBubbleStatus(.input, agent: "Claude") == "Sending…", "spoken sending")
+
+// HTTP outcomes for POST /sessions/command.
+check(SessionCommandOutcome.from(status: 202, body: Data(#"{"ok":true}"#.utf8)) == .accepted, "202")
+check(SessionCommandOutcome.from(status: 503, body: Data(#"{"error":"mac_offline"}"#.utf8)) == .macOffline, "503")
+check(SessionCommandOutcome.from(status: 400, body: Data(#"{"error":"invalid_envelope"}"#.utf8)) == .invalid, "400")
+check(SessionCommandOutcome.from(status: 413, body: Data(#"{"error":"too_large"}"#.utf8)) == .tooLarge, "413")
+check(SessionCommandOutcome.from(status: 429, body: Data(#"{"error":"rate_limited"}"#.utf8)) == .rateLimited, "429")
+check(SessionCommandOutcome.from(status: 401, body: Data()) == .unauthorized, "401")
+check(SessionCommandOutcome.from(status: 410, body: Data(#"{"error":"token_retired","why":"Replaced"}"#.utf8)) == .retired("Replaced"), "410 token_retired")
+check(SessionCommandOutcome.from(status: 404, body: Data("Not found".utf8)) == .relayTooOld, "404 old relay")
+if case .failed = SessionCommandOutcome.from(status: 500, body: Data()) {} else { check(false, "500") }
+check(SessionCommandOutcome.accepted.failureMessage == nil, "accepted has no failure copy")
+
+// Composer: 1–8000 characters after trimming, and a body the relay takes.
+check(SessionComposer.validate("  \n ") == .failure(.empty), "blank refused")
+check(SessionComposer.validate("  hi \n") == .success("hi"), "trimmed")
+check(SessionComposer.validate(String(repeating: "a", count: 8000)) == .success(String(repeating: "a", count: 8000)), "8000 ok")
+check(SessionComposer.validate(String(repeating: "a", count: 8001)) == .failure(.tooLong(count: 8001)), "8001 refused")
+check(SessionComposer.validate(" " + String(repeating: "a", count: 8000) + "  ") != .failure(.tooLong(count: 8003)), "limit counts trimmed text")
+let family = String(repeating: "👨‍👩‍👧‍👦", count: 8000)
+check(SessionComposer.validate(family) == .success(family), "8000 family emoji are 8000 characters")
+let familyBody = try! SessionCommand.requestBody(plaintext: SessionCommand.input(sessionId: "s", text: family).plaintext(clientId: UUID().uuidString, viewer: "v", now: cmdNow), root: vecRoot)
+check(!SessionComposer.fitsRelay(familyBody), "but too large for the relay's 64 KiB body")
+let asciiBody = try! SessionCommand.requestBody(plaintext: SessionCommand.input(sessionId: UUID().uuidString, text: String(repeating: "a", count: 8000)).plaintext(clientId: UUID().uuidString, viewer: UUID().uuidString, now: cmdNow), root: vecRoot)
+check(SessionComposer.fitsRelay(asciiBody), "8000 ASCII characters fit")
+check(SessionComposer.Problem.tooLarge.message.contains("too large"), "too-large copy")
+
+// Reason copy: every protocol reason has its own text with a next step.
+let reasons = ["waiting", "unknown_state", "not_typable", "draft", "digit_while_busy", "ended", "codex_mid_turn",
+               "disabled", "stale", "replay", "not_found", "interrupt_unsupported", "error"]
+let fallback = SessionResultCopy.refusal(reason: "brand_new", detail: nil, agent: "Claude")
+for r in reasons {
+    check(SessionResultCopy.refusal(reason: r, detail: nil, agent: "Claude") != fallback, "\(r) has its own copy")
+}
+check(Set(reasons.map { SessionResultCopy.refusal(reason: $0, detail: nil, agent: "Claude") }).count == reasons.count, "reason copy is distinct")
+check(SessionResultCopy.refusal(reason: "brand_new", detail: "Mac says no", agent: "Claude") == "Mac says no", "unknown reason uses the Mac's detail")
+check(SessionResultCopy.refusal(reason: "waiting", detail: nil, agent: "Codex").hasPrefix("Codex"), "agent name in copy")
+check(SessionResultCopy.refusal(reason: "codex_mid_turn", detail: nil, agent: "Codex") == "Codex is mid-turn — Page can type once the turn ends.", "codex mid-turn copy")
+
+// Transcript timeline: echoes attach the delivery to the user entry.
+func te(_ id: String, _ role: TranscriptRole, _ text: String, at: TimeInterval? = nil) -> TranscriptEntry {
+    TranscriptEntry(id: id, role: role, text: text, at: at.map { cmdNow.addingTimeInterval($0) }, tool: nil)
+}
+func sent(_ cid: String, _ text: String, _ state: SessionDeliveryState, at: TimeInterval = 0, kind: SessionCommandKind = .input) -> SentSessionCommand {
+    SentSessionCommand(clientId: cid, sessionId: "s", kind: kind, text: text, sentAt: cmdNow.addingTimeInterval(at), state: state)
+}
+check(TranscriptTimeline.normalise("  !run\u{7}  the\n\ntests ") == "run the tests", "normalise")
+check(TranscriptTimeline.echoes("run the tests", "!run  the tests"), "guarded bang still echoes")
+check(!TranscriptTimeline.echoes("run the tests", "run the test suite"), "different text doesn't echo")
+let longText = String(repeating: "word ", count: 600)
+check(TranscriptTimeline.echoes(String(longText.prefix(2000)) + "…", longText), "capped entry echoes by prefix")
+let tl = TranscriptTimeline.merge(
+    entries: [te("u0", .user, "yes", at: -600), te("a0", .assistant, "ok"), te("u1", .user, "yes", at: 2), te("t1", .tool, "Bash: ls")],
+    sent: [sent("c1", "yes", .typed(nil)), sent("c2", "nope", .refused(reason: "draft", message: "m")),
+           sent("c3", "later", .sending, at: 5), sent("c4", "", .sending, kind: .interrupt)])
+check(tl.map(\.id) == ["e:u0", "e:a0", "e:u1", "e:t1", "p:c2", "p:c3"], "timeline order \(tl.map(\.id))")
+if case .entry(_, let del) = tl[2] { check(del?.clientId == "c1", "echo attached to the entry after the send") } else { check(false, "u1") }
+if case .entry(_, let del) = tl[0] { check(del == nil, "older identical prompt not claimed") } else { check(false, "u0") }
+let refusedTwin = TranscriptTimeline.merge(entries: [te("u", .user, "nope")], sent: [sent("c", "nope", .refused(reason: nil, message: "m"))])
+check(refusedTwin.map(\.id) == ["e:u", "p:c"], "refused message never claims an entry")
+let twice = TranscriptTimeline.merge(entries: [te("u1", .user, "go"), te("u2", .user, "go")],
+                                     sent: [sent("c1", "go", .typed(nil), at: 0), sent("c2", "go", .typed(nil), at: 1)])
+if case .entry(_, let d1) = twice[0], case .entry(_, let d2) = twice[1] {
+    check(d1?.clientId == "c1" && d2?.clientId == "c2" && twice.count == 2, "repeated text matched in order")
+} else { check(false, "twice") }
+let redacted = TranscriptTimeline.merge(entries: [te("u", .user, "token [REDACTED]")], sent: [sent("c", "token sk-123", .typed(nil))])
+check(redacted.count == 2, "unmatched echo shows a duplicate rather than losing the status")
+
+// An identical message already in the transcript when this one was sent is
+// never its echo, even inside the clock window or without a timestamp.
+var yesSent = sent("c-yes", "yes", .sending, at: 0)
+yesSent.priorEntryIds = ["old-yes", "old-undated"]
+let before = TranscriptTimeline.merge(entries: [te("old-yes", .user, "yes", at: -120), te("old-undated", .user, "yes")], sent: [yesSent])
+check(before.map(\.id) == ["e:old-yes", "e:old-undated", "p:c-yes"], "pending message doesn't claim an older identical entry \(before.map(\.id))")
+yesSent.state = .typed(nil)
+let after = TranscriptTimeline.merge(entries: [te("old-yes", .user, "yes", at: -120), te("old-undated", .user, "yes"), te("new-yes", .user, "yes", at: 1)], sent: [yesSent])
+if case .entry(let e, let del) = after[2] { check(e.id == "new-yes" && del?.clientId == "c-yes" && after.count == 3, "the real echo is claimed") } else { check(false, "real echo") }
+if case .entry(_, let del) = after[0] { check(del == nil, "old entry stays unclaimed") } else { check(false, "old entry") }
+
+// Availability (§6), most fundamental problem first.
+let online = MacPresence.online(lastSeen: cmdNow)
+func avail(_ f: (inout SessionAvailability.Inputs) -> Void, now: Date = cmdNow) -> SessionAvailability {
+    var i = SessionAvailability.Inputs(hasKey: true, relayFeatures: ["sessions-v1"], presence: online,
+                                       socketConnected: true, waitStartedAt: cmdNow.addingTimeInterval(-1), hasList: false)
+    f(&i)
+    return SessionAvailability.evaluate(i, now: now)
+}
+check(avail { $0.relayFeatures = [] } == .relayTooOld, "relay without feature")
+check(avail { $0.relayFeatures = []; $0.hasKey = false } == .relayTooOld, "relay first: re-pairing wouldn't help")
+check(avail { $0.relayFeatures = nil } == .waiting, "features unknown yet: don't block")
+check(avail { $0.hasKey = false } == .needsRepair(keyMismatch: false), "no sk")
+check(avail { $0.keyMismatch = true; $0.hasList = true } == .needsRepair(keyMismatch: true), "undecryptable frames")
+check(avail { $0.presence = .offline(lastSeen: nil) } == .macOffline, "Mac offline")
+check(avail { $0.presence = .offline(lastSeen: nil); $0.hasList = true } == .macOffline, "offline hides a stale list")
+check(avail { $0.presence = .stale(lastSeen: cmdNow) } == .macOffline, "Mac stopped checking in")
+check(avail { $0.macOfflineHint = true; $0.hasList = true } == .macOffline, "503 hint")
+check(avail { $0.hasList = true } == .ready, "ready")
+check(avail { $0.hasList = true; $0.macDisabled = true } == .macDisabled, "list says off on the Mac")
+check(avail { $0.macDisabled = true } == .waiting, "disabled only counts once a list arrived")
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"list","seq":5,"ts":1761300000000,"boot":"b","sessions":[],"disabled":true}"#.utf8)) { check(p.macDisabled, "disabled flag decoded") } else { check(false, "disabled list") }
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"list","seq":6,"ts":1761300000000,"boot":"b","sessions":[]}"#.utf8)) { check(!p.macDisabled, "no flag: enabled") } else { check(false, "plain list") }
+check(avail { $0.onlyStaleFrames = true } == .clockSkew, "only stale frames")
+check(avail { _ in } == .waiting, "inside the 5 s window")
+check(avail({ _ in }, now: cmdNow.addingTimeInterval(4.5)) == .macTooOld, "no list 5 s after connecting while online")
+check(avail({ $0.presence = .unknown }, now: cmdNow.addingTimeInterval(30)) == .waiting, "presence unknown: keep waiting")
+check(avail({ $0.socketConnected = false }, now: cmdNow.addingTimeInterval(30)) == .waiting, "socket down: connecting")
+check(avail({ $0.waitStartedAt = nil }, now: cmdNow.addingTimeInterval(30)) == .waiting, "no wait start yet")
+check(AgentBackend(wire: "  ") == .other("unknown") && AgentBackend(wire: "Claude") == .known(.claude), "backend wire mapping")
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

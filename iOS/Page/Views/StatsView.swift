@@ -1,36 +1,23 @@
 import SwiftUI
 
-struct StatsView: View {
+/// Stats, shown as the second segment of the History tab (a fifth tab
+/// wouldn't fit the Dynamic Type cap).
+struct StatsContent: View {
     @EnvironmentObject var api: APIClient
+    let now: Date
 
     var body: some View {
-        ZStack {
-            Theme.Colour.surface.ignoresSafeArea()
-            ScrollView {
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    let stats = PageStats.compute(history: api.history, inbox: api.inbox, now: context.date)
-                    VStack(alignment: .leading, spacing: Theme.Space.xxl) {
-                        Text("Stats")
-                            .font(Theme.Font.display28)
-                            .foregroundStyle(Theme.Colour.text)
-                            .accessibilityAddTraits(.isHeader)
-                        if let failure = api.historyLoad.failureMessage, api.history.isEmpty {
-                            StatusBanner(tone: .error, systemImage: "wifi.exclamationmark",
-                                         title: "Couldn't load history",
-                                         message: "\(failure) Stats only include pages on this screen.",
-                                         actionTitle: "Try again") { Task { await api.refreshHistory() } }
-                        }
-                        summaryGrid(stats)
-                        topProjects(stats)
-                        Spacer().frame(height: 120)
-                    }
-                }
-                .padding(.horizontal, Theme.Space.xl)
-                .padding(.top, Theme.Space.xxl)
+        let stats = PageStats.compute(history: api.history, inbox: api.inbox, now: now)
+        VStack(alignment: .leading, spacing: Theme.Space.xxl) {
+            if let failure = api.historyLoad.failureMessage, api.history.isEmpty {
+                StatusBanner(tone: .error, systemImage: "wifi.exclamationmark",
+                             title: "Couldn't load history",
+                             message: "\(failure) Stats only include pages on this screen.",
+                             actionTitle: "Try again") { Task { await api.refreshHistory() } }
             }
-            .refreshable { await api.refreshHistory() }
+            summaryGrid(stats)
+            topProjects(stats)
         }
-        .task { await api.refreshHistory() }
     }
 
     private func summaryGrid(_ stats: PageStats) -> some View {
