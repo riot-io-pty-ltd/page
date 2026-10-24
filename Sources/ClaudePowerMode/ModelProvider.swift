@@ -301,9 +301,7 @@ enum ClaudeSettingsEnv {
         }
         var env: [String: String] = [:]
         for path in paths {
-            if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
-               size.intValue > 1 << 20 { continue }
-            guard let data = FileManager.default.contents(atPath: path) else { continue }
+            guard let data = BoundedFileRead.read(path) else { continue }
             for (k, v) in parse(data) { env[k] = v }
         }
         return env
@@ -335,9 +333,7 @@ enum ClaudeSettingsEnv {
         guard !v.isEmpty else { return nil }
         if v.hasPrefix("{") { return parse(Data(v.utf8)) }
         let path = expand(v, cwd: cwd, home: home)
-        if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
-           size.intValue > 1 << 20 { return nil }
-        return FileManager.default.contents(atPath: path).map(parse)
+        return BoundedFileRead.read(path).map(parse)
     }
 
     private static func expand(_ path: String, cwd: String?, home: String) -> String {

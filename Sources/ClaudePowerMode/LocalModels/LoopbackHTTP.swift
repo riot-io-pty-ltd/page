@@ -54,12 +54,22 @@ enum SlotsDecoder {
 ///
 /// Only `http://127.0.0.1:<port>` (an IP literal: no DNS, no proxy, no
 /// `localhost` resolving elsewhere), ephemeral session (no cookies, no
-/// cache), proxies disabled, redirects refused, 3 s timeout, bodies over
-/// 1 MB dropped. One session per instance with its own delegate queue, so
-/// callbacks never need the caller's queue; call `invalidate()` when done
-/// (the session retains its delegate).
-final class LoopbackHTTP: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+/// cache), proxies disabled, redirects refused, 3 s total timeout, and a
+/// body that passes 1 MB is cancelled as it streams in (loopback can move
+/// gigabytes inside the timeout, so a cap checked after buffering bounds
+/// nothing). One session per instance with its own serial delegate queue,
+/// so callbacks never need the caller's queue; call `invalidate()` when
+/// done (the session retains its delegate).
+final class LoopbackHTTP: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let maxBodyBytes = 1 << 20
+
+    /// Per-task state; touched only on the delegate queue (serial).
+    private struct Pending {
+        var body = Data()
+        var overLimit = false
+        let completion: (Int?, Data?) -> Void
+    }
+    private var pending: [Int: Pending] = [:]
 
     private let timeout: TimeInterval
     private lazy var session: URLSession = {
@@ -104,12 +114,14 @@ final class LoopbackHTTP: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
-        let task = session.dataTask(with: request) { data, response, error in
-            guard error == nil, let http = response as? HTTPURLResponse else { completion(nil, nil); return }
-            if let data, data.count > Self.maxBodyBytes { completion(http.statusCode, nil); return }
-            completion(http.statusCode, data)
+        let task = session.dataTask(with: request)
+        // Register before resuming, on the delegate queue, so no callback
+        // can arrive for an unknown task.
+        session.delegateQueue.addOperation { [weak self] in
+            guard let self else { completion(nil, nil); return }
+            self.pending[task.taskIdentifier] = Pending(completion: completion)
+            task.resume()
         }
-        task.resume()
     }
 
     func slots(port: Int, completion: @escaping (SlotsState) -> Void) {
@@ -119,6 +131,40 @@ final class LoopbackHTTP: NSObject, URLSessionTaskDelegate, @unchecked Sendable 
 
     func invalidate() {
         session.invalidateAndCancel()
+    }
+
+    // MARK: URLSessionDataDelegate (delegate queue)
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if response.expectedContentLength > Int64(Self.maxBodyBytes) {
+            pending[dataTask.taskIdentifier]?.overLimit = true
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard var p = pending[dataTask.taskIdentifier], !p.overLimit else { return }
+        if p.body.count + data.count > Self.maxBodyBytes {
+            p.overLimit = true
+            p.body = Data()
+            pending[dataTask.taskIdentifier] = p
+            dataTask.cancel()
+            return
+        }
+        p.body.append(data)
+        pending[dataTask.taskIdentifier] = p
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        guard let p = pending.removeValue(forKey: task.taskIdentifier) else { return }
+        let status = (task.response as? HTTPURLResponse)?.statusCode
+        // Over the cap: the server answered, but not with a usable body.
+        if p.overLimit { p.completion(status, nil); return }
+        guard error == nil, let status else { p.completion(nil, nil); return }
+        p.completion(status, p.body)
     }
 
     // MARK: URLSessionTaskDelegate
