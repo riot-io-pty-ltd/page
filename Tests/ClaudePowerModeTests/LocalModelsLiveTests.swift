@@ -87,6 +87,28 @@ final class LocalModelsLiveTests: XCTestCase {
         XCTAssertEqual(LocalPortSelection.ports(listening: ports, declared: port), [port])
     }
 
+    /// B4's premise: output written to a terminal moves its device node's
+    /// mtime. Uses our own pty pair, never a user terminal.
+    func testPTYWriteMovesMTime() throws {
+        var master: Int32 = -1, slave: Int32 = -1
+        guard openpty(&master, &slave, nil, nil, nil) == 0 else { throw XCTSkip("openpty failed") }
+        defer { close(master); close(slave) }
+        guard let cPath = ttyname(slave) else { throw XCTSkip("no ttyname") }
+        let path = String(cString: cPath)
+        XCTAssertTrue(path.hasPrefix("/dev/"))
+        let name = String(path.dropFirst("/dev/".count))
+        // Backdate the node so a second-granularity mtime still shows the write.
+        let hourAgo = Date().addingTimeInterval(-3600)
+        var times = [timeval(tv_sec: Int(hourAgo.timeIntervalSince1970), tv_usec: 0),
+                     timeval(tv_sec: Int(hourAgo.timeIntervalSince1970), tv_usec: 0)]
+        guard utimes(path, &times) == 0 else { throw XCTSkip("can't backdate \(path)") }
+        let before = try XCTUnwrap(LocalProcInfo.ttyModified(name))
+        XCTAssertEqual(LocalActivityAggregator.terminalRecent(modified: before, now: Date()), false)
+        XCTAssertEqual(write(slave, "x\n", 2), 2)
+        let after = try XCTUnwrap(LocalProcInfo.ttyModified(name))
+        XCTAssertEqual(LocalActivityAggregator.terminalRecent(modified: after, now: Date()), true, "mtime \(after) after write")
+    }
+
     func testProcInfoForOwnProcess() throws {
         let me = getpid()
         XCTAssertTrue(LocalProcInfo.allPids().contains(me))

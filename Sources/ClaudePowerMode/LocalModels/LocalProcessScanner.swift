@@ -93,6 +93,9 @@ enum LocalProcInfo {
     }
 
     /// Last write to `/dev/<tty>` (terminal output). nil if unreadable.
+    /// A write to a pty updates the slave device node's mtime — checked
+    /// in-process with `openpty` (LocalModelsLiveTests); unverified for
+    /// every terminal emulator.
     static func ttyModified(_ ttyName: String) -> Date? {
         guard !ttyName.isEmpty, !ttyName.contains("/") else { return nil }
         var st = stat()

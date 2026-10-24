@@ -138,6 +138,7 @@ enum LocalProcessClassifier {
             case "serve":
                 return LocalProcess(kind: .ollamaServe, pid: p.pid, name: "Ollama")
             case "runner":
+                // Unverified: `ollama runner … --port N` per Ollama's source/docs.
                 return LocalProcess(kind: .ollamaRunner, pid: p.pid, name: "Ollama", declaredPort: port(flagValue(p.argv, "--port")))
             case "run":
                 return p.ttyName == nil ? nil : agent(p, name: "ollama run")
@@ -223,7 +224,10 @@ enum LocalProcessClassifier {
     }
 
     /// Whether Page may GET this llama-server's /slots: it must answer on
-    /// loopback, need no key and have the endpoint on.
+    /// loopback, need no key and have the endpoint on. Ollama runners are
+    /// always tried — unverified whether they expose /slots (the old
+    /// llama-server child did per its docs; the Go `ollama runner` may
+    /// not). A 404/501 there just falls back to the runner's GPU signal.
     static func shouldProbeSlots(_ p: LocalProcess) -> Bool {
         switch p.kind {
         case .ollamaRunner: return true
