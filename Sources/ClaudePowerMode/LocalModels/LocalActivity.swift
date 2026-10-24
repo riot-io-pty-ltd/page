@@ -51,3 +51,14 @@ struct LocalActivity: Equatable {
             && a.busy == b.busy && a.signal == b.signal && a.detail == b.detail
     }
 }
+
+extension LocalActivity {
+    /// One line per activity for the menu and Preferences, busy first:
+    /// "Ollama — generating · exact", "LM Studio — idle".
+    static func menuLines(_ list: [LocalActivity]) -> [String] {
+        let sorted = list.enumerated().sorted { a, b in
+            a.element.busy != b.element.busy ? a.element.busy : a.offset < b.offset
+        }.map(\.element)
+        return sorted.map { "\($0.displayName) — \($0.detail)" }
+    }
+}

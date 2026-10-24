@@ -392,6 +392,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             for b in s.backends where b.enabled {
                 addInfo(menu, backendLine(b))
             }
+            for line in LocalActivity.menuLines(s.localModels) {
+                addInfo(menu, "Local: \(line)")
+            }
             if let rl = s.activeRateLimit {
                 addInfo(menu, "⏳ \(Self.agentName(rl.backend)) rate-limited (\(rl.projectName)) — resets at \(Self.timeFormatter.string(from: rl.resetTime))")
             }
@@ -457,6 +460,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         integrationsMenu.autoenablesItems = false
         addAction(integrationsMenu, "Set up cmux…", #selector(openCmuxSetup), key: "")
         addAction(integrationsMenu, "Install agent hooks…", #selector(openHookInstaller), key: "")
+        integrationsMenu.addItem(.separator())
+        addAction(integrationsMenu, "Copy local-model diagnostics", #selector(copyLocalModelDiagnostics), key: "")
         integrations.submenu = integrationsMenu
         menu.addItem(integrations)
         addAction(menu, "Preferences…", #selector(openPreferences), key: ",")
@@ -572,6 +577,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func openHookInstaller() {
         HookInstallerWindowController.shared.show()
+    }
+
+    /// What Page sees of Ollama / LM Studio / llama.cpp / MLX and terminal
+    /// tools, for a bug report. Contains no argv, environment or prompts.
+    @objc private func copyLocalModelDiagnostics() {
+        let text = coordinator.localModelDiagnostics()
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        postSimpleNotification(title: "Local-model diagnostics copied", body: "Paste them into your bug report or message.")
     }
 
     /// Menu toggle for lid-closed-on-battery. Turning it on explains the

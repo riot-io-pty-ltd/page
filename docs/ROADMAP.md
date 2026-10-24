@@ -149,6 +149,8 @@ Legend:
 | Claude Code on the web / remote | — (local settings aren't read) | Anthropic's apps only | — | Should be skipped (Phase 0, not started) |
 | Codex CLI | rollouts **H**; hooks **H** (after `/hooks` trust) | `PermissionRequest` hook **M–H**; shared app-server **M** (Phase 1) | `Stop` hook continuation **M–H**; keystrokes after the turn ends **M** | Idle pages, rate limits, replies after the turn; approvals via hook |
 | Codex desktop app / IDE extension | rollouts **H**; hooks unverified | hook (unverified) | `Stop` hook (unverified); `codex exec resume` **L** (not visible live) | Idle pages; replies via `exec resume` |
+| Ollama, LM Studio, llama.cpp, MLX (servers and apps) | Not applicable: no prompts. Busy from `/slots` **M** (documented, not verified live) or GPU time **H** (measured) | — | — | Keep-awake while generating (power-only, nothing on the wire) |
+| opencode, aider, goose, crush, qwen-code and other terminal agents on open-weight models | Terminal output recency **M** (keep-awake only) | Deferred: opencode plugin / qwen-code hooks, or Page Terminal | Deferred to Page Terminal | Keep-awake while they work |
 
 ## What we borrow from cmux: ideas only
 

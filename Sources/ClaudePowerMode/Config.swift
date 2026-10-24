@@ -33,6 +33,11 @@ struct Config: Codable, Equatable {
     /// /opt/homebrew/bin, /usr/local/bin, npm-global, nvm).
     var codexPath: String = ""
 
+    /// Keep the Mac awake while local models generate (Ollama, LM Studio,
+    /// llama.cpp, MLX) and while terminal tools on them produce output.
+    /// Read-only and loopback-only; idle loaded models never count.
+    var localModelsEnabled: Bool = true
+
     // Paging behaviour (v2).
     /// Idle pages ("Claude finished its turn") are held back while the user
     /// has touched the Mac within this many seconds, and sent once they've
@@ -88,6 +93,7 @@ struct Config: Codable, Equatable {
         case wakeViaPmsetEnabled, holdAssertionUntilReset
         case interventionDetectionEnabled, relayEnabled, relayURL
         case codexBackendEnabled, codexPath
+        case localModelsEnabled
         case idlePageOnlyWhenAwaySeconds, idlePageDelaySeconds
         case holdAwakeForPendingPageMinutes, headlessResumeFallbackEnabled
         case keepAwakeLidClosedOnAC, keepAwakeLidClosedOnBattery
@@ -139,6 +145,7 @@ struct Config: Codable, Equatable {
         relayURL = field(.relayURL, d.relayURL)
         codexBackendEnabled = field(.codexBackendEnabled, d.codexBackendEnabled)
         codexPath = field(.codexPath, d.codexPath)
+        localModelsEnabled = field(.localModelsEnabled, d.localModelsEnabled)
         idlePageOnlyWhenAwaySeconds = field(.idlePageOnlyWhenAwaySeconds, d.idlePageOnlyWhenAwaySeconds)
         idlePageDelaySeconds = field(.idlePageDelaySeconds, d.idlePageDelaySeconds)
         holdAwakeForPendingPageMinutes = field(.holdAwakeForPendingPageMinutes, d.holdAwakeForPendingPageMinutes)

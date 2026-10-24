@@ -191,6 +191,39 @@ Codex support is real but narrower than Claude's:
 "Current implementation status" section describes what ships; note that its
 reply rule 5 predates cmux support for Codex.
 
+### Local and open-weight models
+
+Page keeps the Mac awake while a local model is **generating**, and never just
+because one is loaded. It only looks: it never starts, stops or unloads a model.
+Turn it off in Preferences ▸ Agents ▸ Local models. Menu ▸ Integrations ▸ Copy
+local-model diagnostics shows what it sees.
+
+| What you run | How Page knows it's working |
+|---|---|
+| Ollama (CLI or app, including `ollama run`) | The model runner's own `/slots` busy flag (exact); GPU time as a fallback |
+| llama.cpp `llama-server` (also inside Jan, Msty) | `/slots` (exact) on the port it listens on; GPU time when slots are off or an API key is set |
+| LM Studio (its server *and* its in-app chat), MLX (`mlx_lm.*`) | The app's Apple-GPU time (above 25% for two polls) |
+| `llama-cli`, `llamafile`, koboldcpp | GPU time, else terminal output |
+| Terminal agents on open-weight models: opencode, aider, goose, crush, qwen-code, cline, Kilo, droid, pi, `lms chat` | Output to their terminal in the last 2 minutes (covers tool runs between model calls) |
+| Claude Code / Codex pointed at Ollama or LM Studio (`ollama launch claude`, `ANTHROPIC_BASE_URL`, `codex --oss`) | Their normal session state, as for any Claude Code or Codex session |
+
+Notes:
+
+- Estimated signals stop counting after a long unbroken stretch: 3 h for GPU
+  time and 90 min for terminal output, until the process goes quiet once.
+  Exact `/slots` signals are never capped.
+- Local activity keeps an open Mac from idle-sleeping. It does not count
+  toward "lid closed on battery", and the low-battery cutoff still lets the
+  Mac sleep (sleep freezes local generation, and it carries on after wake).
+- Claude Code sessions on a non-Anthropic model are never restarted in the
+  background (headless or scheduled resume), because that would run them on
+  your Anthropic account. Page needs positive evidence the session ran on
+  Anthropic. At the battery cutoff, sessions on local models get Esc only,
+  with no summary request, to save the battery.
+- GPU time needs Apple silicon. Ollama in Docker and servers on other
+  machines aren't detected. The Ollama and LM Studio behaviour is built from
+  their documentation and source. The GPU signal was measured on an M3 Pro.
+
 ### Rate limits
 
 Page reads Claude Code's rate-limit records, including the structured reset

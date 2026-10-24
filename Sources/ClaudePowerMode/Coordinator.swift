@@ -60,6 +60,9 @@ final class Coordinator {
         /// Shown at the top of the menu when config.json is broken or had
         /// values that were corrected.
         let configProblem: String?
+        /// Local model servers, apps and terminal tools Page can see
+        /// (power-only; empty when the option is off).
+        var localModels: [LocalActivity] = []
 
         var relayConnected: Bool { relayState == .connected }
         var boosting: Bool { awake.preventIdleSleep }
@@ -84,6 +87,7 @@ final class Coordinator {
             let activeCount = sessions.filter { $0.state == .active }.count
             if boosting {
                 if activeCount > 0 { return "Keeping awake (\(activeCount) active)" }
+                if let local = localModels.first(where: \.busy) { return "Keeping awake (\(local.displayName) working)" }
                 return "Keeping awake"
             }
             if sessions.isEmpty { return "Idle" }
@@ -179,6 +183,11 @@ final class Coordinator {
     /// Last per-backend snapshots seen by a tick, for re-evaluating power
     /// without a full refresh (after a pause finishes).
     private var lastSnapshots: [AgentBackendSnapshot] = []
+    /// Local inference (Ollama, LM Studio, llama.cpp, MLX, terminal tools):
+    /// a power-only input next to the backends — nothing on the wire.
+    private let localModels = LocalModelMonitor()
+    /// The monitor's latest list (tick queue only).
+    private var lastLocalActivities: [LocalActivity] = []
     private let claudeBackend: ClaudeBackend
     private let codexBackend: CodexBackend
     /// Immutable after init, so the relay queue may read it to route replies.
@@ -300,10 +309,37 @@ final class Coordinator {
             // A regenerate the last run couldn't confirm (offline, crash).
             self.retryPendingRetirements()
             self.backends.forEach { $0.start() }
+            self.localModels.onChange = { [weak self] list in
+                self?.tickQueue.async { self?.localActivitiesChanged(list) }
+            }
+            self.localModels.setEnabled(cfg.localModelsEnabled)
             self.scheduleTimers()
             self.tick()
         }
     }
+
+    /// Keep-awake follows local generation within one monitor poll, without
+    /// waiting for the next tick.
+    private func localActivitiesChanged(_ list: [LocalActivity]) {
+        guard !isShutDown else { return }
+        let wasBusy = lastLocalActivities.contains(where: \.busy)
+        lastLocalActivities = list
+        let busy = list.filter(\.busy)
+        if busy.isEmpty != !wasBusy {
+            Logger.shared.log(busy.isEmpty ? "Local models idle" : "Local models working: \(busy.map { "\($0.displayName) (\($0.detail))" }.joined(separator: ", "))")
+        }
+        applyPower(lastPower, snapshots: lastSnapshots)
+        publishSnapshot()
+    }
+
+    /// Plain-text report of what the local-model monitor sees, for the
+    /// menu's "Copy local-model diagnostics". No argv, env or prompts.
+    func localModelDiagnostics() -> String {
+        localModels.diagnostics()
+    }
+
+    /// Thread-safe copy of what the local-model monitor sees right now.
+    var localActivities: [LocalActivity] { localModels.activities }
 
     /// Re-reads config.json and applies it. Safe from any thread; the UI
     /// copy is updated before this returns, the backends shortly after on
@@ -388,6 +424,7 @@ final class Coordinator {
             relay = nil
             backends.forEach { $0.relay = nil }
             backends.forEach { $0.shutdown() }
+            localModels.setEnabled(false)
             // Second pass: the sealed guard can't have re-enabled, but a
             // clear that failed above gets one more try.
             power.releaseAll()
@@ -456,6 +493,13 @@ final class Coordinator {
         guard cfg != old else { return }
         Logger.shared.log("Config reloaded")
         backends.forEach { $0.reloadConfig(cfg) }
+        if cfg.localModelsEnabled != old.localModelsEnabled {
+            Logger.shared.log("Local models: \(cfg.localModelsEnabled ? "watching" : "off")")
+            localModels.setEnabled(cfg.localModelsEnabled)
+            // A stopped monitor may not report the empty list; never keep
+            // the Mac awake on what it saw before it was turned off.
+            if !cfg.localModelsEnabled { lastLocalActivities = [] }
+        }
         if cfg.keepAwakeLidClosedOnBattery != old.keepAwakeLidClosedOnBattery {
             Logger.shared.log("Lid closed on battery: \(cfg.keepAwakeLidClosedOnBattery ? "enabled" : "disabled")")
             if cfg.keepAwakeLidClosedOnBattery {
@@ -802,13 +846,23 @@ final class Coordinator {
         }
     }
 
+    /// Pure: whether agents or local models want the Mac kept from idle
+    /// sleep (before the low-battery directive is applied).
+    static func wantsKeepAwake(_ snapshots: [AgentBackendSnapshot], local: [LocalActivity]) -> Bool {
+        snapshots.contains { $0.wantsPowerAssertion } || local.contains(where: \.busy)
+    }
+
     /// Decides and applies this tick's assertions and the lid-closed-on-
     /// battery flag. Called after every tick and whenever battery state
     /// changes between ticks.
     private func applyPower(_ p: PowerSnapshot, snapshots: [AgentBackendSnapshot]) {
         guard !isTerminating else { return }
         let cfg = tickConfig
-        let agentsWant = snapshots.contains { $0.wantsPowerAssertion }
+        // Local generation keeps an open Mac from idle-sleeping. It never
+        // counts as `agentsWorking` (lid-closed on battery) and, like agents,
+        // is overridden by the low-battery directive below.
+        let localBusy = lastLocalActivities.filter(\.busy)
+        let agentsWant = Self.wantsKeepAwake(snapshots, local: lastLocalActivities)
         let boost: Bool
         switch battery.boostDirective(p) {
         case .followAgents: boost = agentsWant
@@ -823,6 +877,8 @@ final class Coordinator {
                 reason = "Low battery — giving agents time to write their summary (\(batteryText))"
             } else if let rl = mergedRateLimit(snapshots) {
                 reason = "Holding through rate-limit reset (\(rl.projectName), \(batteryText))"
+            } else if !snapshots.contains(where: { $0.wantsPowerAssertion }), let local = localBusy.first {
+                reason = "Local model working — \(local.displayName), \(local.detail) (\(batteryText))"
             } else {
                 reason = "Agent active (\(batteryText))"
             }
@@ -914,7 +970,7 @@ final class Coordinator {
                 let grace = Int(tickConfig.lowBatteryPauseGraceSeconds)
                 onBatteryNotice?(BatteryNotice(
                     title: "Battery \(percent)% — paused \(entries.count) session\(entries.count == 1 ? "" : "s")",
-                    body: "Asked \(names) to stop and summarise. The Mac can sleep in about \(grace) s — plug in to keep going."))
+                    body: "Asked \(names) to pause (with a short summary, except sessions on local models). The Mac can sleep in about \(grace) s — plug in to keep going."))
 
             case let .recovered(sessions, resume, _, closePageIds):
                 Logger.shared.log("Power back (battery \(p.percent)%, onAC=\(p.onAC)) — \(sessions.count) paused session(s), resume=\(resume)")
@@ -1185,7 +1241,8 @@ final class Coordinator {
             pendingInterventions: snapshots.flatMap { $0.pendingInterventions },
             relayState: relayState,
             backends: infos,
-            configProblem: configProblem
+            configProblem: configProblem,
+            localModels: lastLocalActivities
         )
         onStateChange?(snap)
     }

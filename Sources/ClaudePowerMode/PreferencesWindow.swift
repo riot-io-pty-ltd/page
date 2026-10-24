@@ -26,6 +26,7 @@ struct PreferencesForm: Equatable {
     var resumeAfterBatteryRecovery: Bool
     // Agents
     var codexBackendEnabled: Bool
+    var localModelsEnabled: Bool
     var codexPath: String
     // Rate limits
     var rateLimitWatcherEnabled: Bool
@@ -54,6 +55,7 @@ struct PreferencesForm: Equatable {
         lowBatteryPauseGraceSeconds = c.lowBatteryPauseGraceSeconds
         resumeAfterBatteryRecovery = c.resumeAfterBatteryRecovery
         codexBackendEnabled = c.codexBackendEnabled
+        localModelsEnabled = c.localModelsEnabled
         codexPath = c.codexPath
         rateLimitWatcherEnabled = c.rateLimitWatcherEnabled
         autoResumeEnabled = c.autoResumeEnabled
@@ -109,6 +111,7 @@ struct PreferencesForm: Equatable {
         if lowBatteryPauseGraceSeconds != baseline.lowBatteryPauseGraceSeconds { c.lowBatteryPauseGraceSeconds = lowBatteryPauseGraceSeconds }
         if resumeAfterBatteryRecovery != baseline.resumeAfterBatteryRecovery { c.resumeAfterBatteryRecovery = resumeAfterBatteryRecovery }
         if codexBackendEnabled != baseline.codexBackendEnabled { c.codexBackendEnabled = codexBackendEnabled }
+        if localModelsEnabled != baseline.localModelsEnabled { c.localModelsEnabled = localModelsEnabled }
         if codexPath != baseline.codexPath { c.codexPath = codexPath.trimmingCharacters(in: .whitespacesAndNewlines) }
         if rateLimitWatcherEnabled != baseline.rateLimitWatcherEnabled { c.rateLimitWatcherEnabled = rateLimitWatcherEnabled }
         if autoResumeEnabled != baseline.autoResumeEnabled { c.autoResumeEnabled = autoResumeEnabled }
@@ -169,6 +172,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
 
     // Agents
     private let codexToggle = NSButton(checkboxWithTitle: "Watch Codex sessions", target: nil, action: nil)
+    private let localModelsToggle = NSButton(checkboxWithTitle: "Keep the Mac awake while local models are working (Ollama, LM Studio, llama.cpp, MLX)", target: nil, action: nil)
+    private let localModelsStatus = NSTextField(wrappingLabelWithString: "")
     private let codexPathField = NSTextField(string: "")
     private let codexPathStatus = NSTextField(wrappingLabelWithString: "")
 
@@ -417,6 +422,18 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         codexPathStatus.font = .systemFont(ofSize: 11)
         codexPathStatus.preferredMaxLayoutWidth = 540
         s.addArrangedSubview(codexPathStatus)
+
+        let localHeader = NSTextField(labelWithString: "Local models")
+        localHeader.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        s.addArrangedSubview(localHeader)
+        localModelsToggle.target = self
+        localModelsToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(localModelsToggle)
+        s.addArrangedSubview(hint("Only while a model is actually generating — a loaded but idle model never keeps the Mac awake. Terminal tools (opencode, aider, goose, crush, ollama run, llama-cli…) count while they're producing output. Page only looks: it never starts, stops or unloads models. Claude Code and Codex pointed at Ollama or LM Studio are detected automatically, and Page won't restart them in the background on your Anthropic account."))
+        localModelsStatus.font = .systemFont(ofSize: 11)
+        localModelsStatus.textColor = .secondaryLabelColor
+        localModelsStatus.preferredMaxLayoutWidth = 540
+        s.addArrangedSubview(localModelsStatus)
         return s
     }
 
@@ -506,6 +523,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         graceSlider.doubleValue = f.lowBatteryPauseGraceSeconds
         resumeAfterRecoveryToggle.state = f.resumeAfterBatteryRecovery ? .on : .off
         codexToggle.state = f.codexBackendEnabled ? .on : .off
+        localModelsToggle.state = f.localModelsEnabled ? .on : .off
         codexPathField.stringValue = f.codexPath
         rateLimitWatcherToggle.state = f.rateLimitWatcherEnabled ? .on : .off
         autoResumeToggle.state = f.autoResumeEnabled ? .on : .off
@@ -537,6 +555,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         f.lowBatteryPauseGraceSeconds = graceSlider.doubleValue.rounded()
         f.resumeAfterBatteryRecovery = resumeAfterRecoveryToggle.state == .on
         f.codexBackendEnabled = codexToggle.state == .on
+        f.localModelsEnabled = localModelsToggle.state == .on
         f.codexPath = codexPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         f.rateLimitWatcherEnabled = rateLimitWatcherToggle.state == .on
         f.autoResumeEnabled = autoResumeToggle.state == .on
@@ -563,6 +582,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         graceSlider.isEnabled = pausing
         resumeAfterRecoveryToggle.isEnabled = pausing
         refreshHelperLabel()
+        refreshLocalModelsStatus()
         activityWindowLabel.stringValue = Self.duration(activityWindowSlider.doubleValue)
         awayLabel.stringValue = Self.duration(awaySlider.doubleValue, zero: "Always")
         idleDelayLabel.stringValue = Self.duration(idleDelaySlider.doubleValue, zero: "Now")
@@ -631,6 +651,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
             helperStatusLabel.textColor = .secondaryLabelColor
             helperInstallButton.isHidden = true
         }
+    }
+
+    /// What the local-model monitor sees right now (as of opening the
+    /// window or touching a control).
+    private func refreshLocalModelsStatus() {
+        guard localModelsToggle.state == .on else {
+            localModelsStatus.stringValue = "Off."
+            return
+        }
+        let lines = LocalActivity.menuLines(coordinator.localActivities)
+        localModelsStatus.stringValue = lines.isEmpty ? "No local model servers or tools running right now." : lines.joined(separator: "\n")
     }
 
     private func checkHelper(refresh: Bool) {
