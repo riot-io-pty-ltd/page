@@ -4,6 +4,12 @@ final class Logger {
     static let shared = Logger()
 
     static let logURL: URL = {
+        // Under XCTest, log to a temp file: tests drive fakes that "fail"
+        // pmset, launchctl and injections on purpose, and those lines in the
+        // user's real log read like genuine problems.
+        if NSClassFromString("XCTestCase") != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("ClaudePowerMode-tests.log")
+        }
         let logs = FileManager.default
             .urls(for: .libraryDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Logs", isDirectory: true)
