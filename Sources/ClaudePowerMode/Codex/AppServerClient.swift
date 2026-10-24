@@ -331,17 +331,28 @@ final class AppServerClient: @unchecked Sendable {
         }
     }
 
-    /// Blocking read loop. `body` returns false to stop early.
-    private static func drain(_ handle: FileHandle, _ body: (Data) -> Bool) {
-        while true {
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: 64 * 1024)
-            } catch {
-                return
+    /// Blocking read loop: hands `body` whatever bytes have arrived, as soon
+    /// as they arrive. `body` returns false to stop early. Returns at EOF or
+    /// on a read error.
+    ///
+    /// Uses read(2) directly. `FileHandle.read(upToCount:)` on a pipe keeps
+    /// reading until it has `count` bytes or hits EOF, so a 200-byte reply
+    /// from a child that stays alive is never delivered; `availableData`
+    /// raises an Objective-C exception on read errors.
+    static func drain(_ handle: FileHandle, _ body: (Data) -> Bool) {
+        // The handle owns the fd: keep it alive for the whole loop.
+        withExtendedLifetime(handle) {
+            let fd = handle.fileDescriptor
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                let n = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    return
+                }
+                if n == 0 { return }   // EOF
+                if !body(Data(buffer[0..<n])) { return }
             }
-            guard let chunk, !chunk.isEmpty else { return }   // EOF
-            if !body(chunk) { return }
         }
     }
 
