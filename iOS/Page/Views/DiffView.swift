@@ -295,11 +295,17 @@ struct NewSessionView: View {
         case .typed(let detail), .queued(let detail):
             VStack(alignment: .leading, spacing: 4) {
                 Label(detail ?? "Started", systemImage: "checkmark.circle").foregroundStyle(Theme.Colour.success)
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Opening it here as soon as it appears… On your Mac it's a new cmux workspace.")
+                if sessions.startWaitExpired {
+                    Text("Started, but it hasn't shown up here yet. Look for it in Sessions, or in cmux on your Mac.")
                         .font(Theme.Font.caption12)
                         .foregroundStyle(Theme.Colour.textMuted)
+                } else {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Opening it here as soon as it appears… On your Mac it's a new cmux workspace.")
+                            .font(Theme.Font.caption12)
+                            .foregroundStyle(Theme.Colour.textMuted)
+                    }
                 }
             }
         case .refused(_, let message), .failed(let message):

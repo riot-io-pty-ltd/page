@@ -36,6 +36,8 @@ final class SessionStore: ObservableObject {
     @Published private(set) var startFoldersError: String?
     /// A session started from the phone that has now appeared in the list.
     @Published private(set) var startedSessionId: String?
+    /// The started session didn't show up within 90 s.
+    @Published private(set) var startWaitExpired = false
     /// The start waiting for its session to show up (folder, sessions that
     /// existed before, when).
     private var pendingStart: (folder: String, existing: Set<String>, at: Date)?
@@ -343,6 +345,8 @@ final class SessionStore: ObservableObject {
                 return
             }
             guard var cmd = commands[r.clientId] else { return }
+            // A refused start won't create a session: stop waiting for one.
+            if cmd.kind == .start, !r.ok { pendingStart = nil }
             cmd.state = cmd.state.applying(r, agent: agentName(cmd.sessionId))
             commands[r.clientId] = cmd
             print("[SessionStore] \(cmd.kind.rawValue) \(r.clientId.prefix(8)) -> \(r.code.rawValue)\(r.reason.map { "/\($0)" } ?? "")")
@@ -461,7 +465,15 @@ final class SessionStore: ObservableObject {
         }
         record(clientId: clientId, sessionId: key, kind: .start, text: prompt, state: .sending)
         startedSessionId = nil
-        pendingStart = (folder, Set(sessions.map(\.id)), Date())
+        startWaitExpired = false
+        let at = Date()
+        pendingStart = (folder, Set(sessions.map(\.id)), at)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 90_000_000_000)
+            guard let self, let p = self.pendingStart, p.at == at else { return }
+            self.pendingStart = nil
+            self.startWaitExpired = true
+        }
         deliver(body, clientId: clientId, op: "start")
         return clientId
     }
