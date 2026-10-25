@@ -861,7 +861,8 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .failure(let f):
             return .blocked("unknown", f.detail)
         case .success(let s):
-            guard s.tty != nil else { return .blocked("unknown", "This session isn't running in a terminal Page can type into", provider: s.provider) }
+            // No terminal: a headless run (claude -p, an SDK script).
+            guard s.tty != nil else { return .blocked("background", "A background run with no terminal — nothing to type into", provider: s.provider) }
             return claudeHostInfo(resolveHost(s, table), provider: s.provider, cmuxBlocker: cmuxBlocker)
         }
     }

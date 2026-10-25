@@ -120,7 +120,7 @@ When it changes, the phone resets its `seq` tracking.
     "title": "mac-on-claude-code",
     "cwd": "~/projects/mac-on-claude-code",
     "state": "idle|active|waitingOnUser|waitingOnApproval|rateLimited|interrupted|failed|offline",
-    "host": "cmux" | "tmux" | "Terminal" | "iTerm" | "Ghostty" | "VS Code" | "desktop" | "unknown",
+    "host": "cmux" | "tmux" | "Terminal" | "iTerm" | "Ghostty" | "VS Code" | "desktop" | "background" | "unknown",
     "canType": true,
     "typeBlocker": "Page can't type into Ghostty yet",
     "canInterrupt": true,

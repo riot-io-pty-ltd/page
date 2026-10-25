@@ -672,7 +672,9 @@ final class SessionHostMappingTests: XCTestCase {
         XCTAssertTrue(LiveSessionBackends.claudeHost(candidates: [a], table: [], resolveHost: { _, _ in tmux }).canType)
         XCTAssertFalse(LiveSessionBackends.claudeHost(candidates: [a, b], table: [], resolveHost: { _, _ in tmux }).canType,
                        "open in two terminals: can't tell which")
-        XCTAssertFalse(LiveSessionBackends.claudeHost(candidates: [headless], table: [], resolveHost: { _, _ in tmux }).canType)
+        let bg = LiveSessionBackends.claudeHost(candidates: [headless], table: [], resolveHost: { _, _ in tmux })
+        XCTAssertFalse(bg.canType)
+        XCTAssertEqual(bg.host, "background", "claude -p / SDK runs show as background, not \"Unknown host\"")
     }
 
     func testCodexHosts() {
