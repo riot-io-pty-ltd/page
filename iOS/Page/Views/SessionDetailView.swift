@@ -25,11 +25,24 @@ struct SessionDetailView: View {
     @State private var atBottom = true
     @State private var scrollRequest = 0
     @State private var pane: Pane = .conversation
+    @State private var openRun: OpenRun?
 
-    /// Conversation (the transcript) or Terminal (the Mac's mirror of the
-    /// session's screen, footer included). Terminal appears only once the
-    /// Mac has sent a screen: older Macs, Terminal.app and iTerm2 don't.
-    enum Pane: String, CaseIterable { case conversation = "Conversation", terminal = "Terminal" }
+    struct OpenRun: Identifiable, Equatable { let id: String }
+
+    /// Conversation (the transcript), Terminal (the Mac's mirror of the
+    /// session's screen, footer included) or Workflows (its dynamic
+    /// workflows). Terminal and Workflows appear only once the Mac has sent
+    /// them: older Macs don't, and Terminal.app / iTerm2 have no mirror.
+    enum Pane: String, CaseIterable { case conversation = "Conversation", terminal = "Terminal", workflows = "Workflows" }
+
+    private var runs: [WorkflowRun] { sessions.workflows[sessionId] ?? [] }
+
+    private var panes: [Pane] {
+        var out: [Pane] = [.conversation]
+        if sessions.screens[sessionId] != nil { out.append(.terminal) }
+        if !runs.isEmpty { out.append(.workflows) }
+        return out
+    }
 
     private static let watchInterval: UInt64 = 30
 
@@ -53,19 +66,24 @@ struct SessionDetailView: View {
                 if let s = session {
                     header(s)
                     banners(s)
-                    if let screen = sessions.screens[sessionId] {
+                    if panes.count > 1 {
                         Picker("View", selection: $pane) {
-                            ForEach(Pane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                            ForEach(panes, id: \.self) { p in
+                                Text(p == .workflows ? "Workflows · \(runs.filter(\.isRunning).count)" : p.rawValue).tag(p)
+                            }
                         }
                         .pickerStyle(.segmented)
                         .padding(.horizontal, Theme.Space.l)
                         .padding(.bottom, Theme.Space.s)
-                        if pane == .terminal {
-                            TerminalMirror(screen: screen)
-                        } else {
-                            transcript(s)
+                    }
+                    switch panes.contains(pane) ? pane : .conversation {
+                    case .terminal:
+                        if let screen = sessions.screens[sessionId] {
+                            TerminalMirror(screen: screen, runs: runs) { openRun = OpenRun(id: $0.id) }
                         }
-                    } else {
+                    case .workflows:
+                        WorkflowList(runs: runs) { openRun = OpenRun(id: $0.id) }
+                    case .conversation:
                         transcript(s)
                     }
                     bottomZone(s)
@@ -87,6 +105,10 @@ struct SessionDetailView: View {
             }
         }
         .onDisappear { sessions.watch(nil) }
+        .sheet(item: $openRun) { item in
+            WorkflowRunView(sessionId: sessionId, runId: item.id)
+                .environmentObject(sessions)
+        }
         .sheet(item: $presentedPage) { item in
             // "Open session" there just comes back here.
             ReplyView(interventionId: item.id, onOpenSession: { _ in presentedPage = nil })
@@ -567,43 +589,85 @@ struct SessionDetailView: View {
 
 // MARK: - Terminal mirror
 
-/// The session's screen as the Mac last read it: monospace, unwrapped
-/// (scrolls sideways), pinned to the bottom where the footer is.
+/// The session's screen as the Mac last read it, in monospace, pinned to
+/// the bottom where the footer is. Wrap (the default, remembered) folds long
+/// lines to the screen's width so the right-hand columns — a workflow's
+/// counts, time and tokens — show without scrolling sideways; off, lines stay
+/// as on the Mac and the view scrolls both ways. Rows that are only rules
+/// (────) never wrap. A row naming one of the session's workflows opens it.
 struct TerminalMirror: View {
     let screen: SessionScreen
+    var runs: [WorkflowRun] = []
+    var onOpenRun: (WorkflowRun) -> Void = { _ in }
+    @AppStorage("page.terminal.wrap") private var wrap = true
+
+    private static let font = Font.system(size: 11, design: .monospaced)
 
     var body: some View {
+        let links = TerminalRunLinks.match(lines: screen.lines, runs: runs)
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
-                ScrollView([.vertical, .horizontal]) {
+                ScrollView(wrap ? [.vertical] : [.vertical, .horizontal]) {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(screen.lines.enumerated()), id: \.offset) { i, line in
-                            Text(line.isEmpty ? " " : line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(Theme.Colour.text)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                                .id(i)
+                            lineView(line, run: links[i]).id(i)
                         }
                     }
                     .padding(Theme.Space.m)
+                    .frame(maxWidth: wrap ? .infinity : nil, alignment: .leading)
                     .textSelection(.enabled)
                 }
                 .background(Theme.Colour.surfaceInset)
                 .onAppear { proxy.scrollTo(screen.lines.count - 1, anchor: .bottomLeading) }
-                .onChange(of: screen.lines) { _, lines in
-                    proxy.scrollTo(lines.count - 1, anchor: .bottomLeading)
+                .onChange(of: screen.lines) { _, lines in proxy.scrollTo(lines.count - 1, anchor: .bottomLeading) }
+                .onChange(of: wrap) { _, _ in proxy.scrollTo(screen.lines.count - 1, anchor: .bottomLeading) }
+            }
+            HStack {
+                TimelineView(.periodic(from: .now, by: 5)) { context in
+                    Text("Mirrored from your Mac · \(Self.age(screen.at, now: context.date))")
+                        .font(Theme.Font.caption12)
+                        .foregroundStyle(Theme.Colour.textMuted)
                 }
+                Spacer()
+                Toggle(isOn: $wrap) {
+                    Label("Wrap", systemImage: "text.word.spacing")
+                        .font(Theme.Font.caption12)
+                }
+                .toggleStyle(.button)
+                .controlSize(.small)
+                .accessibilityHint("Folds long lines to fit the screen")
             }
-            TimelineView(.periodic(from: .now, by: 5)) { context in
-                Text("Mirrored from your Mac · \(Self.age(screen.at, now: context.date))")
-                    .font(Theme.Font.caption12)
-                    .foregroundStyle(Theme.Colour.textMuted)
-                    .padding(.vertical, Theme.Space.xs)
-            }
+            .padding(.horizontal, Theme.Space.l)
+            .padding(.vertical, Theme.Space.xs)
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Terminal: " + screen.lines.suffix(12).joined(separator: ", "))
+    }
+
+    @ViewBuilder
+    private func lineView(_ line: String, run: WorkflowRun?) -> some View {
+        let isRule = Self.isRule(line)
+        let text = Text(line.isEmpty ? " " : line)
+            .font(Self.font)
+            .foregroundStyle(run == nil ? Theme.Colour.text : Theme.Colour.kindUserInput)
+            .lineLimit(wrap && !isRule ? nil : 1)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: !wrap, vertical: wrap)
+            .frame(maxWidth: wrap ? .infinity : nil, alignment: .leading)
+        if let run {
+            Button { onOpenRun(run) } label: { text.contentShape(Rectangle()) }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Workflow \(run.name), \(run.progressLabel)")
+                .accessibilityHint("Opens the workflow")
+        } else {
+            text
+        }
+    }
+
+    /// A row of only box-drawing / dash characters (and spaces).
+    static func isRule(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.count >= 8 && trimmed.unicodeScalars.allSatisfy {
+            (0x2500...0x257F).contains($0.value) || $0 == "-" || $0 == "=" || $0 == "_"
+        }
     }
 
     static func age(_ at: Date, now: Date) -> String {

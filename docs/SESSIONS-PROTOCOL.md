@@ -189,6 +189,37 @@ When it changes, the phone resets its `seq` tracking.
 - Per-session `seq` on the phone, like transcripts. A phone that doesn't
   know the kind ignores it (§4), so older apps are unaffected.
 
+### `workflows`
+
+```json
+{ "kind": "workflows", "boot": "…", "seq": 15, "ts": …, "sessionId": "…",
+  "runs": [{ "id": "wf_5efbb134-a4c", "name": "design-pass-ch1-8-opus", "summary": "…",
+             "status": "running", "phase": "Fix B", "done": 28, "total": 30,
+             "startedAt": 1761290000000, "endedAt": null, "tokens": null,
+             "agents": [{ "id": "a501def47993d54be", "label": "ch5: fix", "phase": "Fix B",
+                          "state": "running", "lastActivityAt": 1761299990000 }] }] }
+```
+
+- A watched Claude session's dynamic workflows, read from the files Claude
+  Code keeps beside the session transcript (`<session>/subagents/workflows/
+  <runId>/journal.jsonl`, `<session>/workflows/<runId>.json`, and the
+  Workflow tool's launch record in the session transcript for the name and
+  summary). Read-only; the terminal is never touched.
+- `status`: `running`, `completed`, `failed`, `killed`, or `stalled` (no end
+  record and nothing written for 20 min). `done`/`total` count the journal's
+  finished/started agents, as the footer does.
+- Sent while a phone watches the session (or one of its agents), re-checked
+  every 3 s, sent only when changed and once per `watch`. A session that
+  never ran a workflow sends nothing.
+- Caps: 12 runs (running first, then finished in the last 24 h), 100 agents
+  per run (running first), name 80, summary 300, label 160, phase 60
+  characters; summary and labels redacted; plaintext 64 KiB (agents trimmed
+  from the largest runs to fit).
+
+A `transcript` may carry `runId` and `agentId`: it is then that workflow
+agent's transcript (same shape and caps), sent while a viewer watches the
+agent (§5 `watch`). The phone keys it apart from the session's own.
+
 ### `result`
 
 ```json
@@ -208,7 +239,7 @@ phone clock) and `viewer` (a random id per app install, persisted).
 
 | op | Fields | Mac behaviour |
 |---|---|---|
-| `watch` | `sessionId` (string, or null to stop viewing) | Sets the viewer's watched session (one per viewer) with a 90 s TTL. The phone re-sends it every 30 s while the detail screen is visible, and sends null when leaving it. Sends a `transcript` immediately. No `result` is sent. |
+| `watch` | `sessionId` (string, or null to stop viewing); optional `runId` + `agentId` | Sets the viewer's watched session (one per viewer) with a 90 s TTL. The phone re-sends it every 30 s while the detail screen is visible, and sends null when leaving it. Sends a `transcript` immediately. With `runId` and `agentId` (plain ids: letters, digits, `_`, `-`, at most 64; anything else is ignored and the session is watched instead) the viewer is on that workflow agent's screen: the Mac sends the agent's transcript instead of the session's, and stops reading the session's screen. No `result` is sent. |
 | `refresh` | — | Sends a `list` now, plus the `transcript` for this viewer's watched session. No `result`. |
 | `input` | `sessionId`, `text` (1–8000 characters after trimming) | Runs the input gate, then delivers. Always replies with a `result`. |
 | `interrupt` | `sessionId` | Presses Esc in the session (`sendInterrupt`). Only when `canInterrupt` and state is `active`. Always replies with a `result`. |
@@ -311,6 +342,7 @@ replies `refused/interrupt_unsupported`. Claude and Codex both treat Esc as
 | list throttle / liveness refresh | 1 s / 20 s |
 | transcript throttle | 1.5 s per session |
 | screen lines / line / plaintext / interval | 80 / 300 chars / 32 KiB / 2.5 s |
+| workflows runs / agents per run / plaintext / interval | 12 / 100 / 64 KiB / 3 s |
 | watch TTL / phone re-send | 90 s / 30 s |
 | command freshness / replay window | ±5 min / 15 min, 2000 ids |
 | phone result timeout | 20 s |

@@ -193,7 +193,11 @@ at any time, not only when a page is open.
   it is on the Mac, including Claude Code's footer (background workflows,
   shells, sub-agents). tmux and cmux sessions only. It can show tool
   output, so every line is redacted first, and the Mac reads it only while
-  that session is open on your phone.
+  that session is open on your phone. Wrap folds long lines to fit.
+- **Workflows.** A session running dynamic workflows gets a Workflows tab
+  (and the footer rows in Terminal are tappable): each run's progress,
+  phase and agents, and tapping an agent shows what it's doing. Read from
+  the files Claude Code keeps; read-only.
 - **Typing goes through the same gate as replies.** Claude Code gets your
   text as a message (Enter), queued behind the current step when it's
   busy, never Esc and never a background resume. Page refuses while a

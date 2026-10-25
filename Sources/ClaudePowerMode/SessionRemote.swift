@@ -65,6 +65,9 @@ struct SessionCommand: Equatable {
     let viewer: String?
     let sessionId: String?
     let text: String?
+    /// `watch` only: a workflow agent inside the session (safe ids only).
+    var runId: String? = nil
+    var agentId: String? = nil
 
     static let maxIdLength = 128
 
@@ -77,8 +80,11 @@ struct SessionCommand: Equatable {
               let ts = (obj["ts"] as? NSNumber)?.doubleValue, ts.isFinite else { return nil }
         let viewer = (obj["viewer"] as? String).flatMap { $0.isEmpty || $0.count > maxIdLength ? nil : $0 }
         let sessionId = (obj["sessionId"] as? String).flatMap { $0.isEmpty || $0.count > 256 ? nil : $0 }
-        return SessionCommand(op: op, clientId: clientId, ts: ts, viewer: viewer, sessionId: sessionId,
-                              text: obj["text"] as? String)
+        var cmd = SessionCommand(op: op, clientId: clientId, ts: ts, viewer: viewer, sessionId: sessionId,
+                                 text: obj["text"] as? String)
+        cmd.runId = (obj["runId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
+        cmd.agentId = (obj["agentId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
+        return cmd
     }
 }
 
@@ -147,14 +153,27 @@ struct SessionWatchers {
     static let ttl: TimeInterval = 90
     static let maxViewers = 32
 
-    private var byViewer: [String: (sessionId: String, expires: Date)] = [:]
+    /// A workflow agent the viewer opened inside a session.
+    struct AgentRef: Hashable {
+        let sessionId: String
+        let runId: String
+        let agentId: String
+    }
 
-    mutating func set(viewer: String, sessionId: String?, now: Date) {
+    private var byViewer: [String: (sessionId: String, agent: AgentRef?, expires: Date)] = [:]
+
+    /// `runId` + `agentId` (both safe ids, else ignored): the viewer is on
+    /// that workflow agent's screen rather than the session's.
+    mutating func set(viewer: String, sessionId: String?, runId: String? = nil, agentId: String? = nil, now: Date) {
         guard let sessionId else {
             byViewer.removeValue(forKey: viewer)
             return
         }
-        byViewer[viewer] = (sessionId, now.addingTimeInterval(Self.ttl))
+        var agent: AgentRef?
+        if let runId, let agentId, SessionWorkflows.isSafeId(runId), SessionWorkflows.isSafeId(agentId) {
+            agent = AgentRef(sessionId: sessionId, runId: runId, agentId: agentId)
+        }
+        byViewer[viewer] = (sessionId, agent, now.addingTimeInterval(Self.ttl))
         if byViewer.count > Self.maxViewers, let oldest = byViewer.min(by: { $0.value.expires < $1.value.expires })?.key {
             byViewer.removeValue(forKey: oldest)
         }
@@ -169,8 +188,24 @@ struct SessionWatchers {
         return w.sessionId
     }
 
+    /// Sessions a viewer has open (its transcript, screen and workflows).
     func watched(now: Date) -> Set<String> {
+        Set(byViewer.values.filter { $0.expires > now && $0.agent == nil }.map(\.sessionId))
+    }
+
+    /// Sessions whose workflows someone is looking at: on the session's
+    /// screen or inside one of its agents.
+    func watchedAny(now: Date) -> Set<String> {
         Set(byViewer.values.filter { $0.expires > now }.map(\.sessionId))
+    }
+
+    func agents(now: Date) -> Set<AgentRef> {
+        Set(byViewer.values.filter { $0.expires > now }.compactMap(\.agent))
+    }
+
+    func agent(forViewer viewer: String, now: Date) -> AgentRef? {
+        guard let w = byViewer[viewer], w.expires > now else { return nil }
+        return w.agent
     }
 }
 
@@ -305,6 +340,13 @@ final class SessionRemote {
     private var lastScreenCheck: [String: Date] = [:]
     private var lastScreenBody: [String: [String]] = [:]
     private var screensReading = Set<String>()
+    private let workflowScanner = SessionWorkflowScanner()   // probe queue only
+    private var lastWorkflowCheck: [String: Date] = [:]
+    private var lastWorkflowBody: [String: Data] = [:]
+    private var workflowsReading = Set<String>()
+    private var lastAgentCheck: [SessionWatchers.AgentRef: Date] = [:]
+    private var lastAgentBody: [SessionWatchers.AgentRef: Data] = [:]
+    private var lastAgentStamp: [SessionWatchers.AgentRef: FileStamp] = [:]
     private var timer: DispatchSourceTimer?
     private var macName: String?
     private var stopped = false
@@ -548,6 +590,75 @@ final class SessionRemote {
             lastScreenBody[sid] = nil
             lastScreenCheck[sid] = nil
         }
+        let workflowSessions = watchers.watchedAny(now: t)
+        for sid in workflowSessions where phones > 0 && !workflowsReading.contains(sid)
+            && lastWorkflowCheck[sid].map({ t.timeIntervalSince($0) >= SessionWorkflows.interval }) ?? true {
+            readWorkflows(sid, at: t)
+        }
+        for sid in Set(lastWorkflowBody.keys).union(lastWorkflowCheck.keys) where !workflowSessions.contains(sid) {
+            lastWorkflowBody[sid] = nil
+            lastWorkflowCheck[sid] = nil
+        }
+        let agents = watchers.agents(now: t)
+        for agent in agents
+        where SessionsSchedule.transcriptDue(phones: phones, lastCheckedAt: lastAgentCheck[agent], now: t) {
+            sendAgentTranscript(agent, force: false, at: t)
+        }
+        for agent in Set(lastAgentBody.keys).union(lastAgentCheck.keys) where !agents.contains(agent) {
+            lastAgentBody[agent] = nil
+            lastAgentCheck[agent] = nil
+            lastAgentStamp[agent] = nil
+        }
+    }
+
+    /// A watched Claude session's workflows, read on the probe queue (file
+    /// reads only) and sent when they changed.
+    private func readWorkflows(_ sessionId: String, at t: Date) {
+        lastWorkflowCheck[sessionId] = t
+        guard let s = sessions.first(where: { $0.sessionId == sessionId }), s.backend == .claude,
+              let file = backends.transcriptFile(for: s) else { return }
+        workflowsReading.insert(sessionId)
+        let scanner = workflowScanner
+        probeQueue.async { [weak self] in
+            let runs = scanner.runs(transcript: file.path)
+            guard let self else { return }
+            self.queue.async {
+                self.workflowsReading.remove(sessionId)
+                guard !self.stopped, self.phones > 0, self.watchers.watchedAny(now: self.now()).contains(sessionId) else { return }
+                // A session that never ran a workflow sends nothing (an
+                // empty list only once it had some, so the phone clears it).
+                if runs.isEmpty && self.lastWorkflowBody[sessionId] == nil { return }
+                let body = (try? JSONSerialization.data(withJSONObject: runs.map(\.jsonObject), options: [.sortedKeys])) ?? Data()
+                guard body != self.lastWorkflowBody[sessionId] else { return }
+                var head = self.header("workflows", at: self.now())
+                head["sessionId"] = sessionId
+                guard let data = SessionWorkflows.plaintext(header: head, runs: runs), self.seal(data) else { return }
+                self.lastWorkflowBody[sessionId] = body
+            }
+        }
+    }
+
+    /// A workflow agent's transcript, as a `transcript` frame carrying
+    /// `runId` and `agentId`.
+    private func sendAgentTranscript(_ agent: SessionWatchers.AgentRef, force: Bool, at t: Date) {
+        lastAgentCheck[agent] = t
+        guard phones > 0, let s = sessions.first(where: { $0.sessionId == agent.sessionId }), s.backend == .claude,
+              let file = backends.transcriptFile(for: s),
+              let path = SessionWorkflows.agentTranscript(transcript: file.path, runId: agent.runId, agentId: agent.agentId),
+              let stamp = Self.fileStamp(path) else { return }
+        // Agent transcripts run to tens of MB: unchanged, nothing is read.
+        if !force && stamp == lastAgentStamp[agent] { return }
+        lastAgentStamp[agent] = stamp
+        guard let snapshot = SessionTranscript.read(path: path, format: .claude) else { return }
+        let body = (try? JSONSerialization.data(withJSONObject: ["e": snapshot.entries.map(\.jsonObject), "t": snapshot.truncated],
+                                                options: [.sortedKeys])) ?? Data()
+        if !force && body == lastAgentBody[agent] { return }
+        var head = header("transcript", at: t)
+        head["sessionId"] = agent.sessionId
+        head["runId"] = agent.runId
+        head["agentId"] = agent.agentId
+        guard let data = SessionTranscript.plaintext(header: head, snapshot: snapshot), seal(data) else { return }
+        lastAgentBody[agent] = body
     }
 
     /// Reads a watched session's screen on the probe queue and sends it
@@ -786,19 +897,27 @@ final class SessionRemote {
         switch cmd.op {
         case "watch":
             guard let viewer = cmd.viewer else { return }
-            watchers.set(viewer: viewer, sessionId: cmd.sessionId, now: t)
-            if let id = cmd.sessionId {
+            watchers.set(viewer: viewer, sessionId: cmd.sessionId, runId: cmd.runId, agentId: cmd.agentId, now: t)
+            if let agent = watchers.agent(forViewer: viewer, now: t) {
+                sendAgentTranscript(agent, force: true, at: t)
+                lastWorkflowBody[agent.sessionId] = nil
+            } else if let id = cmd.sessionId {
                 sendTranscript(id, force: true, at: t)
                 lastScreenBody[id] = nil   // the next read is sent even if unchanged
+                lastWorkflowBody[id] = nil
             }
         case "refresh":
             if phones > 0 {
                 let rows = enabled ? currentRows(t) : []
                 sendList(rows, body: Self.listBody(rows, enabled: enabled), at: t)
             }
-            if let viewer = cmd.viewer, let id = watchers.session(forViewer: viewer, now: t) {
+            if let viewer = cmd.viewer, let agent = watchers.agent(forViewer: viewer, now: t) {
+                sendAgentTranscript(agent, force: true, at: t)
+                lastWorkflowBody[agent.sessionId] = nil
+            } else if let viewer = cmd.viewer, let id = watchers.session(forViewer: viewer, now: t) {
                 sendTranscript(id, force: true, at: t)
                 lastScreenBody[id] = nil
+                lastWorkflowBody[id] = nil
             }
         case "input":
             let length = cmd.text?.count ?? 0

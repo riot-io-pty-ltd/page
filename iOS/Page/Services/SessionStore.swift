@@ -26,6 +26,8 @@ final class SessionStore: ObservableObject {
     @Published private(set) var transcripts: [String: SessionTranscript] = [:]
     /// The watched session's terminal, from Macs that send it.
     @Published private(set) var screens: [String: SessionScreen] = [:]
+    /// Each watched session's dynamic workflows, from Macs that send them.
+    @Published private(set) var workflows: [String: [WorkflowRun]] = [:]
     /// Messages and Stops sent from this phone, by `clientId`.
     @Published private(set) var commands: [String: SentSessionCommand] = [:]
     /// From GET /status; nil until known.
@@ -40,6 +42,8 @@ final class SessionStore: ObservableObject {
 
     /// The session whose detail screen is open, re-sent as `watch`.
     private(set) var watchedSessionId: String?
+    /// The workflow agent open on top of the watched session, if any.
+    private(set) var watchedAgent: (runId: String, agentId: String)?
 
     private var gate = SessionUpdateGate()
     private var rootKey: Data?
@@ -135,6 +139,8 @@ final class SessionStore: ObservableObject {
         onlyStaleFrames = false
         undecryptableInARow = 0
         watchedSessionId = nil
+        watchedAgent = nil
+        workflows = [:]
         reloadKey()
     }
 
@@ -150,7 +156,7 @@ final class SessionStore: ObservableObject {
     func socketOpened() {
         startWaitingForList()
         guard canSend else { return }
-        if let id = watchedSessionId { post(.watch(sessionId: id)) }
+        if let id = watchedSessionId { post(watchCommand(id)) }
         post(.refresh)
     }
 
@@ -188,10 +194,30 @@ final class SessionStore: ObservableObject {
     func watch(_ sessionId: String?) {
         let changed = watchedSessionId != sessionId
         watchedSessionId = sessionId
+        if changed || sessionId == nil { watchedAgent = nil }
         guard canSend, APIClient.shared.connection == .connected else { return }
         // Leaving a screen that never watched anything needs no message.
         if sessionId == nil && !changed { return }
-        post(.watch(sessionId: sessionId))
+        post(sessionId.map(watchCommand) ?? .watch(sessionId: nil))
+    }
+
+    /// The agent screen opened (or closed, nil) on top of the session's.
+    /// The session screen's periodic re-watch carries it along.
+    func watchAgent(sessionId: String, runId: String?, agentId: String?) {
+        if let runId, let agentId { watchedAgent = (runId, agentId) } else { watchedAgent = nil }
+        watchedSessionId = sessionId
+        guard canSend, APIClient.shared.connection == .connected else { return }
+        post(watchCommand(sessionId))
+    }
+
+    private func watchCommand(_ sessionId: String) -> SessionCommand {
+        if let a = watchedAgent { return .watchAgent(sessionId: sessionId, runId: a.runId, agentId: a.agentId) }
+        return .watch(sessionId: sessionId)
+    }
+
+    /// A workflow agent's transcript, if the Mac sent it.
+    func agentTranscript(sessionId: String, runId: String, agentId: String) -> SessionTranscript? {
+        transcripts[SessionTranscript.key(sessionId: sessionId, runId: runId, agentId: agentId)]
     }
 
     // MARK: Incoming
@@ -244,18 +270,24 @@ final class SessionStore: ObservableObject {
             // Transcripts only for sessions that still exist (plus the one on
             // screen, which shows "ended" over its last transcript).
             let live = Set(list.map(\.id))
-            let stale = transcripts.keys.filter { !live.contains($0) && $0 != watchedSessionId }
+            let stale = transcripts.filter { !live.contains($0.value.sessionId) && $0.value.sessionId != watchedSessionId }.keys
             for id in stale { transcripts[id] = nil }
             for id in screens.keys where !live.contains(id) && id != watchedSessionId { screens[id] = nil }
+            for id in workflows.keys where !live.contains(id) && id != watchedSessionId { workflows[id] = nil }
+        case .workflows(let sid, let runs):
+            workflows[sid] = runs
+            if workflows.count > 4 {
+                for id in workflows.keys where id != sid && id != watchedSessionId { workflows[id] = nil; break }
+            }
         case .screen(let s):
             screens[s.sessionId] = s
             if screens.count > 4 {
                 for id in screens.keys where id != s.sessionId && id != watchedSessionId { screens[id] = nil; break }
             }
         case .transcript(let t):
-            transcripts[t.sessionId] = t
+            transcripts[t.key] = t
             if transcripts.count > 12 {
-                for id in transcripts.keys where id != t.sessionId && id != watchedSessionId { transcripts[id] = nil; break }
+                for (key, old) in transcripts where key != t.key && old.sessionId != watchedSessionId { transcripts[key] = nil; break }
             }
         case .result(let r):
             guard var cmd = commands[r.clientId] else { return }

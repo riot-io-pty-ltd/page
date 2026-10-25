@@ -498,6 +498,30 @@ let longScreen = "{\"kind\":\"screen\",\"seq\":3,\"ts\":1761300000000,\"sessionI
 if let p = SessionsPlaintext.decode(Data(longScreen.utf8)), case .screen(let sc) = p.update {
     check(sc.lines.count == SessionScreen.maxLines && sc.lines.allSatisfy { $0.count <= SessionScreen.maxLineChars }, "screen capped on the phone too")
 } else { check(false, "long screen decodes") }
+// Workflows: decode, agent transcripts keyed apart, footer rows → runs.
+let wfJSON = #"{"kind":"workflows","seq":20,"ts":1761300000000,"sessionId":"S","runs":[{"id":"wf_1","name":"design-pass-ch1-8-opus","status":"running","phase":"Fix B","done":28,"total":30,"startedAt":1761290000000,"endedAt":null,"tokens":null,"agents":[{"id":"a1","label":"ch5: fix","phase":"Fix B","state":"running","lastActivityAt":1761299990000},{"label":"no id"}]},{"id":"wf_2","name":"finish-act-opus","status":"running","done":0,"total":1},{"id":"wf_3","name":"finish-act-opus","status":"running","done":0,"total":1},{"name":"no id"}]}"#
+if let p = SessionsPlaintext.decode(Data(wfJSON.utf8)), case .workflows(let sid, let runs) = p.update {
+    check(sid == "S" && runs.map(\.id) == ["wf_1", "wf_2", "wf_3"], "workflows decode, bad runs dropped")
+    check(runs[0].agents.map(\.id) == ["a1"] && runs[0].agents[0].running, "agents decode, bad agents dropped")
+    check(runs[0].progress(now: Date(timeIntervalSince1970: 1761300000)).hasPrefix("28/30 · 2h46m"), "progress like the footer")
+    let footer = ["  ○ design-pass-ch1-8-opus      28/30 · 2h34m", "  ○ finish-act-opus   0/1", "  ○ finish-act-opus   0/1", "plain text design-pass-ch1-8-opus", "  ○ design-pass-ch1-8-opus-extra"]
+    let links = TerminalRunLinks.match(lines: footer, runs: runs)
+    check(links[0]?.id == "wf_1" && links[1]?.id == "wf_2" && links[2]?.id == "wf_3", "footer rows open their runs, same names in order")
+    check(links[3] == nil && links[4] == nil, "only footer-style rows, whole names")
+} else { check(false, "workflows decode") }
+check(WorkflowRun.duration(45) == "45s" && WorkflowRun.duration(23 * 60 + 8) == "23m" && WorkflowRun.duration(9240) == "2h34m", "durations")
+check(WorkflowRun.tokens(6_300_000) == "6.3m tokens" && WorkflowRun.tokens(985_100) == "985.1k tokens", "tokens")
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"transcript","seq":21,"ts":1761300000000,"sessionId":"S","runId":"wf_1","agentId":"a1","entries":[]}"#.utf8)),
+   case .transcript(let t) = p.update {
+    check(t.key == "S|wf_1|a1" && t.runId == "wf_1", "agent transcript keyed apart from the session's")
+    let sessionT = SessionsUpdate.transcript(SessionTranscript(sessionId: "S", entries: [], truncated: false))
+    check(gate.admit(pt(.transcript(t), boot: "b3", seq: 30), now: cmdNow) == .accept
+          && gate.admit(pt(sessionT, boot: "b3", seq: 29), now: cmdNow) == .accept, "agent and session transcripts have separate seq")
+} else { check(false, "agent transcript decodes") }
+let wa = SessionCommand.watchAgent(sessionId: "S", runId: "wf_1", agentId: "a1").plaintext(clientId: "c", viewer: "v", now: cmdNow)
+if let o = try? JSONSerialization.jsonObject(with: wa) as? [String: Any] {
+    check(o["op"] as? String == "watch" && o["runId"] as? String == "wf_1" && o["agentId"] as? String == "a1" && o["sessionId"] as? String == "S", "watchAgent is a watch with run and agent")
+} else { check(false, "watchAgent encodes") }
 gate.reset()
 check(gate.boot == nil && gate.lastListSeq == nil && gate.admit(pt(emptyList, boot: "b3", seq: 1), now: cmdNow) == .accept, "reset clears")
 

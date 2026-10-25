@@ -218,6 +218,154 @@ struct SessionTranscript: Equatable {
     let entries: [TranscriptEntry]
     /// Older entries were dropped to fit the snapshot.
     let truncated: Bool
+    /// Set for a workflow agent's transcript (inside the session).
+    var runId: String? = nil
+    var agentId: String? = nil
+
+    /// Where the store keeps it: the session, or one of its agents.
+    var key: String { Self.key(sessionId: sessionId, runId: runId, agentId: agentId) }
+
+    static func key(sessionId: String, runId: String?, agentId: String?) -> String {
+        guard let runId, let agentId else { return sessionId }
+        return "\(sessionId)|\(runId)|\(agentId)"
+    }
+}
+
+// MARK: - Workflows
+
+/// One dynamic workflow a session launched (the Mac's `workflows` kind),
+/// as Claude Code's footer shows it: name, progress, phase, agents.
+struct WorkflowRun: Equatable, Identifiable, Decodable {
+    struct Agent: Equatable, Identifiable, Decodable {
+        let id: String
+        let label: String
+        let phase: String?
+        let running: Bool
+        let lastActivityAt: Date?
+
+        private enum CodingKeys: String, CodingKey { case id, label, phase, state, lastActivityAt }
+
+        init(id: String, label: String, phase: String?, running: Bool, lastActivityAt: Date?) {
+            self.id = id; self.label = label; self.phase = phase; self.running = running; self.lastActivityAt = lastActivityAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            guard let id = c.lenientString(.id), !id.isEmpty else {
+                throw DecodingError.dataCorruptedError(forKey: .id, in: c, debugDescription: "Missing agent id")
+            }
+            self.id = String(id.prefix(64))
+            label = String((c.lenientString(.label) ?? "agent").prefix(160))
+            phase = c.lenientString(.phase).flatMap { $0.isEmpty ? nil : String($0.prefix(60)) }
+            running = c.lenientString(.state) != "done"
+            lastActivityAt = WorkflowRun.millisDate(c, .lastActivityAt)
+        }
+    }
+
+    let id: String
+    let name: String
+    let summary: String?
+    /// running, completed, failed, killed, stalled (anything else shown as is).
+    let status: String
+    let phase: String?
+    let done: Int
+    let total: Int
+    let startedAt: Date?
+    let endedAt: Date?
+    let tokens: Int?
+    let agents: [Agent]
+
+    var isRunning: Bool { status == "running" }
+
+    /// "28/30 · 2h34m", like the footer.
+    var progressLabel: String { progress(now: Date()) }
+
+    func progress(now: Date) -> String {
+        var parts = ["\(done)/\(total)"]
+        if let start = startedAt { parts.append(Self.duration((endedAt ?? now).timeIntervalSince(start))) }
+        if let tokens { parts.append(Self.tokens(tokens)) }
+        return parts.joined(separator: " · ")
+    }
+
+    static func duration(_ s: TimeInterval) -> String {
+        let m = max(0, Int(s) / 60)
+        if m < 1 { return "\(max(0, Int(s)))s" }
+        if m < 60 { return "\(m)m" }
+        return "\(m / 60)h\(String(format: "%02d", m % 60))m"
+    }
+
+    static func tokens(_ n: Int) -> String {
+        n >= 1_000_000 ? String(format: "%.1fm tokens", Double(n) / 1e6)
+            : n >= 1000 ? String(format: "%.1fk tokens", Double(n) / 1e3) : "\(n) tokens"
+    }
+
+    var statusLabel: String {
+        switch status {
+        case "running": return "Running"
+        case "completed": return "Done"
+        case "failed": return "Failed"
+        case "killed": return "Stopped"
+        case "stalled": return "No recent activity"
+        default: return status.capitalized
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, summary, status, phase, done, total, startedAt, endedAt, tokens, agents
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guard let id = c.lenientString(.id), !id.isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .id, in: c, debugDescription: "Missing run id")
+        }
+        self.id = String(id.prefix(64))
+        name = String((c.lenientString(.name) ?? id).prefix(80))
+        summary = c.lenientString(.summary).flatMap { $0.isEmpty ? nil : String($0.prefix(300)) }
+        status = String((c.lenientString(.status) ?? "running").prefix(20))
+        phase = c.lenientString(.phase).flatMap { $0.isEmpty ? nil : String($0.prefix(60)) }
+        done = max(0, (try? c.decodeIfPresent(Int.self, forKey: .done)) ?? 0 ?? 0)
+        total = max(0, (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? 0 ?? 0)
+        startedAt = Self.millisDate(c, .startedAt)
+        endedAt = Self.millisDate(c, .endedAt)
+        tokens = (try? c.decodeIfPresent(Int.self, forKey: .tokens)) ?? nil
+        agents = Array(((try? c.decodeIfPresent(LossyList<Agent>.self, forKey: .agents)) ?? nil)?.elements.prefix(100) ?? [])
+    }
+
+    init(id: String, name: String, summary: String? = nil, status: String, phase: String? = nil, done: Int, total: Int,
+         startedAt: Date? = nil, endedAt: Date? = nil, tokens: Int? = nil, agents: [Agent] = []) {
+        self.id = id; self.name = name; self.summary = summary; self.status = status; self.phase = phase
+        self.done = done; self.total = total; self.startedAt = startedAt; self.endedAt = endedAt
+        self.tokens = tokens; self.agents = agents
+    }
+
+    static func millisDate<K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K) -> Date? {
+        guard let ms = (try? c.decodeIfPresent(Double.self, forKey: key)) ?? nil, ms.isFinite, ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: ms / 1000)
+    }
+}
+
+/// Which terminal rows name one of the session's workflows, so tapping the
+/// footer's "○ design-pass-ch1-8-opus" row opens that run. Rows are matched
+/// to running runs first, in screen order, so two runs with the same name
+/// map to two rows. Pure.
+enum TerminalRunLinks {
+    static func match(lines: [String], runs: [WorkflowRun]) -> [Int: WorkflowRun] {
+        guard !runs.isEmpty else { return [:] }
+        var pool = runs.filter(\.isRunning) + runs.filter { !$0.isRunning }
+        var out: [Int: WorkflowRun] = [:]
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Footer rows start with a status glyph and then the name.
+            guard let first = trimmed.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first) else { continue }
+            let body = trimmed.drop { !$0.isLetter && !$0.isNumber }
+            guard let idx = pool.firstIndex(where: { run in
+                body.hasPrefix(run.name) && body.dropFirst(run.name.count).first.map { $0 == " " } ?? true
+            }) else { continue }
+            out[i] = pool.remove(at: idx)
+        }
+        return out
+    }
 }
 
 /// The bottom of a session's terminal (the Mac's `screen` kind): Claude
@@ -255,6 +403,7 @@ enum SessionsUpdate: Equatable {
     case list(macName: String?, sessions: [LiveSession])
     case transcript(SessionTranscript)
     case screen(SessionScreen)
+    case workflows(sessionId: String, runs: [WorkflowRun])
     case result(CommandResult)
 }
 
@@ -291,10 +440,13 @@ struct SessionsPlaintext: Equatable {
         let interventionId: String?
         let disabled: Bool?
         let lines: [String]?
+        let runs: LossyList<WorkflowRun>?
+        let runId: String?
+        let agentId: String?
 
         private enum CodingKeys: String, CodingKey {
             case kind, seq, ts, boot, macName, sessions, sessionId, entries, truncated
-            case clientId, ok, code, reason, detail, interventionId, disabled, lines
+            case clientId, ok, code, reason, detail, interventionId, disabled, lines, runs, runId, agentId
         }
 
         init(from decoder: Decoder) throws {
@@ -316,6 +468,9 @@ struct SessionsPlaintext: Equatable {
             interventionId = c.lenientString(.interventionId)
             disabled = c.lenientBool(.disabled)
             lines = try? c.decodeIfPresent([String].self, forKey: .lines)
+            runs = try? c.decodeIfPresent(LossyList<WorkflowRun>.self, forKey: .runs)
+            runId = c.lenientString(.runId)
+            agentId = c.lenientString(.agentId)
         }
     }
 
@@ -335,8 +490,16 @@ struct SessionsPlaintext: Equatable {
                            sessions: Array(list.elements.prefix(maxSessions)))
         case "transcript":
             guard let sid = raw.sessionId, !sid.isEmpty, let entries = raw.entries else { return nil }
-            update = .transcript(SessionTranscript(sessionId: sid, entries: Array(entries.elements.suffix(maxEntries)),
-                                                   truncated: raw.truncated ?? false))
+            var t = SessionTranscript(sessionId: sid, entries: Array(entries.elements.suffix(maxEntries)),
+                                      truncated: raw.truncated ?? false)
+            if let run = raw.runId, !run.isEmpty, let agent = raw.agentId, !agent.isEmpty {
+                t.runId = String(run.prefix(64))
+                t.agentId = String(agent.prefix(64))
+            }
+            update = .transcript(t)
+        case "workflows":
+            guard let sid = raw.sessionId, !sid.isEmpty, let runs = raw.runs else { return nil }
+            update = .workflows(sessionId: sid, runs: Array(runs.elements.prefix(12)))
         case "screen":
             guard let sid = raw.sessionId, !sid.isEmpty, let lines = raw.lines else { return nil }
             update = .screen(SessionScreen(sessionId: sid,
@@ -398,9 +561,14 @@ struct SessionUpdateGate {
             if let last = lastListSeq, p.seq <= last { return .outOfOrder }
             lastListSeq = p.seq
         case .transcript(let t):
-            if let last = lastTranscriptSeq[t.sessionId], p.seq <= last { return .outOfOrder }
+            if let last = lastTranscriptSeq[t.key], p.seq <= last { return .outOfOrder }
             if lastTranscriptSeq.count > 200 { lastTranscriptSeq = [:] }
-            lastTranscriptSeq[t.sessionId] = p.seq
+            lastTranscriptSeq[t.key] = p.seq
+        case .workflows(let sid, _):
+            let key = "workflows|" + sid
+            if let last = lastScreenSeq[key], p.seq <= last { return .outOfOrder }
+            if lastScreenSeq.count > 200 { lastScreenSeq = [:] }
+            lastScreenSeq[key] = p.seq
         case .screen(let s):
             if let last = lastScreenSeq[s.sessionId], p.seq <= last { return .outOfOrder }
             if lastScreenSeq.count > 200 { lastScreenSeq = [:] }
@@ -457,10 +625,12 @@ enum SessionCommand: Equatable {
     case refresh
     case input(sessionId: String, text: String)
     case interrupt(sessionId: String)
+    /// Watch a workflow agent inside the session (its transcript).
+    case watchAgent(sessionId: String, runId: String, agentId: String)
 
     var op: String {
         switch self {
-        case .watch:     return "watch"
+        case .watch, .watchAgent: return "watch"
         case .refresh:   return "refresh"
         case .input:     return "input"
         case .interrupt: return "interrupt"
@@ -477,6 +647,8 @@ enum SessionCommand: Equatable {
         case .refresh:                 break
         case .input(let sid, let text): body["sessionId"] = sid; body["text"] = text
         case .interrupt(let sid):      body["sessionId"] = sid
+        case .watchAgent(let sid, let run, let agent):
+            body["sessionId"] = sid; body["runId"] = run; body["agentId"] = agent
         }
         return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }

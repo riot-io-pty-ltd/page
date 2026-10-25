@@ -561,6 +561,55 @@ final class SessionRemoteTests: XCTestCase {
         XCTAssertEqual(backends.screenReads.count, reads)
     }
 
+    /// A watched session's workflows go to the phone, and opening one of
+    /// its agents sends that agent's transcript (tagged with run and agent);
+    /// ids that aren't plain ids are never turned into paths.
+    func testWorkflowsAndAgentTranscripts() throws {
+        remote.update(sessions: [session("s1", .active)], pending: [])
+        _ = writeTranscript("s1", ["hello"])
+        let runDir = dir.appendingPathComponent("s1/subagents/workflows/wf_abc")
+        try FileManager.default.createDirectory(at: runDir, withIntermediateDirectories: true)
+        try (#"{"type":"started","agentId":"a1","label":"capture","phase":"Capture"}"# + "\n")
+            .write(to: runDir.appendingPathComponent("journal.jsonl"), atomically: true, encoding: .utf8)
+        let agentLine = String(data: try JSONSerialization.data(withJSONObject: [
+            "type": "assistant", "uuid": "x1", "message": ["role": "assistant", "content": [["type": "text", "text": "capturing level 3"]]]]),
+                               encoding: .utf8)!
+        try (agentLine + "\n").write(to: runDir.appendingPathComponent("agent-a1.jsonl"), atomically: true, encoding: .utf8)
+
+        lookingPhone()
+        send(command(["op": "watch", "sessionId": "s1", "viewer": "v1"]))
+        advance(0.1)
+        remote.waitUntilIdle()
+        let wf = try XCTUnwrap(frames("workflows").last)
+        XCTAssertEqual(wf["sessionId"] as? String, "s1")
+        let run = try XCTUnwrap((wf["runs"] as? [[String: Any]])?.first)
+        XCTAssertEqual(run["id"] as? String, "wf_abc")
+        XCTAssertEqual(run["total"] as? Int, 1)
+        XCTAssertEqual((run["agents"] as? [[String: Any]])?.first?["label"] as? String, "capture")
+
+        advance(3.1)
+        remote.waitUntilIdle()
+        XCTAssertEqual(frames("workflows").count, 1, "unchanged: not re-sent")
+
+        // Open the agent.
+        send(command(["op": "watch", "sessionId": "s1", "viewer": "v1", "runId": "wf_abc", "agentId": "a1"]))
+        let t = try XCTUnwrap(frames("transcript").last)
+        XCTAssertEqual(t["runId"] as? String, "wf_abc")
+        XCTAssertEqual(t["agentId"] as? String, "a1")
+        XCTAssertEqual((t["entries"] as? [[String: Any]])?.first?["text"] as? String, "capturing level 3")
+        let screensBefore = frames("screen").count
+        advance(3)
+        remote.waitUntilIdle()
+        XCTAssertEqual(frames("screen").count, screensBefore, "inside an agent, the session's screen isn't read")
+
+        // Unsafe ids: the watch falls back to the session itself.
+        let before = frames("transcript").count
+        send(command(["op": "watch", "sessionId": "s1", "viewer": "v1", "runId": "../..", "agentId": "a1"]))
+        let fallback = try XCTUnwrap(frames("transcript").last)
+        XCTAssertEqual(frames("transcript").count, before + 1)
+        XCTAssertNil(fallback["agentId"], "no path was built from the bad id")
+    }
+
     func testWatchExpiresAfter90Seconds() {
         remote.update(sessions: [session("s1", .active)], pending: [])
         _ = writeTranscript("s1", ["a"])
