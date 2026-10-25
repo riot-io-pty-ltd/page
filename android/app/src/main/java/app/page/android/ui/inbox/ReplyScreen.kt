@@ -336,13 +336,16 @@ private fun TopBar(iv: Intervention?, onDismiss: () -> Unit) {
             }
             Column(
                 Modifier.weight(1f).clearAndSetSemantics {
-                    contentDescription = "${iv?.projectName ?: ""}, Session ${iv?.sessionId?.take(8) ?: ""}"
+                    contentDescription = "${iv?.projectName ?: ""}, " +
+                        if (iv != null && PageSubtype.isForecast(iv.kind, iv.subtype)) "Heads-up from your Mac" else "Session ${iv?.sessionId?.take(8) ?: ""}"
                     heading()
                 },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(iv?.projectName ?: " ", style = PageType.mono13, color = colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Session ${iv?.sessionId?.take(8) ?: ""}", style = PageType.bodyEm, color = colors.text, maxLines = 1)
+                // Mac-wide forecasts have no session of their own.
+                val forecast = iv != null && PageSubtype.isForecast(iv.kind, iv.subtype)
+                Text(if (forecast) "Heads-up from your Mac" else "Session ${iv?.sessionId?.take(8) ?: ""}", style = PageType.bodyEm, color = colors.text, maxLines = 1)
             }
             Spacer(Modifier.width(MinTouch))
         }
@@ -354,7 +357,8 @@ private fun TopBar(iv: Intervention?, onDismiss: () -> Unit) {
 private fun Content(iv: Intervention, now: java.time.Instant, onViewChanges: () -> Unit, onOpenSession: () -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         KindChip(iv.kind, iv.subtype)
-        iv.backend?.let { BackendPill(it, iv.source) }
+        // A Mac-wide forecast has no agent session behind it.
+        if (!PageSubtype.isForecast(iv.kind, iv.subtype)) iv.backend?.let { BackendPill(it, iv.source) }
     }
     Text(ReplyCopy.headline(iv), style = PageType.display22, color = colors.text, modifier = Modifier.semantics { heading() })
     Text(RelativeTime.string("Paged", iv.openedAt, now).uppercase(), style = PageType.caption12, color = colors.textMuted)
@@ -544,7 +548,8 @@ private fun ActionZone(
 }
 
 private fun footerText(iv: Intervention): String {
-    if (PageSubtype.isForecast(iv.kind, iv.subtype)) return "A heads-up from Page on your Mac."
+    // Forecasts are opened and closed by the Mac itself (PROTOCOL.md §3).
+    if (PageSubtype.isForecast(iv.kind, iv.subtype)) return "Your Mac closes this by itself when it no longer applies."
     if (iv.kind == InterventionKind.RATE_LIMIT) return "Page on your Mac types your reply into session ${iv.sessionId.take(8)} when the limit resets."
     if (iv.isBlockingHook) return "Your answer goes straight to ${iv.agentName}'s permission hook in session ${iv.sessionId.take(8)}."
     var where = "session ${iv.sessionId.take(8)}"

@@ -38,7 +38,14 @@ fun QrScanner(onCode: (String) -> Unit, onFailure: (String) -> Unit, modifier: M
     val currentOnCode = rememberUpdatedState(onCode)
     val currentOnFailure = rememberUpdatedState(onFailure)
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    val previewView = remember {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            // A TextureView draws inside the Compose hierarchy; a SurfaceView's
+            // hole would be covered by the dialog's own background.
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+        }
+    }
 
     DisposableEffect(lifecycleOwner) {
         val providerFuture = ProcessCameraProvider.getInstance(context)

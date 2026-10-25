@@ -41,6 +41,10 @@ class StayConnectedService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Foreground first on every path: a service started with
+        // startForegroundService() that stops before calling startForeground()
+        // crashes the app.
+        startInForeground(notification(RelayClient.connection.value))
         if (intent?.action == ACTION_TURN_OFF) {
             BackgroundConnection.setStayConnected(this, false)
             stopSelf()
@@ -50,7 +54,6 @@ class StayConnectedService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startInForeground(notification(RelayClient.connection.value))
         running = true
         RelayClient.activate()
         return START_STICKY

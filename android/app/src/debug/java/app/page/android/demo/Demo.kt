@@ -8,6 +8,8 @@ import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
 import app.page.android.model.AgentBackend
+import app.page.android.model.Base64Url
+import app.page.android.model.ValidatedPairing
 import app.page.android.notify.PageInfo
 import app.page.android.notify.PageNotifications
 import app.page.android.model.BatteryForecast
@@ -71,6 +73,14 @@ object Demo {
     }
 
     fun handleLaunchExtras(extras: Bundle?) {
+        // Exercises the real, non-demo path (Keystore, adopt, socket failure,
+        // Stay connected) against a relay that can't resolve. Unpaired only.
+        if (extras?.getBoolean("page_test_pair") == true && !PairingStore.isPaired) {
+            val random = java.security.SecureRandom()
+            val token = Base64Url.encode(ByteArray(32).also(random::nextBytes))
+            PairingStore.adopt(ValidatedPairing(token, "https://relay.invalid", "Test Mac", ByteArray(32).also(random::nextBytes)))
+            return
+        }
         if (extras?.getBoolean("page_demo") != true) return
         start()
         if (!PairingStore.isDemoPairing) return

@@ -43,7 +43,9 @@ private fun OutlinedChip(tint: Color, spoken: String, modifier: Modifier = Modif
 fun KindChip(kind: InterventionKind, subtype: String? = null) {
     val text = chipLabel(kind, subtype)
     val tint = colors.kind(kind)
-    OutlinedChip(tint, kind.accessibilityName) {
+    // A subtype that refines the kind (LOOKS STUCK) is what TalkBack says too.
+    val spoken = if (text == kind.label) kind.accessibilityName else text.lowercase().replaceFirstChar { it.uppercase() }
+    OutlinedChip(tint, spoken) {
         Text(text, style = PageType.chip11, color = tint, maxLines = 1)
     }
 }
