@@ -508,7 +508,15 @@ if let p = SessionsPlaintext.decode(Data(wfJSON.utf8)), case .workflows(let sid,
     let links = TerminalRunLinks.match(lines: footer, runs: runs)
     check(links[0]?.id == "wf_1" && links[1]?.id == "wf_2" && links[2]?.id == "wf_3", "footer rows open their runs, same names in order")
     check(links[3] == nil && links[4] == nil, "only footer-style rows, whole names")
+    let chatty = ["● design-pass-ch1-8-opus is going well", "  ○ design-pass-ch1-8-opus      28/30"]
+    let l2 = TerminalRunLinks.match(lines: chatty, runs: runs)
+    check(l2[1]?.id == "wf_1" && l2[0] == nil, "the footer row (bottom) takes the run, not a chat line above")
 } else { check(false, "workflows decode") }
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"workflows","seq":22,"ts":1761300000000,"sessionId":"S","runs":[{"id":"wf_k","name":"k","status":"killed","done":1,"total":3,"agents":[{"id":"a1","label":"x","state":"failed"},{"id":"a2","label":"y","state":"stopped"},{"id":"a3","label":"z","state":"done"},{"id":"a4","label":"w"}]}]}"#.utf8)),
+   case .workflows(_, let runs) = p.update {
+    check(!runs[0].agents.contains(where: \.running), "failed, stopped, done and unstated agents are not running")
+    check(runs[0].agents.map(\.state) == ["failed", "stopped", "done", "done"], "agent states kept")
+} else { check(false, "killed run decodes") }
 check(WorkflowRun.duration(45) == "45s" && WorkflowRun.duration(23 * 60 + 8) == "23m" && WorkflowRun.duration(9240) == "2h34m", "durations")
 check(WorkflowRun.tokens(6_300_000) == "6.3m tokens" && WorkflowRun.tokens(985_100) == "985.1k tokens", "tokens")
 if let p = SessionsPlaintext.decode(Data(#"{"kind":"transcript","seq":21,"ts":1761300000000,"sessionId":"S","runId":"wf_1","agentId":"a1","entries":[]}"#.utf8)),

@@ -269,6 +269,21 @@ final class SessionTranscriptTests: XCTestCase {
                        "a whole block is caught by the redactor (the screen is redacted in one piece)")
         // END not printed yet: still caught (BEGIN to end of text).
         XCTAssertEqual(SessionScreen.lines(from: pem.prefix(2).joined(separator: "\n")), ["[redacted private key]"])
+        // As Claude Code draws it: indented, behind its ⎿ gutter, BEGIN
+        // scrolled off, a short last row.
+        let tui = ["  ⎿  MIIEowIBAAKCAQEAxyzxyzxyzxyzxyzxyzxyzxyz", "     b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAE", "     Ng==", "     -----END RSA PRIVATE KEY-----", "done"]
+        let tuiOut = SessionScreen.lines(from: tui.joined(separator: "\n"))
+        XCTAssertFalse(tuiOut.joined().contains("MIIEow") || tuiOut.joined().contains("b3Blbn") || tuiOut.joined().contains("Ng=="), tuiOut.joined(separator: "|"))
+        XCTAssertEqual(tuiOut.first, "  ⎿  [redacted]", "the gutter is kept")
+        // PGP, BEGIN scrolled off: checksum and short last row too.
+        let pgp = ["lQOYBFxyzxyzxyzxyzxyzxyzxyzxyzxyzxyzxyz", "Ab12", "=AbCd", "-----END PGP PRIVATE KEY BLOCK-----"]
+        XCTAssertEqual(SessionScreen.lines(from: pgp.joined(separator: "\n")),
+                       ["[redacted]", "[redacted]", "[redacted]", "-----END PGP PRIVATE KEY BLOCK-----"])
+        // A token Claude Code wrapped itself onto a padded row.
+        let wrapped = ["export OPENAI_API_KEY=sk-proj-0123456789abcdef", "       ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", "       6789abcd", "next line"]
+        let wrappedOut = SessionScreen.lines(from: wrapped.joined(separator: "\n"))
+        XCTAssertFalse(wrappedOut.joined().contains("ABCDEFGHIJ") || wrappedOut.joined().contains("6789abcd"), wrappedOut.joined(separator: "|"))
+        XCTAssertEqual(wrappedOut.last, "next line")
         // BEGIN scrolled off the top: the base64 rows above END are blanked.
         XCTAssertEqual(SessionScreen.lines(from: pem.dropFirst().joined(separator: "\n")),
                        ["[redacted]", "-----END OPENSSH PRIVATE KEY-----", "after"])

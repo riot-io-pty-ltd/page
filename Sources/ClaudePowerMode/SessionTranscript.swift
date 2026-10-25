@@ -67,14 +67,19 @@ enum SessionTranscript {
 
     /// The last `maxEntries` rows of the file at `path`, or nil when it
     /// can't be read safely.
+    /// `keepSidechain`: a workflow or sub-agent's own transcript, where every
+    /// record is marked `isSidechain` (in the session's transcript those
+    /// records are sub-agent noise and are dropped).
     static func read(path: String, format: Format, tailBytes: Int = tailBytes,
-                     extendTo extended: Int? = extendedTailBytes) -> Snapshot? {
+                     extendTo extended: Int? = extendedTailBytes, keepSidechain: Bool = false) -> Snapshot? {
         guard let first = BoundedFileRead.tail(path, maxBytes: tailBytes) else { return nil }
-        var entries = parse(first.data, baseOffset: first.offset, dropFirstLine: first.truncated, format: format)
+        var entries = parse(first.data, baseOffset: first.offset, dropFirstLine: first.truncated, format: format,
+                            keepSidechain: keepSidechain)
         var truncated = first.truncated
         if entries.count < maxEntries, first.truncated, let extended, extended > tailBytes,
            let wider = BoundedFileRead.tail(path, maxBytes: extended) {
-            entries = parse(wider.data, baseOffset: wider.offset, dropFirstLine: wider.truncated, format: format)
+            entries = parse(wider.data, baseOffset: wider.offset, dropFirstLine: wider.truncated, format: format,
+                            keepSidechain: keepSidechain)
             truncated = wider.truncated
         }
         if entries.count > maxEntries {
@@ -84,13 +89,14 @@ enum SessionTranscript {
         return Snapshot(entries: entries, truncated: truncated)
     }
 
-    static func parse(_ data: Data, baseOffset: UInt64, dropFirstLine: Bool, format: Format) -> [SessionTranscriptEntry] {
+    static func parse(_ data: Data, baseOffset: UInt64, dropFirstLine: Bool, format: Format,
+                      keepSidechain: Bool = false) -> [SessionTranscriptEntry] {
         var out: [SessionTranscriptEntry] = []
         forEachLine(data, baseOffset: baseOffset, dropFirstLine: dropFirstLine) { line, offset in
             guard line.first == UInt8(ascii: "{"),
                   let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
             switch format {
-            case .claude: out += claudeEntries(obj, offset: offset)
+            case .claude: out += claudeEntries(obj, offset: offset, keepSidechain: keepSidechain)
             case .codex: out += codexEntries(obj, offset: offset)
             }
         }
@@ -117,8 +123,8 @@ enum SessionTranscript {
 
     // MARK: Claude Code
 
-    static func claudeEntries(_ obj: [String: Any], offset: UInt64) -> [SessionTranscriptEntry] {
-        if obj["isSidechain"] as? Bool == true || obj["isMeta"] as? Bool == true
+    static func claudeEntries(_ obj: [String: Any], offset: UInt64, keepSidechain: Bool = false) -> [SessionTranscriptEntry] {
+        if (!keepSidechain && obj["isSidechain"] as? Bool == true) || obj["isMeta"] as? Bool == true
             || obj["isCompactSummary"] as? Bool == true { return [] }
         let base = (obj["uuid"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "o\(offset)"
         let at = (obj["timestamp"] as? String).flatMap(TranscriptParser.parseISODate)

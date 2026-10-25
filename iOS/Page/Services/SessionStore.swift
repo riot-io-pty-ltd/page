@@ -204,8 +204,15 @@ final class SessionStore: ObservableObject {
     /// The agent screen opened (or closed, nil) on top of the session's.
     /// The session screen's periodic re-watch carries it along.
     func watchAgent(sessionId: String, runId: String?, agentId: String?) {
-        if let runId, let agentId { watchedAgent = (runId, agentId) } else { watchedAgent = nil }
-        watchedSessionId = sessionId
+        if let runId, let agentId {
+            watchedAgent = (runId, agentId)
+            watchedSessionId = sessionId
+        } else {
+            // Closing the agent screen: back to the session only if its screen
+            // is still open (it may have closed first and watched nil).
+            guard watchedSessionId == sessionId, watchedAgent != nil else { return }
+            watchedAgent = nil
+        }
         guard canSend, APIClient.shared.connection == .connected else { return }
         post(watchCommand(sessionId))
     }
@@ -286,8 +293,14 @@ final class SessionStore: ObservableObject {
             }
         case .transcript(let t):
             transcripts[t.key] = t
-            if transcripts.count > 12 {
-                for (key, old) in transcripts where key != t.key && old.sessionId != watchedSessionId { transcripts[key] = nil; break }
+            // Keep what's on screen (the session's and the open agent's).
+            var keep: Set<String> = [t.key]
+            if let sid = watchedSessionId {
+                keep.insert(sid)
+                if let a = watchedAgent { keep.insert(SessionTranscript.key(sessionId: sid, runId: a.runId, agentId: a.agentId)) }
+            }
+            while transcripts.count > 12, let victim = transcripts.keys.first(where: { !keep.contains($0) }) {
+                transcripts[victim] = nil
             }
         case .result(let r):
             guard var cmd = commands[r.clientId] else { return }

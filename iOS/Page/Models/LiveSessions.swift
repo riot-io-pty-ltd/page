@@ -240,13 +240,17 @@ struct WorkflowRun: Equatable, Identifiable, Decodable {
         let id: String
         let label: String
         let phase: String?
-        let running: Bool
+        /// running, done, failed, stopped (its run ended first), or a newer
+        /// value shown as not running.
+        let state: String
         let lastActivityAt: Date?
+
+        var running: Bool { state == "running" }
 
         private enum CodingKeys: String, CodingKey { case id, label, phase, state, lastActivityAt }
 
-        init(id: String, label: String, phase: String?, running: Bool, lastActivityAt: Date?) {
-            self.id = id; self.label = label; self.phase = phase; self.running = running; self.lastActivityAt = lastActivityAt
+        init(id: String, label: String, phase: String?, state: String, lastActivityAt: Date?) {
+            self.id = id; self.label = label; self.phase = phase; self.state = state; self.lastActivityAt = lastActivityAt
         }
 
         init(from decoder: Decoder) throws {
@@ -257,7 +261,7 @@ struct WorkflowRun: Equatable, Identifiable, Decodable {
             self.id = String(id.prefix(64))
             label = String((c.lenientString(.label) ?? "agent").prefix(160))
             phase = c.lenientString(.phase).flatMap { $0.isEmpty ? nil : String($0.prefix(60)) }
-            running = c.lenientString(.state) != "done"
+            state = String((c.lenientString(.state) ?? "done").prefix(20))
             lastActivityAt = WorkflowRun.millisDate(c, .lastActivityAt)
         }
     }
@@ -352,17 +356,27 @@ struct WorkflowRun: Equatable, Identifiable, Decodable {
 enum TerminalRunLinks {
     static func match(lines: [String], runs: [WorkflowRun]) -> [Int: WorkflowRun] {
         guard !runs.isEmpty else { return [:] }
-        var pool = runs.filter(\.isRunning) + runs.filter { !$0.isRunning }
-        var out: [Int: WorkflowRun] = [:]
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let pool = runs.filter(\.isRunning) + runs.filter { !$0.isRunning }
+        var left = Dictionary(grouping: pool, by: \.name).mapValues(\.count)
+        // Bottom up: the footer is at the bottom, so it claims rows before any
+        // conversation line above that happens to mention a name.
+        var claimed: [String: [Int]] = [:]
+        for i in lines.indices.reversed() {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
             // Footer rows start with a status glyph and then the name.
             guard let first = trimmed.unicodeScalars.first, !CharacterSet.alphanumerics.contains(first) else { continue }
             let body = trimmed.drop { !$0.isLetter && !$0.isNumber }
-            guard let idx = pool.firstIndex(where: { run in
-                body.hasPrefix(run.name) && body.dropFirst(run.name.count).first.map { $0 == " " } ?? true
+            // Longest name first, so "a-b" isn't taken by a run named "a".
+            guard let name = left.keys.sorted(by: { $0.count > $1.count }).first(where: { name in
+                (left[name] ?? 0) > 0 && body.hasPrefix(name) && body.dropFirst(name.count).first.map { $0 == " " } ?? true
             }) else { continue }
-            out[i] = pool.remove(at: idx)
+            left[name, default: 0] -= 1
+            claimed[name, default: []].append(i)
+        }
+        // Runs sharing a name go to their rows top to bottom, in list order.
+        var out: [Int: WorkflowRun] = [:]
+        for (name, rows) in claimed {
+            for (row, run) in zip(rows.sorted(), pool.filter { $0.name == name }) { out[row] = run }
         }
         return out
     }

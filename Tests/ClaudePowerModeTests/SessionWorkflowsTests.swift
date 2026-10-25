@@ -100,11 +100,57 @@ final class SessionWorkflowsTests: XCTestCase {
         XCTAssertEqual(ended.tokens, 1_383_902)
     }
 
+    /// Real journals record "failed" agents, and a killed run leaves agents
+    /// that never finished: none of them shows as running.
+    func testFailedAndCutOffAgentsAreNotRunning() {
+        let j = SessionWorkflows.journal(Data("""
+        {"type":"started","agentId":"a1","label":"build","phase":"Act 4"}
+        {"type":"started","agentId":"a2","label":"review","phase":"Act 4"}
+        {"type":"started","agentId":"a3","label":"review 2","phase":"Act 4"}
+        {"type":"failed","agentId":"a1","error":"x"}
+        {"type":"result","agentId":"a2","result":"ok"}
+        """.utf8))
+        var end = SessionWorkflows.EndRecord(); end.status = "killed"
+        let killed = SessionWorkflows.run(id: "wf_k", launch: nil, scriptName: nil, journal: j, end: end,
+                                          agentActivity: [:], runStartedAt: nil, now: now)
+        XCTAssertEqual(Dictionary(uniqueKeysWithValues: killed.agents.map { ($0.id, $0.state) }),
+                       ["a1": "failed", "a2": "done", "a3": "stopped"])
+        XCTAssertEqual(killed.done, 1)
+        let live = SessionWorkflows.run(id: "wf_l", launch: nil, scriptName: nil, journal: j, end: nil,
+                                        agentActivity: ["a3": now], runStartedAt: now, now: now)
+        XCTAssertEqual(live.agents.first?.id, "a3")
+        XCTAssertEqual(live.agents.first?.state, "running")
+        XCTAssertEqual(live.agents.first { $0.id == "a1" }?.state, "failed")
+    }
+
+    func testUnreadableEndRecordStillEndsTheRun() throws {
+        try makeRun("wf_big", started: [("b1", "x", "P")], finished: [])
+        try write("\(dir.path)/sess/workflows/wf_big.json", "{ not json")
+        try write(transcript, "{}\n")
+        let run = try XCTUnwrap(SessionWorkflowScanner().runs(transcript: transcript, now: now).first)
+        XCTAssertEqual(run.status, "completed", "an end record exists: never running or stalled forever")
+        XCTAssertFalse(run.agents.contains { $0.isRunning })
+    }
+
+    /// A single transcript line of 8 MB or more doesn't stall the backward
+    /// scan: it's stepped over and the launch before it is still found.
+    func testBackwardScanStepsOverAGiantLine() throws {
+        let script = dir.appendingPathComponent("s.js").path
+        try write(script, "export const meta = { name: 'before-giant' }")
+        let giant = #"{"type":"assistant","x":""# + String(repeating: "g", count: 9 << 20) + "\"}"
+        try write(transcript, launchLine("wf_g", summary: "s", script: script) + "\n" + giant + "\n")
+        try makeRun("wf_g", started: [("g1", "x", "P")], finished: [])
+        let scanner = SessionWorkflowScanner()
+        var name: String?
+        for _ in 0..<3 { name = scanner.runs(transcript: transcript, now: now).first?.name }
+        XCTAssertEqual(name, "before-giant")
+    }
+
     func testListingAndSizeCap() throws {
         func r(_ id: String, _ status: String, started: TimeInterval, ended: TimeInterval? = nil, agents: Int = 0) -> WorkflowRunInfo {
             WorkflowRunInfo(id: id, name: id, summary: nil, status: status, phase: nil, done: 0, total: agents,
                             startedAt: now.addingTimeInterval(started), endedAt: ended.map { now.addingTimeInterval($0) }, tokens: nil,
-                            agents: (0..<agents).map { .init(id: "a\($0)", label: String(repeating: "x", count: 150), phase: "p", done: false, lastActivityAt: now) })
+                            agents: (0..<agents).map { .init(id: "a\($0)", label: String(repeating: "x", count: 150), phase: "p", state: "running", lastActivityAt: now) })
         }
         let listed = SessionWorkflows.listed([r("old", "completed", started: -200_000, ended: -100_000),
                                               r("done", "completed", started: -7200, ended: -3600),

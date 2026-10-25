@@ -344,6 +344,11 @@ final class SessionRemote {
     private var lastWorkflowCheck: [String: Date] = [:]
     private var lastWorkflowBody: [String: Data] = [:]
     private var workflowsReading = Set<String>()
+    /// Sessions whose next workflows read is sent even if empty or unchanged
+    /// (just watched: the phone may hold an older list).
+    private var workflowsResync = Set<String>()
+    /// Each read session's transcript, so its scan state can be dropped.
+    private var workflowTranscript: [String: String] = [:]
     private var lastAgentCheck: [SessionWatchers.AgentRef: Date] = [:]
     private var lastAgentBody: [SessionWatchers.AgentRef: Data] = [:]
     private var lastAgentStamp: [SessionWatchers.AgentRef: FileStamp] = [:]
@@ -595,9 +600,16 @@ final class SessionRemote {
             && lastWorkflowCheck[sid].map({ t.timeIntervalSince($0) >= SessionWorkflows.interval }) ?? true {
             readWorkflows(sid, at: t)
         }
-        for sid in Set(lastWorkflowBody.keys).union(lastWorkflowCheck.keys) where !workflowSessions.contains(sid) {
+        for sid in Set(lastWorkflowBody.keys).union(lastWorkflowCheck.keys).union(workflowTranscript.keys)
+        where !workflowSessions.contains(sid) {
             lastWorkflowBody[sid] = nil
             lastWorkflowCheck[sid] = nil
+            workflowsResync.remove(sid)
+            if let path = workflowTranscript.removeValue(forKey: sid) {
+                // The scanner lives on the (serial) probe queue.
+                let scanner = workflowScanner
+                probeQueue.async { scanner.forget(transcript: path) }
+            }
         }
         let agents = watchers.agents(now: t)
         for agent in agents
@@ -618,6 +630,7 @@ final class SessionRemote {
         guard let s = sessions.first(where: { $0.sessionId == sessionId }), s.backend == .claude,
               let file = backends.transcriptFile(for: s) else { return }
         workflowsReading.insert(sessionId)
+        workflowTranscript[sessionId] = file.path
         let scanner = workflowScanner
         probeQueue.async { [weak self] in
             let runs = scanner.runs(transcript: file.path)
@@ -627,13 +640,15 @@ final class SessionRemote {
                 guard !self.stopped, self.phones > 0, self.watchers.watchedAny(now: self.now()).contains(sessionId) else { return }
                 // A session that never ran a workflow sends nothing (an
                 // empty list only once it had some, so the phone clears it).
-                if runs.isEmpty && self.lastWorkflowBody[sessionId] == nil { return }
+                let resync = self.workflowsResync.contains(sessionId)
+                if runs.isEmpty && self.lastWorkflowBody[sessionId] == nil && !resync { return }
                 let body = (try? JSONSerialization.data(withJSONObject: runs.map(\.jsonObject), options: [.sortedKeys])) ?? Data()
-                guard body != self.lastWorkflowBody[sessionId] else { return }
+                guard resync || body != self.lastWorkflowBody[sessionId] else { return }
                 var head = self.header("workflows", at: self.now())
                 head["sessionId"] = sessionId
                 guard let data = SessionWorkflows.plaintext(header: head, runs: runs), self.seal(data) else { return }
                 self.lastWorkflowBody[sessionId] = body
+                self.workflowsResync.remove(sessionId)
             }
         }
     }
@@ -649,7 +664,7 @@ final class SessionRemote {
         // Agent transcripts run to tens of MB: unchanged, nothing is read.
         if !force && stamp == lastAgentStamp[agent] { return }
         lastAgentStamp[agent] = stamp
-        guard let snapshot = SessionTranscript.read(path: path, format: .claude) else { return }
+        guard let snapshot = SessionTranscript.read(path: path, format: .claude, keepSidechain: true) else { return }
         let body = (try? JSONSerialization.data(withJSONObject: ["e": snapshot.entries.map(\.jsonObject), "t": snapshot.truncated],
                                                 options: [.sortedKeys])) ?? Data()
         if !force && body == lastAgentBody[agent] { return }
@@ -900,11 +915,11 @@ final class SessionRemote {
             watchers.set(viewer: viewer, sessionId: cmd.sessionId, runId: cmd.runId, agentId: cmd.agentId, now: t)
             if let agent = watchers.agent(forViewer: viewer, now: t) {
                 sendAgentTranscript(agent, force: true, at: t)
-                lastWorkflowBody[agent.sessionId] = nil
+                workflowsResync.insert(agent.sessionId)
             } else if let id = cmd.sessionId {
                 sendTranscript(id, force: true, at: t)
                 lastScreenBody[id] = nil   // the next read is sent even if unchanged
-                lastWorkflowBody[id] = nil
+                workflowsResync.insert(id)
             }
         case "refresh":
             if phones > 0 {
@@ -913,11 +928,11 @@ final class SessionRemote {
             }
             if let viewer = cmd.viewer, let agent = watchers.agent(forViewer: viewer, now: t) {
                 sendAgentTranscript(agent, force: true, at: t)
-                lastWorkflowBody[agent.sessionId] = nil
+                workflowsResync.insert(agent.sessionId)
             } else if let viewer = cmd.viewer, let id = watchers.session(forViewer: viewer, now: t) {
                 sendTranscript(id, force: true, at: t)
                 lastScreenBody[id] = nil
-                lastWorkflowBody[id] = nil
+                workflowsResync.insert(id)
             }
         case "input":
             let length = cmd.text?.count ?? 0

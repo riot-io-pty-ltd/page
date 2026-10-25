@@ -50,7 +50,7 @@ enum ContextRedactor {
         let specs: [(String, NSRegularExpression.Options, String)] = [
             // PEM private keys (multi-line, so collapse the whole block; a
             // block cut short has no END line, hence `|$`).
-            (#"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)"#,
+            (#"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)"#,
              [.dotMatchesLineSeparators], "[redacted private key]"),
             // Authorization headers / bearer tokens. "Basic"/"token" are
             // ordinary words too, so their value must look like a credential.

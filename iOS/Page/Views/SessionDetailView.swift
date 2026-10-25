@@ -93,6 +93,9 @@ struct SessionDetailView: View {
             }
         }
         .onAppear { if let live { snapshot = live } }
+        // A pane that went away (its data stopped) falls back to Conversation,
+        // so the picker always has a selected segment.
+        .onChange(of: panes) { _, now in if !now.contains(pane) { pane = .conversation } }
         .onChange(of: live) { _, newValue in
             if let newValue { snapshot = newValue }
         }

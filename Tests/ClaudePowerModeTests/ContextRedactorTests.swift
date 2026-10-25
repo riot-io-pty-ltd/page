@@ -21,6 +21,7 @@ final class ContextRedactorTests: XCTestCase {
         "maps AIzaSyA0123456789abcdefghijklmnopqrstu",
         "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nabc\n-----END RSA PRIVATE KEY-----\nafter",
         "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg (cut short",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----\nafter",
         "Basic dXNlcjpwYXNzd29yZA==",
         "basic configuration of the token parser",
         "npm test -- --watch",
@@ -34,6 +35,8 @@ final class ContextRedactorTests: XCTestCase {
         XCTAssertEqual(R.redact("git clone https://alice:pa55word@github.com/acme/repo.git"),
                        "git clone https://[redacted]@github.com/acme/repo.git")
         XCTAssertEqual(R.redact("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg (cut short"), "[redacted private key]")
+        XCTAssertEqual(R.redact("-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n=AbCd\n-----END PGP PRIVATE KEY BLOCK-----\nafter"),
+                       "[redacted private key]\nafter")
         XCTAssertEqual(R.redact("basic configuration of the token parser"), "basic configuration of the token parser")
         XCTAssertEqual(R.redact("npm test -- --watch"), "npm test -- --watch")
         for c in Self.cases { XCTAssertEqual(R.redact(R.redact(c)), R.redact(c), "idempotent: \(c)") }

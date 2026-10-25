@@ -42,7 +42,7 @@ PER_EVENT_CHARS = 300
 
 _SECRET_PATTERNS = [
     # PEM private keys (multi-line, so collapse the whole block).
-    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)", re.S),
+    (re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$)", re.S),
      "[redacted private key]"),
     # Authorization headers / bearer tokens.
     # "Basic"/"token" are ordinary words too ("basic configuration"), so

@@ -572,7 +572,8 @@ final class SessionRemoteTests: XCTestCase {
         try (#"{"type":"started","agentId":"a1","label":"capture","phase":"Capture"}"# + "\n")
             .write(to: runDir.appendingPathComponent("journal.jsonl"), atomically: true, encoding: .utf8)
         let agentLine = String(data: try JSONSerialization.data(withJSONObject: [
-            "type": "assistant", "uuid": "x1", "message": ["role": "assistant", "content": [["type": "text", "text": "capturing level 3"]]]]),
+            "type": "assistant", "uuid": "x1", "isSidechain": true,   // as every real agent record is
+            "message": ["role": "assistant", "content": [["type": "text", "text": "capturing level 3"]]]]),
                                encoding: .utf8)!
         try (agentLine + "\n").write(to: runDir.appendingPathComponent("agent-a1.jsonl"), atomically: true, encoding: .utf8)
 

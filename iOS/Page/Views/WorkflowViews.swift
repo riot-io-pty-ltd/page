@@ -156,10 +156,16 @@ struct WorkflowRunView: View {
                 .padding(.vertical, 4)
             }
             let running = run.agents.filter(\.running)
-            let done = run.agents.filter { !$0.running }
+            let done = run.agents.filter { $0.state == "done" }
+            let other = run.agents.filter { !$0.running && $0.state != "done" }
             if !running.isEmpty {
                 Section("Running · \(running.count)") {
                     ForEach(running) { agentRow($0) }
+                }
+            }
+            if !other.isEmpty {
+                Section("Failed or didn't finish · \(other.count)") {
+                    ForEach(other) { agentRow($0) }
                 }
             }
             if !done.isEmpty {
@@ -178,7 +184,8 @@ struct WorkflowRunView: View {
     private func agentRow(_ agent: WorkflowRun.Agent) -> some View {
         NavigationLink(value: agent) {
             HStack(spacing: Theme.Space.m) {
-                StatusDot(color: agent.running ? LiveSessionState.active.color : Theme.Colour.textMuted)
+                StatusDot(color: agent.running ? LiveSessionState.active.color
+                          : agent.state == "failed" ? Theme.Colour.destructiveText : Theme.Colour.textMuted)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(agent.label)
                         .font(Theme.Font.body15)
@@ -195,7 +202,7 @@ struct WorkflowRunView: View {
                 }
             }
         }
-        .accessibilityLabel("\(agent.label), \(agent.running ? "running" : "done")")
+        .accessibilityLabel("\(agent.label), \(agent.running ? "running" : agent.state == "done" ? "done" : agent.state == "failed" ? "failed" : "didn't finish")")
     }
 }
 

@@ -22,8 +22,12 @@ struct WorkflowRunInfo: Equatable {
         let id: String
         let label: String
         let phase: String?
-        let done: Bool
+        /// running, done, failed, or stopped (its run ended or stalled
+        /// before it finished).
+        let state: String
         let lastActivityAt: Date?
+
+        var isRunning: Bool { state == "running" }
     }
 
     let id: String
@@ -49,7 +53,7 @@ struct WorkflowRunInfo: Equatable {
             "done": done, "total": total, "startedAt": ms(startedAt), "endedAt": ms(endedAt),
             "tokens": tokens ?? NSNull(),
             "agents": agents.map { a in
-                ["id": a.id, "label": a.label, "phase": a.phase ?? NSNull(), "state": a.done ? "done" : "running",
+                ["id": a.id, "label": a.label, "phase": a.phase ?? NSNull(), "state": a.state,
                  "lastActivityAt": ms(a.lastActivityAt)] as [String: Any]
             },
         ]
@@ -146,9 +150,10 @@ enum SessionWorkflows {
         /// In start order.
         var agents: [(id: String, label: String, phase: String?)] = []
         var finished = Set<String>()
+        var failed = Set<String>()
 
         static func == (a: Journal, b: Journal) -> Bool {
-            a.agents.map(\.id) == b.agents.map(\.id) && a.finished == b.finished
+            a.agents.map(\.id) == b.agents.map(\.id) && a.finished == b.finished && a.failed == b.failed
         }
     }
 
@@ -164,6 +169,8 @@ enum SessionWorkflows {
                 j.agents.append((id, (obj["label"] as? String) ?? "agent", obj["phase"] as? String))
             case "result":
                 j.finished.insert(id)
+            case "failed":
+                j.failed.insert(id)
             default:
                 continue
             }
@@ -213,12 +220,15 @@ enum SessionWorkflows {
         var status = end?.status ?? "running"
         if end == nil, let last = lastWrite ?? runStartedAt, now.timeIntervalSince(last) > stallAfter { status = "stalled" }
         let agents = journal.agents.map { a in
-            WorkflowRunInfo.Agent(id: a.id, label: clip(ContextRedactor.redact(a.label), maxLabel),
-                                  phase: a.phase.map { clip($0, maxPhase) },
-                                  done: journal.finished.contains(a.id), lastActivityAt: agentActivity[a.id])
+            let state = journal.finished.contains(a.id) ? "done"
+                : journal.failed.contains(a.id) ? "failed"
+                : status == "running" ? "running" : "stopped"
+            return WorkflowRunInfo.Agent(id: a.id, label: clip(ContextRedactor.redact(a.label), maxLabel),
+                                         phase: a.phase.map { clip($0, maxPhase) },
+                                         state: state, lastActivityAt: agentActivity[a.id])
         }
-        // Running first (newest first), then finished (most recent first).
-        let ordered = agents.filter { !$0.done }.reversed() + agents.filter(\.done).sorted {
+        // Running first (newest first), then the rest (most recent first).
+        let ordered = agents.filter(\.isRunning).reversed() + agents.filter { !$0.isRunning }.sorted {
             ($0.lastActivityAt ?? .distantPast) > ($1.lastActivityAt ?? .distantPast)
         }
         let name = end?.name ?? scriptName ?? id
@@ -289,7 +299,8 @@ final class SessionWorkflowScanner {
     private var launches: [String: [String: SessionWorkflows.Launch]] = [:]
     private var journals: [String: (Stamp, SessionWorkflows.Journal)] = [:]
     private var ends: [String: (Stamp, SessionWorkflows.EndRecord?)] = [:]
-    private var scriptNames: [String: String?] = [:]
+    /// By transcript, then script path.
+    private var scriptNames: [String: [String: String?]] = [:]
 
     /// Bytes of session transcript read per chunk, and per call in all, so
     /// a huge transcript is searched over a few calls rather than one stall.
@@ -315,7 +326,7 @@ final class SessionWorkflowScanner {
                 if let st = stamp(dir + "/agent-\(a.id).jsonl") { activity[a.id] = st.mtime }
             }
             let launch = launches[transcript]?[id]
-            let name = launch?.scriptPath.flatMap(cachedScriptName)
+            let name = launch?.scriptPath.flatMap { cachedScriptName($0, transcript: transcript) }
             let started = (try? fm.attributesOfItem(atPath: dir))?[.creationDate] as? Date
             out.append(SessionWorkflows.run(id: id, launch: launch, scriptName: name, journal: journal, end: end,
                                             agentActivity: activity, runStartedAt: started, now: now))
@@ -355,8 +366,14 @@ final class SessionWorkflowScanner {
             budget -= min(budget, h - start)
             var body = data[data.startIndex...]
             if start > 0 {
-                // The first line may begin before `start`: leave it for the next chunk.
-                guard let nl = data.firstIndex(of: UInt8(ascii: "\n")) else { head[transcript] = start; continue }
+                // The first line may begin before `start`: leave it for the
+                // next chunk. A newline only at the very end ends a line of
+                // 8 MB or more: skip it, as the forward scan does.
+                let searchEnd = data.index(before: data.endIndex)
+                guard let nl = data[data.startIndex..<searchEnd].firstIndex(of: UInt8(ascii: "\n")) else {
+                    head[transcript] = start
+                    continue
+                }
                 body = data[data.index(after: nl)...]
                 h = start + UInt64(data.distance(from: data.startIndex, to: data.index(after: nl)))
             } else {
@@ -379,17 +396,21 @@ final class SessionWorkflowScanner {
     private func cachedEnd(_ path: String) -> SessionWorkflows.EndRecord? {
         guard let st = stamp(path) else { return nil }
         if let c = ends[path], c.0 == st { return c.1 }
-        let r = BoundedFileRead.read(path, maxBytes: 1 << 20).flatMap(SessionWorkflows.endRecord)
+        // Written once when the run ends (cached by stamp, so read once).
+        // Present but unreadable still means the run ended: never shown as
+        // running or stalled forever.
+        let r = BoundedFileRead.read(path, maxBytes: 64 << 20).flatMap(SessionWorkflows.endRecord)
+            ?? SessionWorkflows.EndRecord(status: "completed", endedAt: st.mtime)
         ends[path] = (st, r)
         return r
     }
 
-    private func cachedScriptName(_ path: String) -> String? {
-        if let c = scriptNames[path] { return c }
+    private func cachedScriptName(_ path: String, transcript: String) -> String? {
+        if let c = scriptNames[transcript]?[path] { return c }
         let name = BoundedFileRead.read(path, maxBytes: 256 << 10)
             .flatMap { String(data: $0, encoding: .utf8) }
             .flatMap(SessionWorkflows.scriptName)
-        scriptNames[path] = name
+        scriptNames[transcript, default: [:]][path] = name
         return name
     }
 
@@ -403,6 +424,7 @@ final class SessionWorkflowScanner {
         tail[transcript] = nil
         head[transcript] = nil
         launches[transcript] = nil
+        scriptNames[transcript] = nil
         let prefix = SessionWorkflows.sessionDir(transcript: transcript) + "/"
         journals = journals.filter { !$0.key.hasPrefix(prefix) }
         ends = ends.filter { !$0.key.hasPrefix(prefix) }
