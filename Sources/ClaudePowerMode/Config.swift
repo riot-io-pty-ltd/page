@@ -105,6 +105,9 @@ struct Config: Codable, Equatable {
     /// Opt-in: start the low-battery pause about 10 min before the cutoff
     /// (by the forecast) instead of at it, so agents have time to wrap up.
     var earlyBatteryPause: Bool = false
+    /// With usage capture on (Preferences → Rate limits), page once when
+    /// the 5-hour limit is 30 min away at the current pace.
+    var usageForecastPageEnabled: Bool = true
 
     init() {}
 
@@ -126,7 +129,7 @@ struct Config: Codable, Equatable {
         case keepAwakeLidClosedOnAC, keepAwakeLidClosedOnBattery
         case lowBatteryAction, lowBatteryPauseGraceSeconds, resumeAfterBatteryRecovery
         case stuckAlertsEnabled, stuckAfterMinutes, turnSummaryEnabled, phoneStartSessionsEnabled
-        case batteryForecastPageEnabled, earlyBatteryPause
+        case batteryForecastPageEnabled, earlyBatteryPause, usageForecastPageEnabled
     }
 
     /// Collects per-key decode problems. Passed through `decoder.userInfo`
@@ -191,6 +194,7 @@ struct Config: Codable, Equatable {
         phoneStartSessionsEnabled = field(.phoneStartSessionsEnabled, d.phoneStartSessionsEnabled)
         batteryForecastPageEnabled = field(.batteryForecastPageEnabled, d.batteryForecastPageEnabled)
         earlyBatteryPause = field(.earlyBatteryPause, d.earlyBatteryPause)
+        usageForecastPageEnabled = field(.usageForecastPageEnabled, d.usageForecastPageEnabled)
     }
 
     // MARK: validation

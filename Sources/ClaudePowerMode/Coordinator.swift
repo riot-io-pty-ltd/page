@@ -66,6 +66,9 @@ final class Coordinator {
         /// Time to the low-battery cutoff at the current drain (on battery
         /// only, once there's enough to go on).
         var batteryForecast: BatteryForecast.Estimate? = nil
+        /// "Claude usage: 5-hour 62% (resets 5:00 pm) · 7-day 30%" and the
+        /// forecast line (empty without usage capture).
+        var usageLines: [String] = []
 
         var relayConnected: Bool { relayState == .connected }
         var boosting: Bool { awake.preventIdleSleep }
@@ -179,6 +182,11 @@ final class Coordinator {
     private var forecastEstimate: BatteryForecast.Estimate?
     /// The open "cutoff soon" page, if any.
     private var forecastPageId: String?
+    /// Claude usage from the status line wrapper (tick queue only).
+    private let usageCapture = UsageCapture()
+    private var usage = UsageForecast()
+    private var usageReadStamp: Date?
+    private var usagePageId: String?
     private var savedBattery = BatteryPolicy()
     private let batteryStore = BatteryPauseStore()
     /// Pausing and resuming type into terminals and can block for seconds;
@@ -710,9 +718,9 @@ final class Coordinator {
         }
         // Low-battery pages are the Coordinator's own, not a backend's.
         // The forecast page is information only.
-        if BatteryForecast.isPageId(reply.interventionId) {
+        if BatteryForecast.isPageId(reply.interventionId) || UsageForecast.isPageId(reply.interventionId) {
             relay?.sendReplyInjected(interventionId: reply.interventionId, method: "none", success: false,
-                                     detail: "Nothing to answer — plug in to keep your agents going", output: "")
+                                     detail: "Nothing to answer here", output: "")
             return
         }
         if BatteryPolicy.isLowBatteryPageId(reply.interventionId) {
@@ -783,6 +791,7 @@ final class Coordinator {
             // Worker would close them as stale within a minute.
             ids.formUnion(battery.entries.filter { $0.pageOpen && $0.session.backend == backend.id }.map(\.pageId))
             if backend.id == .claude, let id = forecastPageId { ids.insert(id) }
+            if backend.id == .claude, let id = usagePageId { ids.insert(id) }
             relay.sendSync(backend: backend.id, openIds: ids.sorted())
         }
     }
@@ -885,12 +894,40 @@ final class Coordinator {
         persistBattery()
         applyPower(p, snapshots: lastSnapshots)
         updateForecastPage(estimate, power: p, cfg: cfg)
+        refreshUsage(cfg: cfg)
         return before.0 != battery || before.1 != power.held || before.2 != sleepGuard.isActive
             || before.3 != sleepGuard.cleanupPending || estimateChanged
     }
 
     /// Claude usage for the heartbeat (`UsageForecast`), nil when unknown.
-    private func usageHeartbeat() -> [String: Any]? { nil }
+    private func usageHeartbeat() -> [String: Any]? { usage.heartbeatPayload(now: Date()) }
+
+    /// Reads the status line wrapper's latest numbers (when they changed)
+    /// and opens or closes the "limit soon" page.
+    private func refreshUsage(cfg: Config) {
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: usageCapture.inputURL.path))?[.modificationDate] as? Date
+        if mtime != usageReadStamp {
+            usageReadStamp = mtime
+            if let snap = usageCapture.read() { usage.observe(snap) }
+        }
+        let now = Date()
+        let busy = lastSnapshots.filter { isEnabled($0.backendID) }.flatMap(\.sessions).filter { $0.state == .active }.count
+        let hit = usage.hitAt(now: now)
+        let wants = cfg.usageForecastPageEnabled && busy > 0 && hit.map { $0.timeIntervalSince(now) <= UsageForecast.pageWithin } == true
+        if wants, usagePageId == nil, let hit, let relay, let five = usage.latest?.fiveHour {
+            let id = UsageForecast.pageId(hitAt: hit)
+            usagePageId = id
+            Logger.shared.log("Usage forecast: 5-hour limit around \(UsageForecast.time(hit)) — paging")
+            relay.sendInterventionOpened(InterventionEvent(
+                id: id, sessionId: UsageForecast.pageSessionId, cwd: "", projectName: "Claude usage",
+                kind: .rateLimit, openedAt: now,
+                context: UsageForecast.pageContext(hitAt: hit, pct: five.pct, resetsAt: five.resetsAt, busy: busy),
+                transcriptPath: "", backend: .claude, source: .terminal, subtype: "usage_forecast"))
+        } else if hit == nil || busy == 0, let id = usagePageId {
+            usagePageId = nil
+            relay?.sendInterventionClosed(id: id, reason: "resolved")
+        }
+    }
 
     /// The battery policy's settings for this reading. With the opt-in
     /// early pause, the cutoff moves up to the current charge once the
@@ -1336,7 +1373,8 @@ final class Coordinator {
             backends: infos,
             configProblem: configProblem,
             localModels: lastLocalActivities,
-            batteryForecast: lastPower.onAC ? nil : forecastEstimate
+            batteryForecast: lastPower.onAC ? nil : forecastEstimate,
+            usageLines: usage.menuLines(now: Date())
         )
         onStateChange?(snap)
     }

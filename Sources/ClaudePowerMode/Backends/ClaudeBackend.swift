@@ -113,6 +113,10 @@ final class ClaudeBackend: AgentBackend {
     private var rateLimitEventsByPage: [String: RateLimitEvent] = [:]
     /// Rate limits to auto-resume in the live session once they reset.
     private var pendingAutoResumes: [String: RateLimitEvent] = [:]
+    /// Text the phone asked to send when a limit resets (a reply to its
+    /// rate-limit page), by event id. Typed instead of the carry-on prompt,
+    /// even with auto-resume off.
+    private var queuedResetMessages: [String: String] = [:]
     /// Prime the rate-limit watcher before the next scan (watcher just
     /// enabled), so the backlog of old events doesn't fire at once.
     private var needsRateLimitPrime = false
@@ -538,8 +542,9 @@ final class ClaudeBackend: AgentBackend {
             if !expired && UserPresence.isActive(within: max(120, cfg.idlePageOnlyWhenAwaySeconds)) { continue }
             lock.lock()
             pendingAutoResumes.removeValue(forKey: key)
+            let queued = queuedResetMessages.removeValue(forKey: key)
             lock.unlock()
-            guard cfg.autoResumeEnabled, !expired,
+            guard cfg.autoResumeEnabled || queued != nil, !expired,
                   !Self.rateLimitCleared(event, sessions: sessions) else { continue }
             guard let live = sessions.first(where: { $0.sessionId == event.sessionId }) else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) no longer running — leaving it to the scheduled job")
@@ -549,8 +554,26 @@ final class ClaudeBackend: AgentBackend {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) is \(live.status.rawValue) — not typing")
                 continue
             }
-            autoResumeLiveSession(event, prompt: cfg.carryOnPrompt)
+            autoResumeLiveSession(event, prompt: queued ?? cfg.carryOnPrompt)
         }
+    }
+
+    /// A written reply to a rate-limit page while the limit is still on:
+    /// typed into the session once it resets (`refreshRateLimitPages`).
+    /// nil when it doesn't apply (no text, or the limit already reset).
+    private func queueForReset(_ reply: RelayReply, page: InterventionEvent) -> InjectionResult? {
+        let text = InjectionExecutor.sanitize(reply.text)
+        lock.lock()
+        defer { lock.unlock() }
+        guard !text.isEmpty, let event = rateLimitEventsByPage[page.id], event.resetTime > Date() else { return nil }
+        queuedResetMessages[event.uniqueId] = text
+        pendingAutoResumes[event.uniqueId] = event
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = Calendar.current.isDateInToday(event.resetTime) ? .none : .short
+        Logger.shared.log("Rate limit: queued a \(text.count)-char message for \(event.sessionId.prefix(8)) at reset")
+        return InjectionResult(method: .none, success: true, output: "queued for reset",
+                               detail: "Will send it when the limit resets at \(f.string(from: event.resetTime))")
     }
 
     private func autoResumeLiveSession(_ event: RateLimitEvent, prompt: String) {
@@ -609,6 +632,10 @@ final class ClaudeBackend: AgentBackend {
             return
         }
 
+        if let page, let queued = queueForReset(reply, page: page) {
+            finishReply(id, queued)
+            return
+        }
         if let stuck, reply.action == "deny", stuck.subtype != "workflow_stalled" {
             stopFromStuckPage(id, page: stuck)
             return

@@ -35,6 +35,14 @@ struct PreferencesForm: Equatable {
     var carryOnPrompt: String
     var holdAssertionUntilReset: Bool
     var wakeViaPmsetEnabled: Bool
+    // Alerts (v4)
+    var stuckAlertsEnabled: Bool
+    var stuckAfterMinutes: Double
+    var turnSummaryEnabled: Bool
+    var phoneStartSessionsEnabled: Bool
+    var batteryForecastPageEnabled: Bool
+    var earlyBatteryPause: Bool
+    var usageForecastPageEnabled: Bool
 
     init(_ c: Config) {
         relayEnabled = c.relayEnabled
@@ -64,6 +72,13 @@ struct PreferencesForm: Equatable {
         carryOnPrompt = c.carryOnPrompt
         holdAssertionUntilReset = c.holdAssertionUntilReset
         wakeViaPmsetEnabled = c.wakeViaPmsetEnabled
+        stuckAlertsEnabled = c.stuckAlertsEnabled
+        stuckAfterMinutes = c.stuckAfterMinutes
+        turnSummaryEnabled = c.turnSummaryEnabled
+        phoneStartSessionsEnabled = c.phoneStartSessionsEnabled
+        batteryForecastPageEnabled = c.batteryForecastPageEnabled
+        earlyBatteryPause = c.earlyBatteryPause
+        usageForecastPageEnabled = c.usageForecastPageEnabled
     }
 
     /// Why this form can't be saved, or nil.
@@ -121,6 +136,13 @@ struct PreferencesForm: Equatable {
         if carryOnPrompt != baseline.carryOnPrompt { c.carryOnPrompt = carryOnPrompt }
         if holdAssertionUntilReset != baseline.holdAssertionUntilReset { c.holdAssertionUntilReset = holdAssertionUntilReset }
         if wakeViaPmsetEnabled != baseline.wakeViaPmsetEnabled { c.wakeViaPmsetEnabled = wakeViaPmsetEnabled }
+        if stuckAlertsEnabled != baseline.stuckAlertsEnabled { c.stuckAlertsEnabled = stuckAlertsEnabled }
+        if stuckAfterMinutes != baseline.stuckAfterMinutes { c.stuckAfterMinutes = stuckAfterMinutes }
+        if turnSummaryEnabled != baseline.turnSummaryEnabled { c.turnSummaryEnabled = turnSummaryEnabled }
+        if phoneStartSessionsEnabled != baseline.phoneStartSessionsEnabled { c.phoneStartSessionsEnabled = phoneStartSessionsEnabled }
+        if batteryForecastPageEnabled != baseline.batteryForecastPageEnabled { c.batteryForecastPageEnabled = batteryForecastPageEnabled }
+        if earlyBatteryPause != baseline.earlyBatteryPause { c.earlyBatteryPause = earlyBatteryPause }
+        if usageForecastPageEnabled != baseline.usageForecastPageEnabled { c.usageForecastPageEnabled = usageForecastPageEnabled }
         return c
     }
 }
@@ -188,12 +210,24 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
     private let holdAssertionToggle = NSButton(checkboxWithTitle: "Keep the Mac awake through the reset wait", target: nil, action: nil)
     private let wakePmsetToggle = NSButton(checkboxWithTitle: "Schedule a pmset wake before the resume (uses the power helper — Power tab)", target: nil, action: nil)
 
+    // Alerts
+    private let stuckToggle = NSButton(checkboxWithTitle: "Page me when an agent looks stuck (a failing command on repeat, no progress, a stalled workflow)", target: nil, action: nil)
+    private let stuckSlider = NSSlider()
+    private let stuckLabel = NSTextField(labelWithString: "")
+    private let turnSummaryToggle = NSButton(checkboxWithTitle: "Start finished-turn pages with what changed (“Changed 3 files (+120 −14) · tests passed”)", target: nil, action: nil)
+    private let batteryForecastToggle = NSButton(checkboxWithTitle: "Page me when the battery cutoff is about 15 minutes away while agents work", target: nil, action: nil)
+    private let usageForecastToggle = NSButton(checkboxWithTitle: "Page me when I'm about 30 minutes from Claude's 5-hour limit (needs usage below)", target: nil, action: nil)
+    private let startSessionsToggle = NSButton(checkboxWithTitle: "Let my phone start new Claude sessions (in cmux, in folders Claude already used)", target: nil, action: nil)
+    private let earlyPauseToggle = NSButton(checkboxWithTitle: "Pause early: about 10 minutes before the cutoff, by the drain forecast", target: nil, action: nil)
+    private let usageCaptureToggle = NSButton(checkboxWithTitle: "Show my Claude usage (5-hour and 7-day) and forecast the limit", target: nil, action: nil)
+    private let usageCaptureStatus = NSTextField(wrappingLabelWithString: "")
+
     private var relayProbeGeneration = 0
 
     init(coordinator: Coordinator) {
         self.coordinator = coordinator
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 700),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -237,6 +271,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         tabs.addTabViewItem(tab("Phone", phoneTab()))
         tabs.addTabViewItem(tab("Power", powerTab()))
         tabs.addTabViewItem(tab("Battery", batteryTab()))
+        tabs.addTabViewItem(tab("Alerts", alertsTab()))
         tabs.addTabViewItem(tab("Agents", agentsTab()))
         tabs.addTabViewItem(tab("Rate limits", rateLimitTab()))
         root.addArrangedSubview(tabs)
@@ -341,6 +376,35 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         remoteSessionsToggle.action = #selector(controlChanged)
         s.addArrangedSubview(remoteSessionsToggle)
         s.addArrangedSubview(hint("End-to-end encrypted with the key in the pairing QR — the relay can’t read it. Phones paired before this need to scan the QR again."))
+        startSessionsToggle.target = self
+        startSessionsToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(startSessionsToggle)
+        s.addArrangedSubview(hint("Opens a cmux workspace and runs claude with your prompt. Only folders where Claude sessions already ran in the last 30 days; only from your paired phone."))
+        return s
+    }
+
+    private func alertsTab() -> NSView {
+        let s = section()
+        stuckToggle.target = self
+        stuckToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(stuckToggle)
+        s.addArrangedSubview(sliderRow(
+            title: "Count it as no progress after:",
+            slider: stuckSlider, label: stuckLabel,
+            min: Config.Limits.stuckAfterMinutes.lowerBound, max: 120))
+        s.addArrangedSubview(hint("A loop is the same call failing 3 times in a row, or 5 times in the last 12 steps. Reply to the page to steer it, or Deny to stop it (Esc)."))
+        s.addArrangedSubview(separator())
+        turnSummaryToggle.target = self
+        turnSummaryToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(turnSummaryToggle)
+        s.addArrangedSubview(hint("Only counts go in the page. The file list and diff are sent to your phone end-to-end encrypted when you open them."))
+        s.addArrangedSubview(separator())
+        batteryForecastToggle.target = self
+        batteryForecastToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(batteryForecastToggle)
+        usageForecastToggle.target = self
+        usageForecastToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(usageForecastToggle)
         return s
     }
 
@@ -411,6 +475,11 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         resumeAfterRecoveryToggle.target = self
         resumeAfterRecoveryToggle.action = #selector(controlChanged)
         s.addArrangedSubview(resumeAfterRecoveryToggle)
+        s.addArrangedSubview(separator())
+        earlyPauseToggle.target = self
+        earlyPauseToggle.action = #selector(controlChanged)
+        s.addArrangedSubview(earlyPauseToggle)
+        s.addArrangedSubview(hint("Gives agents time to write their summary before the battery is critical. Uses the same pause as above."))
         return s
     }
 
@@ -468,8 +537,44 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         wakePmsetToggle.target = self
         wakePmsetToggle.action = #selector(controlChanged)
         s.addArrangedSubview(wakePmsetToggle)
-        s.addArrangedSubview(hint("Auto-resume works for Claude sessions only."))
+        s.addArrangedSubview(hint("Auto-resume works for Claude sessions only. On your phone you can also reply to a rate-limit page with a message to send when it resets."))
+        s.addArrangedSubview(separator())
+        usageCaptureToggle.target = self
+        usageCaptureToggle.action = #selector(usageCaptureChanged)
+        s.addArrangedSubview(usageCaptureToggle)
+        s.addArrangedSubview(hint("Claude Code only gives these numbers to your status line, so Page wraps it: a small script saves them, then runs your own status line unchanged. Changes ~/.claude/settings.json (backed up first); turning this off puts it back."))
+        usageCaptureStatus.font = .systemFont(ofSize: 11)
+        usageCaptureStatus.preferredMaxLayoutWidth = 540
+        s.addArrangedSubview(usageCaptureStatus)
         return s
+    }
+
+    /// Applied straight away (not on Save): it edits Claude Code's settings,
+    /// not Page's.
+    @objc private func usageCaptureChanged() {
+        let on = usageCaptureToggle.state == .on
+        do {
+            let backup = try UsageCapture().set(on)
+            usageCaptureStatus.textColor = .secondaryLabelColor
+            usageCaptureStatus.stringValue = on
+                ? "On — numbers appear after Claude Code next draws its status line." + (backup.map { " Backup: \($0.lastPathComponent)" } ?? "")
+                : "Off — your status line is back as it was."
+        } catch {
+            usageCaptureToggle.state = on ? .off : .on
+            usageCaptureStatus.textColor = .systemRed
+            usageCaptureStatus.stringValue = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        }
+    }
+
+    private func refreshUsageCaptureStatus() {
+        switch UsageCapture().state() {
+        case .on: usageCaptureToggle.state = .on
+        case .off: usageCaptureToggle.state = .off
+        case .unreadable(let why):
+            usageCaptureToggle.state = .off
+            usageCaptureStatus.textColor = .systemRed
+            usageCaptureStatus.stringValue = why
+        }
     }
 
     private func sliderRow(title: String, slider: NSSlider, label: NSTextField,
@@ -541,6 +646,14 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         carryOnField.stringValue = f.carryOnPrompt
         holdAssertionToggle.state = f.holdAssertionUntilReset ? .on : .off
         wakePmsetToggle.state = f.wakeViaPmsetEnabled ? .on : .off
+        stuckToggle.state = f.stuckAlertsEnabled ? .on : .off
+        stuckSlider.doubleValue = f.stuckAfterMinutes
+        turnSummaryToggle.state = f.turnSummaryEnabled ? .on : .off
+        startSessionsToggle.state = f.phoneStartSessionsEnabled ? .on : .off
+        batteryForecastToggle.state = f.batteryForecastPageEnabled ? .on : .off
+        earlyPauseToggle.state = f.earlyBatteryPause ? .on : .off
+        usageForecastToggle.state = f.usageForecastPageEnabled ? .on : .off
+        refreshUsageCaptureStatus()
         refreshLabels()
     }
 
@@ -575,6 +688,13 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         f.carryOnPrompt = prompt.isEmpty ? Config().carryOnPrompt : prompt
         f.holdAssertionUntilReset = holdAssertionToggle.state == .on
         f.wakeViaPmsetEnabled = wakePmsetToggle.state == .on
+        f.stuckAlertsEnabled = stuckToggle.state == .on
+        f.stuckAfterMinutes = stuckSlider.doubleValue.rounded()
+        f.turnSummaryEnabled = turnSummaryToggle.state == .on
+        f.phoneStartSessionsEnabled = startSessionsToggle.state == .on
+        f.batteryForecastPageEnabled = batteryForecastToggle.state == .on
+        f.earlyBatteryPause = earlyPauseToggle.state == .on
+        f.usageForecastPageEnabled = usageForecastToggle.state == .on
         return f
     }
 
@@ -600,6 +720,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate, N
         idleDelayLabel.stringValue = Self.duration(idleDelaySlider.doubleValue, zero: "Now")
         let minutes = Int(holdAwakeSlider.doubleValue.rounded())
         holdAwakeLabel.stringValue = minutes == 0 ? "Don’t" : (minutes < 60 ? "\(minutes) min" : "\(minutes / 60)h \(minutes % 60)m")
+        stuckLabel.stringValue = "\(Int(stuckSlider.doubleValue.rounded())) min"
+        stuckSlider.isEnabled = stuckToggle.state == .on
+        earlyPauseToggle.isEnabled = pausing
 
         let relayOn = relayToggle.state == .on
         let url = relayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

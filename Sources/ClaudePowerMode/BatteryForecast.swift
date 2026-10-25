@@ -93,7 +93,7 @@ struct BatteryForecast: Equatable {
     /// The opt-in early pause trips this far ahead of the cutoff.
     static let earlyPauseWithin = 10
 
-    static let pageSessionId = "page-mac"
+    static let pageSessionId = "page-mac-battery"
 
     static func pageId(openedAt: Date) -> String { "page-mac-battery_forecast-\(Int(openedAt.timeIntervalSince1970))" }
     static func isPageId(_ id: String) -> Bool { id.hasPrefix("page-mac-battery_forecast-") }

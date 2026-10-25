@@ -372,6 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             addInfo(menu, "Status: \(s.statusLine)")
             addInfo(menu, powerLine(s.power))
             if let e = s.batteryForecast { addInfo(menu, "   " + BatteryForecast.menuLine(e)) }
+            for line in s.usageLines { addInfo(menu, line) }
             let cfg = coordinator.config
             for line in Self.awakeLines(s, cutoff: cfg.lowBatteryCutoff) {
                 addInfo(menu, line)
