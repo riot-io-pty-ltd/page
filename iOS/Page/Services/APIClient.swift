@@ -822,6 +822,7 @@ final class APIClient: NSObject, ObservableObject {
             if let n = payload["activeSessions"] as? NSNumber { snap.activeSessions = n.intValue }
             if let n = payload["battery"] as? NSNumber { snap.battery = n.intValue }
             if let ac = payload["onAC"] as? Bool { snap.onAC = ac }
+            snap.applyExtras(payload)
             // A live heartbeat proves the Mac is connected right now.
             if statusEndpointAvailable == true { snap.macConnected = true }
             snap.macEverSeen = true

@@ -7,9 +7,7 @@ struct KindChip: View {
     let kind: InterventionKind
     var subtype: String? = nil
 
-    private var text: String {
-        kind == .approval && subtype == "plan" ? "PLAN APPROVAL" : kind.label
-    }
+    private var text: String { PageSubtype.chip(kind: kind, subtype: subtype) }
 
     var body: some View {
         Text(text)

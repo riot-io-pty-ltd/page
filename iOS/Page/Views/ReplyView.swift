@@ -30,6 +30,8 @@ struct ReplyView: View {
     @State private var now = Date()
     /// The archive lookup for a close that arrived without a reason is done.
     @State private var closeLookupFinished = false
+    /// The session's changes, opened from a turn summary.
+    @State private var showingDiff = false
 
     private struct Attempt: Equatable {
         let action: ReplyAction
@@ -320,13 +322,32 @@ struct ReplyView: View {
                 .disabled(iv.context.isEmpty)
                 .accessibilityLabel(copied ? "Copied" : "Copy request text")
             }
-            Text(iv.context.isEmpty ? "No details were sent with this page." : iv.context)
+            let parts = iv.kind == .idle ? TurnSummaryLine.split(iv.context) : (summary: nil, rest: iv.context)
+            if let summary = parts.summary {
+                Button { showingDiff = true } label: {
+                    HStack(spacing: Theme.Space.s) {
+                        Image(systemName: summary.contains("tests failed") ? "exclamationmark.triangle" : "doc.text.magnifyingglass")
+                        Text(summary).font(Theme.Font.bodyEm)
+                        Spacer(minLength: 4)
+                        Text("View changes").font(Theme.Font.caption12)
+                        Image(systemName: "chevron.right").font(.caption2)
+                    }
+                    .foregroundStyle(summary.contains("tests failed") ? Theme.Colour.warning : Theme.Colour.text)
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 10)
+                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Theme.Colour.surfaceInset))
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Shows the files and diff")
+            }
+            Text(parts.rest.isEmpty ? "No details were sent with this page." : parts.rest)
                 .font(isCode ? Theme.Font.mono13 : Theme.Font.body15)
                 .foregroundStyle(Theme.Colour.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .sheet(isPresented: $showingDiff) { DiffView(sessionId: iv.sessionId, title: iv.projectName) }
         .padding(Theme.Space.l)
         .background(isCode ? Theme.Colour.surfaceInset : Theme.Colour.surfaceRaised)
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
@@ -408,11 +429,32 @@ struct ReplyView: View {
                 }
             case .userInput:
                 ReplyField(text: $replyText, placeholder: "Type your answer…", enabled: enabled) { send(.custom, text: $0) }
+            case .idle where PageSubtype.isStuck(iv.subtype):
+                if PageSubtype.canStop(iv.subtype) {
+                    QuickButton("Stop it", style: .destructive, enabled: enabled) { tapQuick(.deny) }
+                }
+                ReplyField(text: $replyText, placeholder: PageSubtype.canStop(iv.subtype) ? "Tell it what to do instead…" : "Tell it what to do next…",
+                           enabled: enabled) { send(.custom, text: $0) }
+                Text(PageSubtype.canStop(iv.subtype)
+                     ? "Stop presses Esc in the session. A message is queued until its current step ends."
+                     : "Your message is typed into the session that started the workflow.")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             case .idle:
                 QuickButton("Carry on", style: .outline, enabled: enabled) { tapQuick(.carryOn) }
                 ReplyField(text: $replyText, placeholder: "Tell it what to do next…", enabled: enabled) { send(.custom, text: $0) }
+            case .rateLimit where PageSubtype.isForecast(iv.subtype):
+                Text(iv.subtype == "battery_forecast"
+                     ? "Nothing to answer. Plug your Mac in to keep the agents going."
+                     : "Nothing to answer. Page keeps the Mac awake through the reset and can resume sessions when it resets.")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                QuickButton("Close", style: .outline, enabled: true) { dismiss() }
             case .rateLimit:
-                Text("Nothing to answer. Page on your Mac resumes the session when the limit resets if auto-resume is on.")
+                ReplyField(text: $replyText, placeholder: "Send this when the limit resets…", enabled: enabled) { send(.custom, text: $0) }
+                Text("Page on your Mac types it into the session once the limit resets. Leave it empty to use auto-resume (if it's on).")
                     .font(Theme.Font.caption12)
                     .foregroundStyle(Theme.Colour.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)

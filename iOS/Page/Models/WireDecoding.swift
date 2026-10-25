@@ -81,3 +81,25 @@ struct LossyList<Element: Decodable>: Decodable {
         droppedCount = dropped
     }
 }
+
+/// One loosely typed JSON value inside a small optional object (a diff's
+/// file, a start folder): scalars only, anything else is `.other`, so one
+/// odd field never fails the whole frame.
+enum AnyDecodable: Decodable, Equatable {
+    case string(String)
+    case number(Double)
+    case bool(Bool)
+    case other
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let b = try? c.decode(Bool.self) { self = .bool(b) }
+        else if let d = try? c.decode(Double.self) { self = .number(d) }
+        else if let s = try? c.decode(String.self) { self = .string(s) }
+        else { self = .other }
+    }
+
+    var string: String? { if case .string(let s) = self { return s } else { return nil } }
+    var double: Double? { if case .number(let d) = self, d.isFinite { return d } else { return nil } }
+    var int: Int? { double.flatMap { abs($0) < 1e12 ? Int($0) : nil } }
+}

@@ -170,8 +170,54 @@ enum TokenRetirement {
     }
 }
 
+/// v4 page subtypes: what they mean for the chip, headline and actions.
+enum PageSubtype {
+    static func isStuck(_ subtype: String?) -> Bool {
+        subtype == "looping" || subtype == "stuck" || subtype == "workflow_stalled"
+    }
+
+    /// Stop (Deny → Esc) applies to a busy session, not a stalled workflow.
+    static func canStop(_ subtype: String?) -> Bool { subtype == "looping" || subtype == "stuck" }
+
+    static func isForecast(_ subtype: String?) -> Bool {
+        subtype == "battery_forecast" || subtype == "usage_forecast"
+    }
+
+    static func chip(kind: InterventionKind, subtype: String?) -> String {
+        switch (kind, subtype) {
+        case (.approval, "plan"): return "PLAN APPROVAL"
+        case (.idle, "looping"), (.idle, "stuck"): return "LOOKS STUCK"
+        case (.idle, "workflow_stalled"): return "WORKFLOW STALLED"
+        case (.idle, "low_battery"): return "PAUSED"
+        case (.rateLimit, "battery_forecast"): return "BATTERY"
+        case (.rateLimit, "usage_forecast"): return "USAGE"
+        default: return kind.label
+        }
+    }
+}
+
+/// An idle page that starts "Changed 3 files (+12 −4) · tests passed" and a
+/// blank line (the Mac's turn summary): that line, and the reply after it.
+enum TurnSummaryLine {
+    static func split(_ context: String) -> (summary: String?, rest: String) {
+        guard let r = context.range(of: "\n\n") else { return (nil, context) }
+        let first = String(context[..<r.lowerBound])
+        let looksLikeSummary = (first.hasPrefix("Changed ") && first.contains(" file"))
+            || first == "tests passed" || first == "tests failed"
+        guard looksLikeSummary, first.count <= 120, !first.contains("\n") else { return (nil, context) }
+        return (first, String(context[r.upperBound...]))
+    }
+}
+
 enum ReplyCopy {
     static func headline(for iv: Intervention) -> String {
+        switch (iv.kind, iv.subtype) {
+        case (.idle, "looping"), (.idle, "stuck"): return "\(iv.agentName) looks stuck"
+        case (.idle, "workflow_stalled"): return "A workflow stopped making progress"
+        case (.rateLimit, "battery_forecast"): return "Battery cutoff soon"
+        case (.rateLimit, "usage_forecast"): return "Claude limit soon"
+        default: break
+        }
         switch iv.kind {
         case .approval:
             if iv.subtype == "plan" { return "Approve the plan?" }
@@ -534,6 +580,10 @@ struct MacStatusSnapshot: Equatable {
     /// pairing token. Absent on relays that predate it.
     var macEverSeen: Bool?
     var pendingCount: Int?
+    /// v4 heartbeat / status extras (absent from older Macs and relays).
+    var working: Int?
+    var forecast: MacBatteryForecast?
+    var usage: MacUsage?
 
     /// A Mac has provably never used this pairing: the relay says so and
     /// has no heartbeat on record. Requiring the missing heartbeat as well
@@ -560,7 +610,7 @@ struct MacStatusSnapshot: Equatable {
     }
 
     static func from(json: [String: Any]) -> MacStatusSnapshot {
-        MacStatusSnapshot(
+        var s = MacStatusSnapshot(
             macConnected: json["macConnected"] as? Bool,
             lastHeartbeatAt: PageDate.parse(any: json["lastHeartbeatAt"]),
             activeSessions: (json["activeSessions"] as? NSNumber)?.intValue,
@@ -569,6 +619,87 @@ struct MacStatusSnapshot: Equatable {
             macEverSeen: json["macEverSeen"] as? Bool,
             pendingCount: (json["pendingCount"] as? NSNumber)?.intValue
         )
+        s.applyExtras(json)
+        return s
+    }
+
+    /// The v4 fields of a heartbeat or /status body. Each replaces the old
+    /// value (a heartbeat without `forecast` means there is none now).
+    mutating func applyExtras(_ json: [String: Any]) {
+        working = (json["working"] as? NSNumber)?.intValue
+        forecast = MacBatteryForecast(json["forecast"])
+        usage = MacUsage(json["usage"])
+    }
+
+    /// "Battery 42% · cutoff in about 35 min" while a forecast applies.
+    var batteryLine: String? {
+        guard onAC != true, let f = forecast else { return nil }
+        let pct = batteryPercent.map { "Battery \($0)% · " } ?? ""
+        return f.minutes == 0 ? pct + "at the \(f.cutoff)% cutoff" : pct + "cutoff in about \(MacBatteryForecast.duration(f.minutes))"
+    }
+
+    /// "Claude 5-hour 62% · resets 5:00 PM · limit ~4:10 PM".
+    func usageLine(now: Date, format: (Date) -> String) -> String? {
+        guard let u = usage, let five = u.fiveHour else { return nil }
+        if let updated = u.updatedAt, now.timeIntervalSince(updated) > 6 * 3600 { return nil }
+        var parts = ["Claude 5-hour \(Int(five.pct.rounded()))%"]
+        if let r = five.resetsAt, r > now { parts.append("resets \(format(r))") }
+        if let hit = u.hitAt, hit > now { parts.append("limit ~\(format(hit))") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct MacBatteryForecast: Equatable {
+    let cutoff: Int
+    let minutes: Int
+    let drainPerHour: Double
+
+    init(cutoff: Int, minutes: Int, drainPerHour: Double) {
+        self.cutoff = cutoff
+        self.minutes = minutes
+        self.drainPerHour = drainPerHour
+    }
+
+    init?(_ raw: Any?) {
+        guard let o = raw as? [String: Any], let c = (o["cutoff"] as? NSNumber)?.intValue,
+              let m = (o["minutes"] as? NSNumber)?.intValue, m >= 0 else { return nil }
+        self.init(cutoff: c, minutes: m, drainPerHour: (o["drainPerHour"] as? NSNumber)?.doubleValue ?? 0)
+    }
+
+    static func duration(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(max(1, minutes)) min" }
+        let h = minutes / 60, m = minutes % 60
+        return m == 0 ? "\(h) h" : "\(h) h \(m) min"
+    }
+}
+
+struct MacUsage: Equatable {
+    struct Window: Equatable {
+        let pct: Double
+        let resetsAt: Date?
+    }
+
+    var fiveHour: Window?
+    var sevenDay: Window?
+    var hitAt: Date?
+    var updatedAt: Date?
+
+    init(fiveHour: Window? = nil, sevenDay: Window? = nil, hitAt: Date? = nil, updatedAt: Date? = nil) {
+        self.fiveHour = fiveHour
+        self.sevenDay = sevenDay
+        self.hitAt = hitAt
+        self.updatedAt = updatedAt
+    }
+
+    init?(_ raw: Any?) {
+        guard let o = raw as? [String: Any] else { return nil }
+        func window(_ v: Any?) -> Window? {
+            guard let w = v as? [String: Any], let pct = (w["pct"] as? NSNumber)?.doubleValue else { return nil }
+            return Window(pct: pct, resetsAt: PageDate.parse(any: w["resetsAt"]))
+        }
+        self.init(fiveHour: window(o["fiveHour"]), sevenDay: window(o["sevenDay"]),
+                  hitAt: PageDate.parse(any: o["hitAt"]), updatedAt: PageDate.parse(any: o["updatedAt"]))
+        if fiveHour == nil && sevenDay == nil { return nil }
     }
 }
 

@@ -696,5 +696,61 @@ check(avail({ $0.socketConnected = false }, now: cmdNow.addingTimeInterval(30)) 
 check(avail({ $0.waitStartedAt = nil }, now: cmdNow.addingTimeInterval(30)) == .waiting, "no wait start yet")
 check(AgentBackend(wire: "  ") == .other("unknown") && AgentBackend(wire: "Claude") == .known(.claude), "backend wire mapping")
 
+// MARK: v4 — diff, folders, start, Mac status extras
+
+let diffJSON = #"{"kind":"diff","seq":9,"ts":1761300000000,"boot":"b","sessionId":"s1","clientId":"c1","scope":"turn","repo":"page","files":[{"path":"a.swift","added":12,"removed":3,"status":"modified"},{"path":"n.md","added":4,"removed":0,"status":"added"},{"path":"x","status":"changed","weird":{"a":1}},{"nopath":1}],"patch":"diff --git a/a.swift b/a.swift\nindex 1..2\n--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/n.md b/n.md\nnew file\n--- /dev/null\n+++ b/n.md\n@@ -0,0 +1,1 @@\n+hi","truncated":true}"#
+if let p = SessionsPlaintext.decode(Data(diffJSON.utf8)), case .diff(let d) = p.update {
+    check(d.sessionId == "s1" && d.clientId == "c1" && d.scope == "turn" && d.repo == "page", "diff header")
+    check(d.files.map(\.path) == ["a.swift", "n.md", "x"], "diff files (no path dropped, odd field ignored)")
+    check(d.added == 16 && d.removed == 3, "diff totals")
+    check(d.files[2].added == nil, "changed file has no counts")
+    check(d.truncated, "diff truncated")
+    let secs = d.sections
+    check(secs.map(\.path) == ["a.swift", "n.md"], "diff sections by file")
+    check(secs[0].lines == ["@@ -1 +1 @@", "-old", "+new"], "headers dropped, hunks kept")
+    check(secs[1].lines == ["@@ -0,0 +1,1 @@", "+hi"], "new file section")
+} else { check(false, "diff decodes") }
+check(SessionsPlaintext.decode(Data(#"{"kind":"diff","seq":1,"ts":1761300000000}"#.utf8)) == nil, "diff needs a session")
+
+let foldersJSON = #"{"kind":"folders","seq":10,"ts":1761300000000,"boot":"b","clientId":"f1","enabled":true,"agents":["claude"],"folders":[{"path":"/Users/me/p","name":"p","lastUsedAt":1761290000000},{"path":"relative","name":"bad"}]}"#
+if let p = SessionsPlaintext.decode(Data(foldersJSON.utf8)), case .folders(let f) = p.update {
+    check(f.enabled && f.clientId == "f1", "folders header")
+    check(f.folders.map(\.path) == ["/Users/me/p"], "only absolute folders")
+    check(f.folders.first?.lastUsedAt == Date(timeIntervalSince1970: 1_761_290_000), "folder lastUsedAt")
+} else { check(false, "folders decodes") }
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"folders","seq":11,"ts":1761300000000,"enabled":false}"#.utf8)), case .folders(let f) = p.update {
+    check(!f.enabled && f.folders.isEmpty, "folders off")
+} else { check(false, "folders off decodes") }
+
+func cmdJSON(_ c: SessionCommand) -> [String: Any] {
+    (try? JSONSerialization.jsonObject(with: c.plaintext(clientId: "id", viewer: "v", now: Date(timeIntervalSince1970: 1)))) as? [String: Any] ?? [:]
+}
+check(cmdJSON(.diff(sessionId: "s1"))["op"] as? String == "diff" && cmdJSON(.diff(sessionId: "s1"))["sessionId"] as? String == "s1", "diff op")
+check(cmdJSON(.folders)["op"] as? String == "folders", "folders op")
+let startCmd = cmdJSON(.start(folder: "/p", prompt: "fix it"))
+check(startCmd["op"] as? String == "start" && startCmd["folder"] as? String == "/p" && startCmd["text"] as? String == "fix it", "start op")
+
+var gate4 = SessionUpdateGate()
+if let p = SessionsPlaintext.decode(Data(diffJSON.utf8)) {
+    check(gate4.admit(p, now: Date(timeIntervalSince1970: 1_761_300_000)) == .accept, "diff admitted")
+    check(gate4.admit(p, now: Date(timeIntervalSince1970: 1_761_300_000)) == .accept, "answers aren't seq-gated")
+}
+
+var st4 = MacStatusSnapshot.from(json: ["macConnected": true, "battery": 42, "onAC": false, "working": 2,
+    "forecast": ["cutoff": 10, "minutes": 35, "drainPerHour": 40.0],
+    "usage": ["fiveHour": ["pct": 62.4, "resetsAt": "2026-10-25T17:00:00Z"], "hitAt": "2026-10-25T16:10:00Z", "updatedAt": "2026-10-25T15:00:00Z"]])
+check(st4.working == 2, "working count")
+check(st4.batteryLine == "Battery 42% · cutoff in about 35 min", "battery line")
+let fmt: (Date) -> String = { d in String(Int(d.timeIntervalSince1970)) }
+let usageNow = PageDate.parse("2026-10-25T15:30:00Z")!
+check(st4.usageLine(now: usageNow, format: fmt) == "Claude 5-hour 62% · resets \(Int(PageDate.parse("2026-10-25T17:00:00Z")!.timeIntervalSince1970)) · limit ~\(Int(PageDate.parse("2026-10-25T16:10:00Z")!.timeIntervalSince1970))", "usage line")
+check(st4.usageLine(now: usageNow.addingTimeInterval(7 * 3600), format: fmt) == nil, "stale usage hidden")
+st4.onAC = true
+check(st4.batteryLine == nil, "no forecast line on AC")
+st4.applyExtras(["battery": 50])
+check(st4.forecast == nil && st4.usage == nil && st4.working == nil, "a heartbeat without extras clears them")
+check(MacUsage(["fiveHour": ["pct": "x"]]) == nil, "bad usage ignored")
+check(MacBatteryForecast(["cutoff": 10]) == nil, "incomplete forecast ignored")
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

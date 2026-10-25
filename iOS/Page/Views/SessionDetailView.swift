@@ -26,6 +26,7 @@ struct SessionDetailView: View {
     @State private var scrollRequest = 0
     @State private var pane: Pane = .conversation
     @State private var openRun: OpenRun?
+    @State private var showingChanges = false
 
     struct OpenRun: Identifiable, Equatable { let id: String }
 
@@ -112,6 +113,10 @@ struct SessionDetailView: View {
             WorkflowRunView(sessionId: sessionId, runId: item.id)
                 .environmentObject(sessions)
         }
+        .sheet(isPresented: $showingChanges) {
+            DiffView(sessionId: sessionId, title: session?.title ?? "Changes")
+                .environmentObject(sessions)
+        }
         .sheet(item: $presentedPage) { item in
             // "Open session" there just comes back here.
             ReplyView(interventionId: item.id, onOpenSession: { _ in presentedPage = nil })
@@ -186,6 +191,15 @@ struct SessionDetailView: View {
             BackendPill(agent: s.backend, host: s.hostLabel)
             SessionStateChip(state: ended ? .offline : s.state)
             Spacer(minLength: 0)
+            if !ended, availability == .ready {
+                Button { showingChanges = true } label: {
+                    Label("Changes", systemImage: "doc.text.magnifyingglass")
+                        .font(Theme.Font.caption12)
+                        .foregroundStyle(Theme.Colour.text)
+                        .frame(minHeight: 32)
+                }
+                .accessibilityHint("Shows the files this session changed and the diff")
+            }
         }
         .padding(.horizontal, Theme.Space.xl)
         .padding(.vertical, Theme.Space.s)

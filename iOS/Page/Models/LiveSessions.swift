@@ -419,6 +419,70 @@ enum SessionsUpdate: Equatable {
     case screen(SessionScreen)
     case workflows(sessionId: String, runs: [WorkflowRun])
     case result(CommandResult)
+    case diff(SessionDiff)
+    case folders(StartFolders)
+}
+
+/// A session's changes (the `diff` kind): this turn's files, or the
+/// repository's uncommitted changes, with a redacted unified patch.
+struct SessionDiff: Equatable {
+    struct File: Equatable, Identifiable {
+        let path: String
+        let added: Int?
+        let removed: Int?
+        /// modified | added | changed
+        let status: String
+        var id: String { path }
+    }
+
+    let sessionId: String
+    let clientId: String?
+    /// turn | uncommitted
+    let scope: String
+    let repo: String?
+    let files: [File]
+    let patch: String
+    let truncated: Bool
+    let note: String?
+
+    var added: Int { files.compactMap(\.added).reduce(0, +) }
+    var removed: Int { files.compactMap(\.removed).reduce(0, +) }
+
+    /// The patch split per file ("diff --git" headers), for sections.
+    var sections: [(path: String, lines: [String])] {
+        var out: [(String, [String])] = []
+        for line in patch.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("diff --git ") {
+                let path = line.split(separator: " ").last.map { String($0.dropFirst(2)) } ?? String(line)
+                out.append((path, []))
+            } else if !out.isEmpty {
+                out[out.count - 1].1.append(String(line))
+            } else if !line.isEmpty {
+                out.append(("", [String(line)]))
+            }
+        }
+        // Drop the patch header lines (index, ---/+++), keep hunks.
+        return out.map { section in
+            (section.0, section.1.filter { !$0.hasPrefix("index ") && !$0.hasPrefix("--- ") && !$0.hasPrefix("+++ ") && $0 != "new file" })
+        }
+    }
+
+    static let maxFiles = 200
+    static let maxPatch = 64 * 1024
+}
+
+/// Where the phone may start a session (the `folders` kind).
+struct StartFolders: Equatable {
+    struct Folder: Equatable, Identifiable {
+        let path: String
+        let name: String
+        let lastUsedAt: Date?
+        var id: String { path }
+    }
+
+    let clientId: String?
+    let enabled: Bool
+    let folders: [Folder]
 }
 
 /// One decrypted `sessions.update`.
@@ -457,10 +521,18 @@ struct SessionsPlaintext: Equatable {
         let runs: LossyList<WorkflowRun>?
         let runId: String?
         let agentId: String?
+        let scope: String?
+        let repo: String?
+        let patch: String?
+        let note: String?
+        let enabled: Bool?
+        let files: [[String: AnyDecodable]]?
+        let folders: [[String: AnyDecodable]]?
 
         private enum CodingKeys: String, CodingKey {
             case kind, seq, ts, boot, macName, sessions, sessionId, entries, truncated
             case clientId, ok, code, reason, detail, interventionId, disabled, lines, runs, runId, agentId
+            case scope, repo, patch, note, enabled, files, folders
         }
 
         init(from decoder: Decoder) throws {
@@ -485,6 +557,13 @@ struct SessionsPlaintext: Equatable {
             runs = try? c.decodeIfPresent(LossyList<WorkflowRun>.self, forKey: .runs)
             runId = c.lenientString(.runId)
             agentId = c.lenientString(.agentId)
+            scope = c.lenientString(.scope)
+            repo = c.lenientString(.repo)
+            patch = c.lenientString(.patch)
+            note = c.lenientString(.note)
+            enabled = c.lenientBool(.enabled)
+            files = try? c.decodeIfPresent([[String: AnyDecodable]].self, forKey: .files)
+            folders = try? c.decodeIfPresent([[String: AnyDecodable]].self, forKey: .folders)
         }
     }
 
@@ -519,6 +598,25 @@ struct SessionsPlaintext: Equatable {
             update = .screen(SessionScreen(sessionId: sid,
                                            lines: lines.suffix(SessionScreen.maxLines).map { String($0.prefix(SessionScreen.maxLineChars)) },
                                            at: Date(timeIntervalSince1970: raw.ts / 1000)))
+        case "diff":
+            guard let sid = raw.sessionId, !sid.isEmpty else { return nil }
+            let files: [SessionDiff.File] = (raw.files ?? []).prefix(SessionDiff.maxFiles).compactMap { f in
+                guard let path = f["path"]?.string, !path.isEmpty else { return nil }
+                return SessionDiff.File(path: String(path.prefix(500)), added: f["added"]?.int, removed: f["removed"]?.int,
+                                        status: f["status"]?.string ?? "changed")
+            }
+            update = .diff(SessionDiff(sessionId: sid, clientId: raw.clientId, scope: raw.scope ?? "turn",
+                                       repo: raw.repo, files: files,
+                                       patch: String((raw.patch ?? "").prefix(SessionDiff.maxPatch)),
+                                       truncated: raw.truncated ?? false, note: raw.note))
+        case "folders":
+            let folders: [StartFolders.Folder] = (raw.folders ?? []).prefix(40).compactMap { f in
+                guard let path = f["path"]?.string, path.hasPrefix("/") else { return nil }
+                let name = f["name"]?.string ?? (path as NSString).lastPathComponent
+                return StartFolders.Folder(path: String(path.prefix(1024)), name: String(name.prefix(80)),
+                                           lastUsedAt: f["lastUsedAt"]?.double.map { Date(timeIntervalSince1970: $0 / 1000) })
+            }
+            update = .folders(StartFolders(clientId: raw.clientId, enabled: raw.enabled ?? false, folders: folders))
         case "result":
             guard let cid = raw.clientId, !cid.isEmpty else { return nil }
             let ok = raw.ok ?? false
@@ -587,7 +685,8 @@ struct SessionUpdateGate {
             if let last = lastScreenSeq[s.sessionId], p.seq <= last { return .outOfOrder }
             if lastScreenSeq.count > 200 { lastScreenSeq = [:] }
             lastScreenSeq[s.sessionId] = p.seq
-        case .result:
+        case .result, .diff, .folders:
+            // Answers to one command each (keyed by clientId): no ordering.
             break
         }
         return .accept
@@ -641,6 +740,12 @@ enum SessionCommand: Equatable {
     case interrupt(sessionId: String)
     /// Watch a workflow agent inside the session (its transcript).
     case watchAgent(sessionId: String, runId: String, agentId: String)
+    /// The session's changes (answered by a `diff`).
+    case diff(sessionId: String)
+    /// Where a session may be started (answered by `folders`).
+    case folders
+    /// Start a new Claude session in `folder` with `prompt`.
+    case start(folder: String, prompt: String)
 
     var op: String {
         switch self {
@@ -648,6 +753,9 @@ enum SessionCommand: Equatable {
         case .refresh:   return "refresh"
         case .input:     return "input"
         case .interrupt: return "interrupt"
+        case .diff:      return "diff"
+        case .folders:   return "folders"
+        case .start:     return "start"
         }
     }
 
@@ -663,6 +771,9 @@ enum SessionCommand: Equatable {
         case .interrupt(let sid):      body["sessionId"] = sid
         case .watchAgent(let sid, let run, let agent):
             body["sessionId"] = sid; body["runId"] = run; body["agentId"] = agent
+        case .diff(let sid):           body["sessionId"] = sid
+        case .folders:                 break
+        case .start(let folder, let prompt): body["folder"] = folder; body["text"] = prompt
         }
         return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }
@@ -769,7 +880,7 @@ enum SessionCommandOutcome: Equatable {
 // MARK: - Delivery of one command
 
 enum SessionCommandKind: String {
-    case input, interrupt
+    case input, interrupt, start
 }
 
 /// Where a message (or Stop) sent from the phone stands, keyed by its
@@ -822,8 +933,10 @@ enum SessionDeliveryState: Equatable {
         switch (self, kind) {
         case (.sending, .input):     return "Sending…"
         case (.sending, .interrupt): return "Stopping…"
+        case (.sending, .start):     return "Starting…"
         case (.typed, .input):       return "Typed"
         case (.typed, .interrupt):   return "Stopped"
+        case (.typed, .start):       return "Started"
         case (.queued, _):           return "Queued"
         case (.refused, _):          return "Refused"
         case (.failed, _):           return "Not sent"

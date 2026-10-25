@@ -501,6 +501,15 @@ test("v4 heartbeat fields (working, forecast, usage) are validated, passed on an
   assert.equal(s.usage, undefined);
 });
 
+test("v4 subtypes get their own push wording", async () => {
+  const { bodyForPush } = await import("../src/logic.ts");
+  const base = { id: "x", sessionId: "s", cwd: "", projectName: "p", openedAt: "2026-10-25T00:00:00Z" };
+  assert.equal(bodyForPush({ ...base, kind: "idle", subtype: "looping", context: "make failed 3 times" }), "Looks stuck: make failed 3 times");
+  assert.equal(bodyForPush({ ...base, kind: "rate_limit", subtype: "battery_forecast", context: "Battery 18%" }), "Battery 18%");
+  assert.equal(bodyForPush({ ...base, kind: "rate_limit", context: "resets 5pm" }), "Rate-limited: resets 5pm");
+  assert.equal(bodyForPush({ ...base, kind: "idle", subtype: "workflow_stalled", context: "" }), "A workflow stopped making progress");
+});
+
 test("webSocketClose reciprocates and announces the Mac going offline", async () => {
   const phone = connect({ mac: false });
   const mac = connect({ mac: true });

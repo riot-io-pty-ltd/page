@@ -763,6 +763,14 @@ export function bodyForPush(iv: Intervention): string {
   // Truncate by code point so an emoji isn't split in half.
   const chars = Array.from(iv.context ?? "");
   const trimmed = chars.length > 180 ? chars.slice(0, 180).join("") + "…" : chars.join("");
+  // v4 subtypes say what they are in their own context.
+  switch (iv.subtype) {
+    case "looping":
+    case "stuck":            return trimmed ? `Looks stuck: ${trimmed}` : "A session looks stuck";
+    case "workflow_stalled": return trimmed || "A workflow stopped making progress";
+    case "battery_forecast": return trimmed || "Battery cutoff soon";
+    case "usage_forecast":   return trimmed || "Claude usage limit soon";
+  }
   switch (iv.kind) {
     case "permission":
     case "approval":   return trimmed ? `Approval needed: ${trimmed}` : "Approval needed";

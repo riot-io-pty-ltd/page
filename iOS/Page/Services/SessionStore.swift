@@ -28,6 +28,12 @@ final class SessionStore: ObservableObject {
     @Published private(set) var screens: [String: SessionScreen] = [:]
     /// Each watched session's dynamic workflows, from Macs that send them.
     @Published private(set) var workflows: [String: [WorkflowRun]] = [:]
+    /// The latest `diff` per session, and why the last request failed.
+    @Published private(set) var diffs: [String: SessionDiff] = [:]
+    @Published private(set) var diffErrors: [String: String] = [:]
+    /// Where a session may be started (`folders`), nil until asked.
+    @Published private(set) var startFolders: StartFolders?
+    @Published private(set) var startFoldersError: String?
     /// Messages and Stops sent from this phone, by `clientId`.
     @Published private(set) var commands: [String: SentSessionCommand] = [:]
     /// From GET /status; nil until known.
@@ -131,6 +137,11 @@ final class SessionStore: ObservableObject {
         lastListAt = nil
         transcripts = [:]
         screens = [:]
+        diffs = [:]
+        diffErrors = [:]
+        diffClients = [:]
+        startFolders = nil
+        startFoldersError = nil
         commands = [:]
         relayFeatures = nil
         macOfflineHint = false
@@ -302,7 +313,20 @@ final class SessionStore: ObservableObject {
             while transcripts.count > 12, let victim = transcripts.keys.first(where: { !keep.contains($0) }) {
                 transcripts[victim] = nil
             }
+        case .diff(let d):
+            diffs[d.sessionId] = d
+            diffErrors[d.sessionId] = nil
+            if diffs.count > 4 {
+                for id in diffs.keys where id != d.sessionId && id != watchedSessionId { diffs[id] = nil; break }
+            }
+        case .folders(let f):
+            startFolders = f
+            startFoldersError = nil
         case .result(let r):
+            if let sid = diffClients.removeValue(forKey: r.clientId) {
+                diffErrors[sid] = r.detail ?? "Your Mac couldn't read the changes."
+                return
+            }
             guard var cmd = commands[r.clientId] else { return }
             cmd.state = cmd.state.applying(r, agent: agentName(cmd.sessionId))
             commands[r.clientId] = cmd
@@ -370,6 +394,57 @@ final class SessionStore: ObservableObject {
         }
         record(clientId: clientId, sessionId: sessionId, kind: .interrupt, text: "", state: .sending)
         deliver(body, clientId: clientId, op: "interrupt")
+    }
+
+    /// `diff` requests in flight, by clientId → session (a refusal comes back
+    /// as a `result`).
+    private var diffClients: [String: String] = [:]
+
+    /// Asks the Mac for the session's changes (answered by a `diff`).
+    func requestDiff(sessionId: String) {
+        diffErrors[sessionId] = nil
+        let clientId = UUID().uuidString.lowercased()
+        guard let body = encrypt(.diff(sessionId: sessionId), clientId: clientId) else {
+            diffErrors[sessionId] = "This iPhone has no session key. Re-pair with your Mac."
+            return
+        }
+        diffClients[clientId] = sessionId
+        if diffClients.count > 20 { diffClients.removeAll() ; diffClients[clientId] = sessionId }
+        Task {
+            let outcome = await APIClient.shared.postSessionCommand(body: body)
+            noteOutcome(outcome)
+            if let why = outcome.failureMessage { diffErrors[sessionId] = why; diffClients[clientId] = nil }
+        }
+    }
+
+    /// Asks where a session may be started (answered by `folders`).
+    func requestFolders() {
+        startFoldersError = nil
+        guard let body = encrypt(.folders, clientId: UUID().uuidString.lowercased()) else {
+            startFoldersError = "This iPhone has no session key. Re-pair with your Mac."
+            return
+        }
+        Task {
+            let outcome = await APIClient.shared.postSessionCommand(body: body)
+            noteOutcome(outcome)
+            if let why = outcome.failureMessage { startFoldersError = why }
+        }
+    }
+
+    /// Starts a new Claude session. Returns the clientId whose delivery
+    /// state appears in `commands`.
+    @discardableResult
+    func startSession(folder: String, prompt: String) -> String {
+        let clientId = UUID().uuidString.lowercased()
+        let key = "new:" + folder
+        guard let body = encrypt(.start(folder: folder, prompt: prompt), clientId: clientId) else {
+            record(clientId: clientId, sessionId: key, kind: .start, text: prompt,
+                   state: .failed("This iPhone has no session key. Re-pair with your Mac."))
+            return clientId
+        }
+        record(clientId: clientId, sessionId: key, kind: .start, text: prompt, state: .sending)
+        deliver(body, clientId: clientId, op: "start")
+        return clientId
     }
 
     private func encrypt(_ command: SessionCommand, clientId: String) -> Data? {
@@ -486,6 +561,9 @@ final class SessionStore: ObservableObject {
             guard self.isDevMode, let target else { return }
             let result: CommandResult
             switch kind {
+            case .start:
+                result = CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil,
+                                       detail: "Started Claude (simulated)", interventionId: nil)
             case .interrupt:
                 result = target.isStoppable
                     ? CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil, detail: "Pressed Esc in \(target.host) (simulated)", interventionId: nil)
