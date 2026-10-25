@@ -452,6 +452,12 @@ struct ReplyView: View {
                     .foregroundStyle(Theme.Colour.textMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 QuickButton("Close", style: .outline, enabled: true) { dismiss() }
+            case .rateLimit where iv.backend == .codex:
+                Text("Nothing to answer. Codex picks up again once the limit resets.")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                QuickButton("Close", style: .outline, enabled: true) { dismiss() }
             case .rateLimit:
                 ReplyField(text: $replyText, placeholder: "Send this when the limit resets…", enabled: enabled) { send(.custom, text: $0) }
                 Text("Page on your Mac types it into the session once the limit resets. Leave it empty to use auto-resume (if it's on).")
