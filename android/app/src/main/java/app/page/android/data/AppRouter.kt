@@ -61,3 +61,15 @@ object AppRouter {
         _route.value = Route()
     }
 }
+
+/**
+ * One-shot hints for the first screen shown after launch (set by the debug
+ * demo's launch extras for scripted screenshots; never set in release).
+ */
+object LaunchHints {
+    /** "terminal" or "workflows": the session detail opens on that pane. */
+    var sessionPane: String? = null
+
+    /** A workflow run to open on top of the session detail. */
+    var workflowRunId: String? = null
+}
