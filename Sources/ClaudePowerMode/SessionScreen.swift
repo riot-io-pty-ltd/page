@@ -54,7 +54,8 @@ enum SessionScreen {
     static func read(_ source: Source, runner: @escaping CmuxBridge.Runner = CmuxBridge.defaultRunner) -> String? {
         switch source {
         case .tmux(let tmux, let pane, let serverArgs):
-            let r = ProcessRunner.run(tmux, serverArgs + ["capture-pane", "-p", "-t", pane], timeout: 3)
+            // -J: wrapped lines arrive joined, so a long token is redacted whole.
+            let r = ProcessRunner.run(tmux, serverArgs + ["capture-pane", "-p", "-J", "-t", pane], timeout: 3)
             return r.succeeded ? r.stdout : nil
         case .cmux(let target):
             guard case .success(let client) = CmuxBridge.connect(cliPath: target.cliPath, runner: runner) else { return nil }
@@ -67,11 +68,14 @@ enum SessionScreen {
         }
     }
 
-    /// Pure. Escape codes stripped, trailing spaces and blank lines dropped,
-    /// the last `maxLines` lines kept, each capped and redacted, then lines
-    /// dropped from the top until the JSON fits `maxPlaintextBytes`.
+    /// Pure. Escape codes stripped, lines the terminal wrapped rejoined, the
+    /// whole text redacted (before any cut, so no cut leaves a fragment too
+    /// short for its pattern), private-key blocks blanked, trailing spaces
+    /// and blank lines dropped, the last `maxLines` kept, each capped and
+    /// redacted again, then lines dropped from the top until the JSON fits
+    /// `maxPlaintextBytes`.
     static func lines(from raw: String) -> [String] {
-        var lines = stripEscapes(raw)
+        let split = stripEscapes(raw)
             .replacingOccurrences(of: "\r\n", with: "\n")
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { line -> String in
@@ -79,6 +83,9 @@ enum SessionScreen {
                 while let last = s.unicodeScalars.last, CharacterSet.whitespaces.contains(last) { s.unicodeScalars.removeLast() }
                 return s
             }
+        // Key rows are blanked on the rows as shown, before any rejoining.
+        let redacted = ContextRedactor.redact(unwrapped(blankingKeyBlocks(split)).joined(separator: "\n"))
+        var lines = redacted.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         while lines.last?.isEmpty == true { lines.removeLast() }
         while lines.first?.isEmpty == true { lines.removeFirst() }
         lines = lines.suffix(maxLines).map { line in
@@ -87,6 +94,47 @@ enum SessionScreen {
         }
         while !lines.isEmpty, bodySize(lines) > maxPlaintextBytes - 512 { lines.removeFirst() }
         return lines
+    }
+
+    /// Rejoins lines the terminal soft-wrapped, so a long token split across
+    /// rows is redacted whole (tmux is read with `-J` and arrives joined;
+    /// cmux's read-screen can't join). A row is treated as wrapped when it
+    /// fills the screen width (the longest row) and both it and the next row
+    /// break mid-token; box rules and padded rows never qualify.
+    static func unwrapped(_ rows: [String]) -> [String] {
+        let width = rows.map(\.count).max() ?? 0
+        guard width >= 40 else { return rows }
+        func tokenChar(_ c: Character?) -> Bool {
+            guard let c else { return false }
+            return c.isLetter || c.isNumber || "_-+/=.".contains(c)
+        }
+        var out: [String] = []
+        var previousWrapped = false
+        for row in rows {
+            if previousWrapped, tokenChar(row.first), let last = out.popLast() {
+                out.append(last + row)
+            } else {
+                out.append(row)
+            }
+            previousWrapped = row.count == width && tokenChar(row.last)
+        }
+        return out
+    }
+
+    /// A private key whose BEGIN line scrolled off the top: the redactor
+    /// (which collapses BEGIN…END, or BEGIN…end of text) can't see it, so the
+    /// base64 rows above a visible `-----END … PRIVATE KEY-----` become
+    /// "[redacted]".
+    static func blankingKeyBlocks(_ lines: [String]) -> [String] {
+        var out = lines
+        for (i, line) in lines.enumerated() where line.contains("-----END") && line.contains("PRIVATE KEY") {
+            var j = i - 1
+            while j >= 0, out[j].range(of: #"^[A-Za-z0-9+/=]{16,}$"#, options: .regularExpression) != nil {
+                out[j] = "[redacted]"
+                j -= 1
+            }
+        }
+        return out
     }
 
     /// CSI (`ESC [ … final`), OSC (`ESC ] … BEL|ESC \`) and lone two-byte

@@ -251,6 +251,11 @@ private final class LoopbackServer: @unchecked Sendable {
             while true {
                 let c = accept(listener, nil, nil)
                 guard c >= 0 else { return }
+                // A client that hung up mid-reply (the 1 MB cap test) must
+                // make write fail with EPIPE, not SIGPIPE the test process:
+                // tests don't run main.swift's SIG_IGN.
+                var one: Int32 = 1
+                setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
                 var buf = [UInt8](repeating: 0, count: 8192)
                 let n = read(c, &buf, buf.count)
                 let request = n > 0 ? String(decoding: buf.prefix(n), as: UTF8.self) : ""

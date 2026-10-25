@@ -241,6 +241,39 @@ final class SessionTranscriptTests: XCTestCase {
         XCTAssertFalse(SessionScreen.lines(from: "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789").joined().contains("ghp_abcdefghijklmnop"))
     }
 
+    /// Redaction happens before any cut: a key the terminal wrapped across
+    /// rows, or one straddling the 300-character cap, never leaks a piece.
+    func testScreenRedactsBeforeCutting() {
+        let key = "sk-ant-api03-" + String(repeating: "Q", count: 60)
+        // An 80-column screen with the key wrapped across two rows.
+        let row1 = String(repeating: "x", count: 60) + " " + key.prefix(19)
+        let row2 = String(key.dropFirst(19))
+        let rule = String(repeating: "─", count: 80)
+        let out = SessionScreen.lines(from: [rule, row1, row2, rule].joined(separator: "\n"))
+        XCTAssertFalse(out.joined().contains("QQQQQQ"), "wrapped key redacted whole")
+        XCTAssertFalse(out.joined().contains("api03"))
+        XCTAssertEqual(out.first, rule, "box rules are never joined")
+
+        // Straddling the line cap.
+        let long = String(repeating: "y", count: 280) + " " + key
+        XCTAssertFalse(SessionScreen.lines(from: long).joined().contains("QQQQ"))
+
+        // Short rows aren't joined, even if they end mid-word.
+        XCTAssertEqual(SessionScreen.unwrapped(["abc", "def"]), ["abc", "def"])
+        let w = String(repeating: "a", count: 50)
+        XCTAssertEqual(SessionScreen.unwrapped([w, "b", w, " c"]), [w + "b", w, " c"])
+
+        // Private-key bodies are blanked.
+        let pem = ["-----BEGIN OPENSSH PRIVATE KEY-----", "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ", "-----END OPENSSH PRIVATE KEY-----", "after"]
+        XCTAssertEqual(SessionScreen.lines(from: pem.joined(separator: "\n")), ["[redacted private key]", "after"],
+                       "a whole block is caught by the redactor (the screen is redacted in one piece)")
+        // END not printed yet: still caught (BEGIN to end of text).
+        XCTAssertEqual(SessionScreen.lines(from: pem.prefix(2).joined(separator: "\n")), ["[redacted private key]"])
+        // BEGIN scrolled off the top: the base64 rows above END are blanked.
+        XCTAssertEqual(SessionScreen.lines(from: pem.dropFirst().joined(separator: "\n")),
+                       ["[redacted]", "-----END OPENSSH PRIVATE KEY-----", "after"])
+    }
+
     func testScreenSourcesOnlyForTmuxAndCmux() {
         let target = CmuxBridge.Target(surfaceId: "S", workspaceId: "W", cliPath: "/x/cmux", source: "environment")
         XCTAssertEqual(SessionScreen.source(for: InjectionExecutor.TerminalHost.cmux(target)), .cmux(target))

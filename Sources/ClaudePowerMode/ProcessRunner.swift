@@ -83,7 +83,9 @@ enum ProcessRunner {
 
         if let inPipe, let stdin {
             // Writing to a child that already exited raises SIGPIPE; the app
-            // ignores SIGPIPE globally (see main.swift) so this just fails.
+            // ignores SIGPIPE globally (see main.swift), and the pipe is also
+            // marked no-SIGPIPE (tests don't run main.swift), so this just fails.
+            _ = fcntl(inPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
             try? inPipe.fileHandleForWriting.write(contentsOf: stdin)
             try? inPipe.fileHandleForWriting.close()
         }
