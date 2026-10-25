@@ -310,6 +310,7 @@ final class Coordinator {
             }
             self.restorePowerStateAfterLaunch(cfg)
             self.sessionRemote.setEnabled(cfg.remoteSessionsEnabled)
+            self.sessionRemote.setStartEnabled(cfg.phoneStartSessionsEnabled)
             // Relay first, so backends have their sink before they start.
             self.configureRelay(force: false)
             // A regenerate the last run couldn't confirm (offline, crash).
@@ -520,6 +521,7 @@ final class Coordinator {
         }
         if cfg.checkIntervalSeconds != old.checkIntervalSeconds { scheduleTimers() }
         if cfg.remoteSessionsEnabled != old.remoteSessionsEnabled { sessionRemote.setEnabled(cfg.remoteSessionsEnabled) }
+        if cfg.phoneStartSessionsEnabled != old.phoneStartSessionsEnabled { sessionRemote.setStartEnabled(cfg.phoneStartSessionsEnabled) }
         configureRelay(force: false)
     }
 

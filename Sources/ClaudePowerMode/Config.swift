@@ -84,6 +84,20 @@ struct Config: Codable, Equatable {
     /// tell the sessions Page paused to carry on.
     var resumeAfterBatteryRecovery: Bool = true
 
+    // Stuck watch (v4).
+    /// Page when a busy session repeats a failing call, writes nothing for
+    /// `stuckAfterMinutes`, or has a workflow that stopped making progress.
+    var stuckAlertsEnabled: Bool = true
+    var stuckAfterMinutes: Double = 15
+    /// Put "Changed 3 files (+12 −4) · tests passed" on top of a finished
+    /// turn's page (counts only; the diff itself goes over the encrypted
+    /// sessions channel when the phone asks).
+    var turnSummaryEnabled: Bool = true
+    /// Let the paired phone start a new Claude session (a cmux workspace in
+    /// a folder Claude already worked in). Off by default: it runs a
+    /// command on this Mac.
+    var phoneStartSessionsEnabled: Bool = false
+
     init() {}
 
     // `interventionScanIntervalSeconds` used to live here but nothing ever
@@ -103,6 +117,7 @@ struct Config: Codable, Equatable {
         case remoteSessionsEnabled
         case keepAwakeLidClosedOnAC, keepAwakeLidClosedOnBattery
         case lowBatteryAction, lowBatteryPauseGraceSeconds, resumeAfterBatteryRecovery
+        case stuckAlertsEnabled, stuckAfterMinutes, turnSummaryEnabled, phoneStartSessionsEnabled
     }
 
     /// Collects per-key decode problems. Passed through `decoder.userInfo`
@@ -161,6 +176,10 @@ struct Config: Codable, Equatable {
         lowBatteryAction = field(.lowBatteryAction, d.lowBatteryAction)
         lowBatteryPauseGraceSeconds = field(.lowBatteryPauseGraceSeconds, d.lowBatteryPauseGraceSeconds)
         resumeAfterBatteryRecovery = field(.resumeAfterBatteryRecovery, d.resumeAfterBatteryRecovery)
+        stuckAlertsEnabled = field(.stuckAlertsEnabled, d.stuckAlertsEnabled)
+        stuckAfterMinutes = field(.stuckAfterMinutes, d.stuckAfterMinutes)
+        turnSummaryEnabled = field(.turnSummaryEnabled, d.turnSummaryEnabled)
+        phoneStartSessionsEnabled = field(.phoneStartSessionsEnabled, d.phoneStartSessionsEnabled)
     }
 
     // MARK: validation
@@ -177,6 +196,7 @@ struct Config: Codable, Equatable {
         /// Long enough for a two-line summary even on a slow turn; short
         /// enough that a 10% battery isn't drained waiting.
         static let lowBatteryPauseGrace: ClosedRange<Double> = 15...600
+        static let stuckAfterMinutes: ClosedRange<Double> = 5...240
     }
 
     /// Returns a copy with every value forced into a range the rest of the
@@ -225,6 +245,8 @@ struct Config: Codable, Equatable {
         clamp(&c.holdAwakeForPendingPageMinutes, Limits.holdAwakeMinutes, "holdAwakeForPendingPageMinutes")
         finite(&c.lowBatteryPauseGraceSeconds, d.lowBatteryPauseGraceSeconds, "lowBatteryPauseGraceSeconds")
         clamp(&c.lowBatteryPauseGraceSeconds, Limits.lowBatteryPauseGrace, "lowBatteryPauseGraceSeconds")
+        finite(&c.stuckAfterMinutes, d.stuckAfterMinutes, "stuckAfterMinutes")
+        clamp(&c.stuckAfterMinutes, Limits.stuckAfterMinutes, "stuckAfterMinutes")
 
         clamp(&c.lowBatteryCutoff, Limits.batteryPercent, "lowBatteryCutoff")
         clamp(&c.recoveryThreshold, Limits.batteryPercent, "recoveryThreshold")

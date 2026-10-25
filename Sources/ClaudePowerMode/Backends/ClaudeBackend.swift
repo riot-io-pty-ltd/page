@@ -76,6 +76,10 @@ final class ClaudeBackend: AgentBackend {
     var onResumeResult: ((ResumeResult) -> Void)?
     private var lastPurgeAt = Date()
     private let interventionDetector = InterventionDetector()
+    /// Busy-but-getting-nowhere pages (tick queue only; `stuckPages` is the
+    /// locked copy replies and sync read).
+    private let stuckMonitor = StuckMonitor()
+    private var stuckPages: [String: InterventionEvent] = [:]
     private let registry: ClaudeSessionRegistry
 
     /// Every keystroke injection runs here, one at a time, so two replies
@@ -216,6 +220,7 @@ final class ClaudeBackend: AgentBackend {
         var opened: [InterventionEvent] = []
         if cfg.interventionDetectionEnabled {
             let settings = DetectorSettings(idleDelay: max(0, cfg.idlePageDelaySeconds))
+            interventionDetector.turnHeadline = cfg.turnSummaryEnabled ? { TurnSummary.headline(transcript: $0, cwd: $1) } : nil
             let result = interventionDetector.scan(
                 sessions: sessions,
                 transcriptFor: { transcripts[$0.sessionId] },
@@ -231,11 +236,12 @@ final class ClaudeBackend: AgentBackend {
         } else {
             for e in interventionDetector.reset() { closePage(e.id, reason: "session_resolved") }
         }
+        let pending = cfg.interventionDetectionEnabled ? Array(interventionDetector.currentlyPending.values) : []
+        opened += refreshStuckPages(sessions: sessions, transcripts: transcripts, pending: pending, now: now, cfg: cfg)
         let callback = onNewIntervention
         for e in opened { callback?(e) }
 
-        let pending = cfg.interventionDetectionEnabled ? Array(interventionDetector.currentlyPending.values) : []
-        sendDuePages(pending + rateLimitPagesSnapshot(), cfg: cfg)
+        sendDuePages(pending + rateLimitPagesSnapshot() + stuckPagesSnapshot(), cfg: cfg)
         updateDetectorAliveMarker(cfg: cfg)
 
         // Scheduled-resume housekeeping: surface finished jobs, and purge
@@ -371,6 +377,49 @@ final class ClaudeBackend: AgentBackend {
         let relay = _relay
         lock.unlock()
         if wasSent && !replied { relay?.sendInterventionClosed(id: id, reason: reason) }
+    }
+
+    // MARK: stuck watch
+
+    /// Runs the stuck watch and closes what resolved. Returns new pages.
+    private func refreshStuckPages(sessions: [ClaudeLiveSession], transcripts: [String: URL],
+                                   pending: [InterventionEvent], now: Date, cfg: Config) -> [InterventionEvent] {
+        guard cfg.interventionDetectionEnabled, cfg.stuckAlertsEnabled else {
+            for e in stuckMonitor.reset() { closePage(e.id, reason: "session_resolved") }
+            lock.lock(); stuckPages.removeAll(); lock.unlock()
+            return []
+        }
+        lock.lock()
+        // Another open page for the session: a stuck page would supersede
+        // it on the relay.
+        var blocked = Set(pending.map(\.sessionId)).union(batteryPausedIds)
+        blocked.formUnion(rateLimitPages.values.map(\.sessionId))
+        lock.unlock()
+        var settings = StuckWatch.Settings()
+        settings.quietAfter = cfg.stuckAfterMinutes * 60
+        let update = stuckMonitor.scan(sessions: sessions, transcripts: transcripts, blocked: blocked,
+                                       settings: settings, now: now)
+        let snapshot = Dictionary(uniqueKeysWithValues: stuckMonitor.pages.values.map { ($0.id, $0) })
+        lock.lock(); stuckPages = snapshot; lock.unlock()
+        for e in update.resolved { closePage(e.id, reason: "session_resolved") }
+        return update.opened
+    }
+
+    private func stuckPagesSnapshot() -> [InterventionEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(stuckPages.values)
+    }
+
+    /// Stop on a looping/stuck page: Esc through the phone's Stop path (the
+    /// same gate), reported back as the reply's delivery result.
+    private func stopFromStuckPage(_ id: String, page: InterventionEvent) {
+        remoteInterrupt(sessionId: page.sessionId, interventionId: nil) { [weak self] r in
+            let ok = r.code == .delivered || r.code == .queued
+            self?.finishReply(id, InjectionResult(method: .none, success: ok,
+                                                  output: "stuck stop: \(r.code.rawValue) \(r.reason?.rawValue ?? "")",
+                                                  detail: ok ? "Stopped it" : r.detail))
+        }
     }
 
     // MARK: rate limits
@@ -543,6 +592,7 @@ final class ClaudeBackend: AgentBackend {
         let duplicate = inFlightReplies.contains(id) || deliveredReplies.contains(id)
         if !duplicate { inFlightReplies.insert(id) }
         let page = rateLimitPages[id]
+        let stuck = stuckPages[id]
         let cfg = _config
         lock.unlock()
         if duplicate {
@@ -559,7 +609,12 @@ final class ClaudeBackend: AgentBackend {
             return
         }
 
-        guard let req = buildRequest(for: reply, rateLimitPage: page) else {
+        if let stuck, reply.action == "deny", stuck.subtype != "workflow_stalled" {
+            stopFromStuckPage(id, page: stuck)
+            return
+        }
+
+        guard let req = buildRequest(for: reply, rateLimitPage: page, stuckPage: stuck) else {
             Logger.shared.log("Reply for \(id) has no resolvable session")
             finishReply(id, InjectionResult(method: .none, success: false, output: "no session",
                                             detail: "Couldn't identify the session"))
@@ -634,13 +689,14 @@ final class ClaudeBackend: AgentBackend {
     /// The payload's cwd is never used; its sessionId only for pages we
     /// didn't raise (notification-hook pages), and injection still requires
     /// a live session or an existing transcript for it.
-    private func buildRequest(for reply: RelayReply, rateLimitPage: InterventionEvent?) -> InjectionExecutor.ClaudeReplyRequest? {
+    private func buildRequest(for reply: RelayReply, rateLimitPage: InterventionEvent?,
+                              stuckPage: InterventionEvent? = nil) -> InjectionExecutor.ClaudeReplyRequest? {
         let id = reply.interventionId
         let pending = interventionDetector.pendingEvent(id: id)
         let parsed = InterventionDetector.parseInterventionId(id)
         let hook = Self.parseHookId(id)
 
-        var sessionId = pending?.sessionId ?? rateLimitPage?.sessionId ?? parsed?.sessionId
+        var sessionId = pending?.sessionId ?? rateLimitPage?.sessionId ?? stuckPage?.sessionId ?? parsed?.sessionId
         if sessionId == nil, let sid = reply.sessionId, ClaudeSessionRegistry.isValidSessionId(sid) {
             // Hook ids embed the first 8 chars of the session id; require a match.
             if let hook, !sid.hasPrefix(hook.sid8) { return nil }
@@ -650,6 +706,7 @@ final class ClaudeBackend: AgentBackend {
 
         let kind = pending.map { Self.replyKind(for: $0.kind) }
             ?? rateLimitPage.map { _ in ReplyPromptKind.other }
+            ?? stuckPage.map { _ in ReplyPromptKind.idle }
             ?? ReplyPromptKind.from(wireKind: reply.kind)
             ?? ReplyPromptKind.from(wireKind: parsed?.kind)
 
@@ -710,7 +767,7 @@ final class ClaudeBackend: AgentBackend {
     func openInterventionIds() -> [String] {
         let detectorIds = config.interventionDetectionEnabled ? Array(interventionDetector.currentlyPending.keys) : []
         lock.lock()
-        let rl = Array(rateLimitPages.keys)
+        let rl = Array(rateLimitPages.keys) + Array(stuckPages.keys)
         lock.unlock()
         return (detectorIds + rl).filter { !$0.hasPrefix("hook") }
     }

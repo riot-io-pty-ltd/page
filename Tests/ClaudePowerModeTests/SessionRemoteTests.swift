@@ -59,6 +59,13 @@ final class SessionRemoteTests: XCTestCase {
             interrupts.append(session.sessionId)
             completion(SessionCommandResult(code: .delivered, reason: nil, detail: "Pressed Esc in tmux pane %3"))
         }
+        var folders: [SessionStarter.Folder] = []
+        var starts: [(folder: String, prompt: String)] = []
+        func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder] { folders }
+        func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult {
+            starts.append((folder.path, prompt))
+            return SessionCommandResult(code: .delivered, reason: nil, detail: "Started Claude in \(folder.name)")
+        }
     }
 
     private var clock: Clock!
@@ -461,6 +468,53 @@ final class SessionRemoteTests: XCTestCase {
         XCTAssertEqual(results.map { $0["clientId"] as? String }, ["i1", "i2", "i3"])
         XCTAssertEqual(results.map { $0["reason"] as? String }, ["interrupt_unsupported", "interrupt_unsupported", nil])
         XCTAssertEqual(backends.interrupts, ["s3"])
+    }
+
+    // MARK: starting sessions, diffs
+
+    func testStartIsRefusedUntilTurnedOn() {
+        backends.folders = [.init(path: dir.path, name: "proj", lastUsedAt: nil)]
+        send(command(["op": "start", "folder": dir.path, "text": "fix it", "clientId": "st1"]))
+        XCTAssertEqual(frames("result").last?["reason"] as? String, "disabled")
+        XCTAssertTrue(backends.starts.isEmpty)
+    }
+
+    func testStartOnlyInAKnownFolderWithACleanPrompt() {
+        remote.setStartEnabled(true)
+        backends.folders = [.init(path: dir.path, name: "proj", lastUsedAt: nil)]
+        send(command(["op": "start", "folder": "/etc", "text": "x", "clientId": "st1"]))
+        XCTAssertEqual(frames("result").last?["reason"] as? String, "not_found")
+        send(command(["op": "start", "folder": dir.path + "/", "text": "fix\nthe \u{1B}[2Jbug", "clientId": "st2"]))
+        XCTAssertEqual(frames("result").last?["ok"] as? Bool, true)
+        XCTAssertEqual(backends.starts.map(\.folder), [dir.path])
+        XCTAssertEqual(backends.starts.first?.prompt, "fix the [2Jbug")
+    }
+
+    func testFoldersFrame() {
+        backends.folders = [.init(path: dir.path, name: "proj", lastUsedAt: Date(timeIntervalSince1970: 1000))]
+        send(command(["op": "folders", "clientId": "f1"]))
+        XCTAssertEqual(frames("folders").last?["enabled"] as? Bool, false)
+        XCTAssertEqual((frames("folders").last?["folders"] as? [Any])?.count, 0, "no folders while it's off")
+        remote.setStartEnabled(true)
+        send(command(["op": "folders", "clientId": "f2"]))
+        let f = frames("folders").last
+        XCTAssertEqual(f?["clientId"] as? String, "f2")
+        XCTAssertEqual(f?["agents"] as? [String], ["claude"])
+        let first = (f?["folders"] as? [[String: Any]])?.first
+        XCTAssertEqual(first?["path"] as? String, dir.path)
+        XCTAssertEqual(first?["lastUsedAt"] as? Int, 1_000_000)
+    }
+
+    func testDiffFrameForAFolderThatIsNotARepo() {
+        remote.update(sessions: [session("s1", .idle, cwd: dir.path)], pending: [])
+        send(command(["op": "diff", "sessionId": "s1", "clientId": "d1"]))
+        let d = frames("diff").last
+        XCTAssertEqual(d?["sessionId"] as? String, "s1")
+        XCTAssertEqual(d?["clientId"] as? String, "d1")
+        XCTAssertEqual(d?["scope"] as? String, "uncommitted")
+        XCTAssertNotNil(d?["note"])
+        send(command(["op": "diff", "sessionId": "gone", "clientId": "d2"]))
+        XCTAssertEqual(frames("result").last?["reason"] as? String, "not_found")
     }
 
     func testUnknownOpIsIgnored() {

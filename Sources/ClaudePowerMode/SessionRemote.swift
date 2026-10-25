@@ -54,6 +54,11 @@ protocol SessionRemoteBackends: AnyObject {
                completion: @escaping (SessionCommandResult) -> Void)
     func interrupt(_ session: AgentSession, interventionId: String?,
                    completion: @escaping (SessionCommandResult) -> Void)
+    /// Folders a phone may start a session in (`SessionStarter`).
+    /// Blocking; probe queue only.
+    func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder]
+    /// Starts a session. Blocking; probe queue only.
+    func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult
 }
 
 /// One phone → Mac command, decrypted (SESSIONS-PROTOCOL.md §5).
@@ -68,6 +73,8 @@ struct SessionCommand: Equatable {
     /// `watch` only: a workflow agent inside the session (safe ids only).
     var runId: String? = nil
     var agentId: String? = nil
+    /// `start` only: the folder to start in (checked against the list).
+    var folder: String? = nil
 
     static let maxIdLength = 128
 
@@ -84,11 +91,16 @@ struct SessionCommand: Equatable {
                                  text: obj["text"] as? String)
         cmd.runId = (obj["runId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
         cmd.agentId = (obj["agentId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
+        cmd.folder = (obj["folder"] as? String).flatMap { $0.isEmpty || $0.count > 1024 ? nil : $0 }
         return cmd
     }
 }
 
 extension SessionRemoteBackends {
+    func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder] { [] }
+    func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult {
+        .refused(.notTypable, "Starting sessions isn't available")
+    }
     func screenSource(for session: AgentSession) -> SessionScreen.Source? { nil }
     func readScreen(_ source: SessionScreen.Source) -> String? { SessionScreen.read(source) }
 }
@@ -320,6 +332,8 @@ final class SessionRemote {
     private var sink: SessionsUpdateSink?
     private var keys: SessionKeys?
     private var enabled = true
+    /// "Let my phone start sessions" (off by default).
+    private var startEnabled = false
     private var phones = 0
     private var sessions: [AgentSession] = []
     private var pending: [InterventionEvent] = []
@@ -397,6 +411,14 @@ final class SessionRemote {
             self.enabled = on
             Logger.shared.log("Sessions: live sessions view \(on ? "enabled" : "disabled")")
             self.lastListBody = nil   // re-send at once in the new form
+        }
+    }
+
+    func setStartEnabled(_ on: Bool) {
+        queue.async {
+            guard self.startEnabled != on else { return }
+            self.startEnabled = on
+            Logger.shared.log("Sessions: starting sessions from the phone \(on ? "enabled" : "disabled")")
         }
     }
 
@@ -884,6 +906,27 @@ final class SessionRemote {
         lastTranscriptBody[sessionId] = body
     }
 
+    /// The `folders` kind: where a session may be started, and whether
+    /// starting is on at all.
+    private func sendFolders(clientId: String) {
+        let live = sessions
+        let on = startEnabled
+        let backends = self.backends
+        probeQueue.async { [weak self] in
+            let folders = on ? backends.knownFolders(live: live) : []
+            self?.queue.async {
+                guard let self, !self.stopped else { return }
+                var obj = self.header("folders", at: self.now())
+                obj["clientId"] = clientId
+                obj["enabled"] = on
+                obj["agents"] = ["claude"]
+                obj["folders"] = folders.map(\.jsonObject)
+                guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+                _ = self.seal(data)
+            }
+        }
+    }
+
     private func sendResult(_ clientId: String, _ result: SessionCommandResult) {
         var obj = header("result", at: now())
         obj.merge(result.fields(clientId: clientId)) { $1 }
@@ -973,6 +1016,59 @@ final class SessionRemote {
                 self.queue.async {
                     Logger.shared.log("Sessions: interrupt \(sid) → \(r.code.rawValue)\(r.reason.map { "/\($0.rawValue)" } ?? "")")
                     self.sendResult(clientId, r)
+                }
+            }
+        case "folders":
+            sendFolders(clientId: cmd.clientId)
+        case "start":
+            guard startEnabled else {
+                Logger.shared.log("Sessions: start → refused/disabled")
+                return sendResult(cmd.clientId, .refused(.disabled, SessionStarter.disabledMessage))
+            }
+            let prompt: String
+            switch SessionStarter.cleanPrompt(cmd.text) {
+            case .success(let p): prompt = p
+            case .failure(let r): return sendResult(cmd.clientId, r)
+            }
+            let live = sessions
+            let folder = cmd.folder
+            let clientId = cmd.clientId
+            let backends = self.backends
+            probeQueue.async { [weak self] in
+                let r: SessionCommandResult
+                switch SessionStarter.allowed(folder, in: backends.knownFolders(live: live)) {
+                case .success(let f): r = backends.startSession(folder: f, prompt: prompt)
+                case .failure(let refusal): r = refusal
+                }
+                self?.queue.async {
+                    guard let self else { return }
+                    Logger.shared.log("Sessions: start → \(r.code.rawValue)\(r.reason.map { "/\($0.rawValue)" } ?? "")")
+                    self.sendResult(clientId, r)
+                    // The new session shows up on the next ticks; ask the
+                    // list to go out then even if nothing else changed.
+                    self.lastListBody = nil
+                }
+            }
+        case "diff":
+            guard let id = cmd.sessionId, let s = sessions.first(where: { $0.sessionId == id }) else {
+                return sendResult(cmd.clientId, .refused(.notFound, "That session isn't running any more"))
+            }
+            Logger.shared.log("Sessions: diff \(sid)")
+            let file = backends.transcriptFile(for: s)
+            let transcript = file?.format == .claude ? file?.path : nil
+            let clientId = cmd.clientId
+            // git can take a moment; the frame is built and sealed back on
+            // the sessions queue so its seq is in order.
+            probeQueue.async { [weak self] in
+                let fields = TurnSummary.diffFields(transcript: transcript, cwd: s.cwd)
+                self?.queue.async {
+                    guard let self, !self.stopped else { return }
+                    var obj = self.header("diff", at: self.now())
+                    obj.merge(fields) { a, _ in a }
+                    obj["sessionId"] = id
+                    obj["clientId"] = clientId
+                    guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
+                    _ = self.seal(data)
                 }
             }
         default:
@@ -1194,5 +1290,14 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .codex:
             codex.remoteInterrupt(threadId: session.sessionId, interventionId: interventionId, completion: completion)
         }
+    }
+
+    func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder] {
+        let recent = SessionStarter.recentFolders(projectsDirectory: claude.config.transcriptDirectory)
+        return SessionStarter.merge(live: live.filter { $0.backend == .claude }.compactMap(\.cwd), recent: recent, now: Date())
+    }
+
+    func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult {
+        SessionStarter.start(folder: folder, prompt: prompt)
     }
 }

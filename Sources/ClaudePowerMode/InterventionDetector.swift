@@ -15,7 +15,7 @@ struct InterventionEvent: Equatable, Hashable, Codable {
     let projectName: String
     let kind: InterventionKind
     let openedAt: Date
-    let context: String            // what the phone shows: command / question / last reply
+    var context: String            // what the phone shows: command / question / last reply
     let transcriptPath: String
     /// Which agent fired this. Defaults to `.claude` so existing call sites
     /// don't need to change.
@@ -231,6 +231,10 @@ final class InterventionDetector {
     /// (false), or can't tell (nil: no tty, e.g. Desktop or IDE sessions).
     /// Only an explicit false holds back an idle page. Tests inject it.
     private let isForeground: (Int32) -> Bool?
+    /// "Changed 3 files (+12 −4) · tests passed" for a finished turn
+    /// (`TurnSummary.headline`), put on top of a new idle page. Blocking;
+    /// called once per page, when it opens. nil = off (tests).
+    var turnHeadline: ((_ transcript: URL?, _ cwd: String?) -> String?)?
 
     init(hookHoldsDirectory: URL = HookHoldMarkers.defaultDirectory,
          isForeground: @escaping (Int32) -> Bool? = { ProcessRunner.isForeground(pid: $0) }) {
@@ -373,6 +377,9 @@ final class InterventionDetector {
                                        stateStart: p.stateStart, now: now, settings: settings) {
                     var event = event
                     event.source = sourceFor(session)
+                    if event.kind == .idle, event.subtype == nil, let headline = turnHeadline?(url, session.cwd ?? tail?.cwd) {
+                        event.context = TurnSummary.context(headline: headline, reply: event.context)
+                    }
                     desired[event.id] = event
                 }
             }
