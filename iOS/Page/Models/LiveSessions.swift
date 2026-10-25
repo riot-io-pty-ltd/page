@@ -471,6 +471,21 @@ struct SessionDiff: Equatable {
     static let maxPatch = 64 * 1024
 }
 
+/// Finds the session a `start` created, once it shows up in the list: new
+/// since the request, in the requested folder (the list's cwd is
+/// home-abbreviated by the Mac, the folder absolute).
+enum StartedSessionMatch {
+    static func abbreviated(_ path: String) -> String {
+        guard let r = path.range(of: #"^/Users/[^/]+"#, options: .regularExpression) else { return path }
+        return "~" + path[r.upperBound...]
+    }
+
+    static func find(in sessions: [LiveSession], folder: String, existing: Set<String>) -> LiveSession? {
+        let want = [folder, abbreviated(folder)].map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        return sessions.first { !existing.contains($0.id) && want.contains($0.cwd) }
+    }
+}
+
 /// Where the phone may start a session (the `folders` kind).
 struct StartFolders: Equatable {
     struct Folder: Equatable, Identifiable {

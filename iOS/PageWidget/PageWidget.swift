@@ -8,7 +8,10 @@ import WidgetKit
 /// asks (WidgetCenter).
 @main
 struct PageWidgetBundle: WidgetBundle {
-    var body: some Widget { MacStatusWidget() }
+    var body: some Widget {
+        MacStatusWidget()
+        UsageWidget()
+    }
 }
 
 struct MacStatusWidget: Widget {
@@ -201,5 +204,103 @@ struct StatusWidgetView: View {
 
     private var inline: some View {
         Text(entry.status.map { "Page: \($0.headline)" + ($0.working.map { ", \($0) working" } ?? "") } ?? "Page")
+    }
+}
+
+// MARK: - Claude usage
+
+/// The 5-hour and 7-day windows as rings, with their resets.
+struct UsageWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "page.claude-usage", provider: StatusProvider()) { entry in
+            UsageWidgetView(entry: entry)
+                .containerBackground(Theme.Colour.surface, for: .widget)
+                .widgetURL(URL(string: "page://sessions"))
+        }
+        .configurationDisplayName("Claude usage")
+        .description("Your 5-hour and 7-day Claude usage and when each resets. Turn on usage tracking in Page on your Mac.")
+        .supportedFamilies([.systemSmall, .systemMedium, .accessoryCircular, .accessoryRectangular])
+    }
+}
+
+struct UsageWidgetView: View {
+    let entry: StatusEntry
+    @Environment(\.widgetFamily) private var family
+
+    private var model: UsageCardModel? { UsageCardModel(entry.status?.usage, now: entry.date) }
+
+    var body: some View {
+        if let m = model {
+            switch family {
+            case .accessoryCircular: circular(m)
+            case .accessoryRectangular: rectangular(m)
+            case .systemMedium: medium(m)
+            default: small(m)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Claude usage").font(.headline).foregroundStyle(Theme.Colour.text)
+                Text(entry.problem ?? "Turn on usage tracking in Page on your Mac")
+                    .font(.caption).foregroundStyle(Theme.Colour.textMuted)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func ringColumn(_ g: UsageGauge, size: CGFloat, line: CGFloat, font: Font) -> some View {
+        VStack(spacing: 4) {
+            UsageRing(gauge: g, lineWidth: line, valueFont: font).frame(width: size, height: size)
+            Text(g.label).font(.caption2.weight(.semibold)).foregroundStyle(Theme.Colour.text)
+            if let r = g.resetsAt, r > entry.date {
+                Text(r, style: .relative).font(.system(size: 10)).foregroundStyle(Theme.Colour.textMuted)
+                    .multilineTextAlignment(.center).lineLimit(1).minimumScaleFactor(0.7)
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func small(_ m: UsageCardModel) -> some View {
+        HStack(spacing: 6) {
+            if let g = m.fiveHour { ringColumn(g, size: 58, line: 7, font: .system(size: 16, weight: .bold, design: .rounded)) }
+            if let g = m.sevenDay { ringColumn(g, size: 58, line: 7, font: .system(size: 16, weight: .bold, design: .rounded)) }
+        }
+    }
+
+    private func medium(_ m: UsageCardModel) -> some View {
+        HStack(spacing: 12) {
+            if let g = m.fiveHour { ringColumn(g, size: 70, line: 8, font: .system(size: 19, weight: .bold, design: .rounded)) }
+            if let g = m.sevenDay { ringColumn(g, size: 70, line: 8, font: .system(size: 19, weight: .bold, design: .rounded)) }
+            let v = m.verdict(format: { $0.formatted(date: .omitted, time: .shortened) })
+            Text(v.text)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(v.warning ? Theme.Colour.warning : Theme.Colour.textMuted)
+                .frame(maxWidth: 110, alignment: .leading)
+        }
+    }
+
+    private func circular(_ m: UsageCardModel) -> some View {
+        let g = m.fiveHour ?? m.sevenDay!
+        return Gauge(value: g.fraction) {
+            Text(g.label == "5-hour" ? "5h" : "7d")
+        } currentValueLabel: {
+            Text("\(Int(g.pct.rounded()))")
+        }
+        .gaugeStyle(.accessoryCircularCapacity)
+        .widgetAccentable()
+    }
+
+    private func rectangular(_ m: UsageCardModel) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach([m.fiveHour, m.sevenDay].compactMap { $0 }, id: \.label) { g in
+                HStack(spacing: 4) {
+                    Text(g.label == "5-hour" ? "5h" : "7d").font(.caption2.weight(.semibold)).frame(width: 18, alignment: .leading)
+                    Gauge(value: g.fraction) { EmptyView() }.gaugeStyle(.accessoryLinearCapacity)
+                    Text("\(Int(g.pct.rounded()))%").font(.caption2).monospacedDigit()
+                }
+            }
+            if let r = m.fiveHour?.resetsAt, r > entry.date {
+                Text("5h resets \(r.formatted(date: .omitted, time: .shortened))").font(.system(size: 10))
+            }
+        }
     }
 }

@@ -789,5 +789,36 @@ for i in 0..<12 { manyMacs = SavedMacs.upsert(manyMacs, SavedMac(id: "\(i)", nam
 check(manyMacs.count == SavedMacs.maxMacs && manyMacs.first?.id == "11", "capped, newest kept")
 check(mA.relayHost == "r.example", "relay host")
 
+// MARK: usage card + started session
+
+let uNow = Date(timeIntervalSince1970: 1_800_000_000)
+let usageCard = UsageCardModel(MacUsage(fiveHour: .init(pct: 57, resetsAt: uNow.addingTimeInterval(34 * 60)),
+                                        sevenDay: .init(pct: 87, resetsAt: uNow.addingTimeInterval(24 * 3600)),
+                                        hitAt: nil, updatedAt: uNow.addingTimeInterval(-60)), now: uNow)!
+check(usageCard.fiveHour?.resetLine(now: uNow) == "Resets in 34m", "5h countdown")
+check(usageCard.sevenDay?.resetLine(now: uNow) == "Resets in 1d", "7d countdown")
+check(abs((usageCard.fiveHour?.elapsed ?? 0) - (1 - 34.0 / 300)) < 0.001, "5h elapsed share")
+check(usageCard.sevenDay?.paceLine == "On pace" && usageCard.sevenDay?.tone == .warm, "7d 87% with 6/7 of the week gone: on pace, warm")
+check(usageCard.fiveHour?.paceLine == "Plenty left" && usageCard.fiveHour?.tone == .calm, "5h 57% near the end: plenty left")
+check(usageCard.staleMinutes == nil, "fresh")
+check(usageCard.verdict(format: { _ in "t" }).warning == false, "on track")
+let ahead = UsageGauge(label: "7-day", pct: 60, resetsAt: uNow.addingTimeInterval(5 * 24 * 3600), window: UsageGauge.sevenDayWindow, now: uNow)
+check(ahead.paceLine == "Ahead of pace" && ahead.tone == .warm, "60% two days in: ahead of pace")
+check(UsageGauge(label: "x", pct: 95, resetsAt: nil, window: 1, now: uNow).tone == .hot, "95% hot")
+let hitCard = UsageCardModel(MacUsage(fiveHour: .init(pct: 80, resetsAt: nil), hitAt: uNow.addingTimeInterval(600)), now: uNow)!
+check(hitCard.verdict(format: { _ in "T" }) == ("At this pace you'll hit the 5-hour limit around T", true), "hit verdict")
+check(UsageCardModel(MacUsage(fiveHour: .init(pct: 1, resetsAt: nil), updatedAt: uNow.addingTimeInterval(-7 * 3600)), now: uNow) == nil, "old numbers hidden")
+check(UsageCardModel(MacUsage(fiveHour: .init(pct: 1, resetsAt: nil), updatedAt: uNow.addingTimeInterval(-20 * 60)), now: uNow)?.staleMinutes == 20, "as of 20m")
+check(UsageGauge.countdown(to: uNow.addingTimeInterval(2 * 3600 + 5 * 60), now: uNow) == "2h 05m", "h m countdown")
+
+check(StartedSessionMatch.abbreviated("/Users/roy/Documents/P") == "~/Documents/P", "abbreviate home")
+func liveS(_ id: String, _ cwd: String) -> LiveSession {
+    let json = #"{"id":"\#(id)","backend":"claude","title":"t","cwd":"\#(cwd)","state":"idle","host":"cmux","canType":true,"canInterrupt":false}"#
+    return try! JSONDecoder.page().decode(LiveSession.self, from: Data(json.utf8))
+}
+let ls = [liveS("old", "~/Documents/P"), liveS("new", "~/Documents/P"), liveS("other", "~/x")]
+check(StartedSessionMatch.find(in: ls, folder: "/Users/roy/Documents/P", existing: ["old"])?.id == "new", "finds the new session in that folder")
+check(StartedSessionMatch.find(in: ls, folder: "/Users/roy/Documents/Q", existing: []) == nil, "not another folder")
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

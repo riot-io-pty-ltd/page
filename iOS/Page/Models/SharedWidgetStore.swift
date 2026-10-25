@@ -81,6 +81,8 @@ struct WidgetStatus: Equatable {
     var batteryLine: String?
     var usageLine: String?
     var fetchedAt: Date
+    /// The raw usage, for the rings (nil without usage tracking).
+    var usage: MacUsage? = nil
 
     static func from(json: [String: Any], macName: String?, now: Date, format: (Date) -> String) -> WidgetStatus {
         let snap = MacStatusSnapshot.from(json: json)
@@ -94,7 +96,7 @@ struct WidgetStatus: Equatable {
         return WidgetStatus(macName: macName ?? "Your Mac", presence: presence, needsYou: snap.pendingCount ?? 0,
                             working: snap.working, live: snap.activeSessions,
                             batteryLine: snap.batteryLine, usageLine: snap.usageLine(now: now, format: format),
-                            fetchedAt: now)
+                            fetchedAt: now, usage: snap.usage)
     }
 
     /// "2 need you" / "All quiet".

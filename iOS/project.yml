@@ -57,6 +57,7 @@ targets:
       - path: PageWidget
       - path: Page/Models
       - path: Page/Design/Theme.swift
+      - path: Page/Design/UsageRing.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PAGE_BUNDLE_ID).widget

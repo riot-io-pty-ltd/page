@@ -195,6 +195,7 @@ struct DiffView: View {
 /// one of the folders Claude already worked in, type what it should do.
 struct NewSessionView: View {
     @EnvironmentObject var sessions: SessionStore
+    @EnvironmentObject var router: AppRouter
     @Environment(\.dismiss) private var dismiss
     @State private var folder: String?
     @State private var prompt = ""
@@ -275,6 +276,16 @@ struct NewSessionView: View {
         .onChange(of: sessions.startFolders) { _, f in
             if folder == nil { folder = f?.folders.first?.path }
         }
+        // The new session showed up on the Mac: open it.
+        .onChange(of: sessions.startedSessionId) { _, id in
+            guard let id else { return }
+            sessions.clearStartedSession()
+            dismiss()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 400_000_000)
+                router.openSession(id)
+            }
+        }
     }
 
     @ViewBuilder
@@ -282,7 +293,15 @@ struct NewSessionView: View {
         switch state {
         case .sending: EmptyView()
         case .typed(let detail), .queued(let detail):
-            Label(detail ?? "Started", systemImage: "checkmark.circle").foregroundStyle(Theme.Colour.success)
+            VStack(alignment: .leading, spacing: 4) {
+                Label(detail ?? "Started", systemImage: "checkmark.circle").foregroundStyle(Theme.Colour.success)
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Opening it here as soon as it appears… On your Mac it's a new cmux workspace.")
+                        .font(Theme.Font.caption12)
+                        .foregroundStyle(Theme.Colour.textMuted)
+                }
+            }
         case .refused(_, let message), .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(Theme.Colour.destructiveText)
         case .noAnswer:

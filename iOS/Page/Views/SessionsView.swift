@@ -78,29 +78,21 @@ struct SessionsView: View {
             }
             PulseMark(size: 24, pulsing: sessions.sessions.contains { $0.state == .active })
         }
-        .sheet(isPresented: $startingSession) { NewSessionView().environmentObject(sessions) }
+        .sheet(isPresented: $startingSession) { NewSessionView().environmentObject(sessions).environmentObject(router) }
     }
 
     /// The Mac's battery forecast and Claude usage, when it sends them.
     @ViewBuilder
     private func macStrip(now: Date) -> some View {
         let status = api.macStatus
-        let battery = status?.batteryLine
-        let usage = status?.usageLine(now: now, format: { $0.formatted(date: .omitted, time: .shortened) })
-        if battery != nil || usage != nil {
-            VStack(alignment: .leading, spacing: 4) {
-                if let battery {
-                    Label(battery, systemImage: "battery.25")
-                        .foregroundStyle((status?.forecast?.minutes ?? 99) <= 15 ? Theme.Colour.warning : Theme.Colour.textMuted)
-                }
-                if let usage {
-                    Label(usage, systemImage: "gauge.with.dots.needle.67percent")
-                        .foregroundStyle(status?.usage?.hitAt != nil ? Theme.Colour.warning : Theme.Colour.textMuted)
-                }
-            }
-            .font(Theme.Font.caption12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
+        if let battery = status?.batteryLine {
+            Label(battery, systemImage: "battery.25")
+                .font(Theme.Font.caption12)
+                .foregroundStyle((status?.forecast?.minutes ?? 99) <= 15 ? Theme.Colour.warning : Theme.Colour.textMuted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if let usage = UsageCardModel(status?.usage, now: now) {
+            UsageCard(model: usage, now: now)
         }
     }
 

@@ -34,6 +34,11 @@ final class SessionStore: ObservableObject {
     /// Where a session may be started (`folders`), nil until asked.
     @Published private(set) var startFolders: StartFolders?
     @Published private(set) var startFoldersError: String?
+    /// A session started from the phone that has now appeared in the list.
+    @Published private(set) var startedSessionId: String?
+    /// The start waiting for its session to show up (folder, sessions that
+    /// existed before, when).
+    private var pendingStart: (folder: String, existing: Set<String>, at: Date)?
     /// Messages and Stops sent from this phone, by `clientId`.
     @Published private(set) var commands: [String: SentSessionCommand] = [:]
     /// From GET /status; nil until known.
@@ -142,6 +147,8 @@ final class SessionStore: ObservableObject {
         diffClients = [:]
         startFolders = nil
         startFoldersError = nil
+        startedSessionId = nil
+        pendingStart = nil
         commands = [:]
         relayFeatures = nil
         macOfflineHint = false
@@ -280,6 +287,14 @@ final class SessionStore: ObservableObject {
         switch update {
         case .list(let name, let list):
             sessions = list
+            if let p = pendingStart {
+                if Date().timeIntervalSince(p.at) > 90 {
+                    pendingStart = nil
+                } else if let s = StartedSessionMatch.find(in: list, folder: p.folder, existing: p.existing) {
+                    pendingStart = nil
+                    startedSessionId = s.id
+                }
+            }
             if name != nil { macName = name }
             hasList = true
             lastListAt = Date()
@@ -431,6 +446,8 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    func clearStartedSession() { startedSessionId = nil }
+
     /// Starts a new Claude session. Returns the clientId whose delivery
     /// state appears in `commands`.
     @discardableResult
@@ -443,6 +460,8 @@ final class SessionStore: ObservableObject {
             return clientId
         }
         record(clientId: clientId, sessionId: key, kind: .start, text: prompt, state: .sending)
+        startedSessionId = nil
+        pendingStart = (folder, Set(sessions.map(\.id)), Date())
         deliver(body, clientId: clientId, op: "start")
         return clientId
     }
