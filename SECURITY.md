@@ -134,7 +134,7 @@ encrypted with a second secret, the **session key**:
   Claude sessions already ran in the last 30 days (exact match), and runs a
   fixed command, `claude -- '<prompt>'`: the prompt is one shell-quoted
   argument after `--`, folded to one line with control characters
-  stripped, so it can't become a flag or a second command. cmux only, with
+  stripped, so it can't become a flag or a second command. A one-word prompt gets a full stop added, because Claude Code matches its first argument against subcommand names even after `--` ("purge" becomes "purge."). cmux only, with
   the same socket gate as typing.
 - **Stop my agents** (Siri / Shortcuts) presses Esc in every working
   session through the same gate as the Stop button, and needs an unlocked

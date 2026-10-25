@@ -10,7 +10,11 @@ final class SessionStarterTests: XCTestCase {
     func testCommand() {
         XCTAssertEqual(SessionStarter.command(prompt: ""), "claude")
         XCTAssertEqual(SessionStarter.command(prompt: "--dangerously-skip-permissions"),
-                       "claude -- '--dangerously-skip-permissions'", "a prompt can never become a flag")
+                       "claude -- '--dangerously-skip-permissions.'", "a prompt can never become a flag")
+        for word in ["purge", "update", "mcp", "doctor", "install", "auth"] {
+            XCTAssertEqual(SessionStarter.command(prompt: word), "claude -- '\(word).'", "never a subcommand: \(word)")
+        }
+        XCTAssertEqual(SessionStarter.command(prompt: "purge the cache"), "claude -- 'purge the cache'")
         XCTAssertEqual(SessionStarter.command(prompt: "a; rm -rf ~"), "claude -- 'a; rm -rf ~'")
     }
 

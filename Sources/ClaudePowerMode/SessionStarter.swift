@@ -50,8 +50,16 @@ enum SessionStarter {
     }
 
     /// The exact shell command typed into the new workspace.
+    ///
+    /// Claude Code's argument parser matches its first operand against
+    /// subcommand names even after `--`, and some are destructive (`purge`
+    /// deletes a project's Claude state). A prompt with a space can never
+    /// equal a command name; a one-word prompt gets a full stop so it can't
+    /// either ("purge" → "purge.").
     static func command(prompt: String) -> String {
-        prompt.isEmpty ? "claude" : "claude -- " + shellQuote(prompt)
+        guard !prompt.isEmpty else { return "claude" }
+        let arg = prompt.contains(where: \.isWhitespace) ? prompt : prompt + "."
+        return "claude -- " + shellQuote(arg)
     }
 
     /// The folder if it's on the list (exact match after standardising).
