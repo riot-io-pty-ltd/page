@@ -8,6 +8,14 @@ import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
 import app.page.android.model.AgentBackend
+import app.page.android.model.BatteryForecast
+import app.page.android.model.ClaudeUsage
+import app.page.android.model.DiffFile
+import app.page.android.model.MacStatusSnapshot
+import app.page.android.model.SessionDiff
+import app.page.android.model.StartFolder
+import app.page.android.model.StartFolders
+import app.page.android.model.UsageWindow
 import app.page.android.model.Intervention
 import app.page.android.model.InterventionBackend
 import app.page.android.model.InterventionKind
@@ -46,6 +54,18 @@ object Demo {
         RelayClient.seedDemoHistory(history())
         // Sessions are seeded after the inbox, whose reset clears them.
         SessionStore.seedDemo("MacBook Pro (demo)", sessions(), transcripts(), screens(), workflows())
+        SessionStore.seedDemoExtras(mapOf(ACTIVE_SESSION_ID to diff(), "99999999-4444-dddd-eeee-ffffffffffff" to diff()), folders())
+        // On battery with a forecast, and Claude usage captured (v4 heartbeat fields).
+        RelayClient.seedDemoStatus(
+            MacStatusSnapshot(
+                macConnected = true, lastHeartbeatAt = Instant.now(), activeSessions = 7, battery = 42, onAC = false,
+                working = 2, forecast = BatteryForecast(cutoff = 10, minutes = 35, drainPerHour = 55.0),
+                usage = ClaudeUsage(
+                    fiveHour = UsageWindow(62.0, Instant.now().plusSeconds(2 * 3600)), sevenDay = UsageWindow(31.0, null),
+                    hitAt = Instant.now().plusSeconds(80 * 60), updatedAt = Instant.now(),
+                ),
+            )
+        )
     }
 
     fun handleLaunchExtras(extras: Bundle?) {
@@ -60,6 +80,7 @@ object Demo {
         }
         extras.getString("page_demo_open")?.let { AppRouter.open(it) }
         extras.getString("page_demo_session")?.let { AppRouter.openSession(if (it == "active") ACTIVE_SESSION_ID else it) }
+        if (extras.getBoolean("page_demo_new")) AppRouter.openNewSession()
         LaunchHints.sessionPane = extras.getString("page_demo_pane")
         LaunchHints.workflowRunId = extras.getString("page_demo_run")
     }
@@ -90,8 +111,31 @@ object Demo {
         Intervention(
             id = "dev-4", sessionId = "99999999-4444-dddd-eeee-ffffffffffff", cwd = "/Users/you/projects/orbit-api",
             projectName = "orbit-api", kind = InterventionKind.IDLE, openedAt = ago(900),
-            context = "Finished the migration and all tests pass. Waiting for your next instruction.",
+            context = "Changed 3 files (+120 −14) · tests passed\n\nFinished the migration and all tests pass. Waiting for your next instruction.",
             backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL,
+        ),
+        // v4 pages: a stuck session, a stalled workflow, a plain rate limit and a usage forecast.
+        Intervention(
+            id = "dev-5", sessionId = "0110a4a1-6666-ffff-0000-111111111111", cwd = "/Users/you/projects/llm-play",
+            projectName = "llm-play", kind = InterventionKind.IDLE, openedAt = ago(60),
+            context = "The same failing call ran 6 times: Bash: cargo test tokenizer::tests::bpe_roundtrip",
+            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL, subtype = "looping",
+        ),
+        Intervention(
+            id = "dev-6", sessionId = ACTIVE_SESSION_ID, cwd = "/Users/you/projects/page-android",
+            projectName = "page-android", kind = InterventionKind.IDLE, openedAt = ago(400),
+            context = "Workflow design-pass-ch1-8-opus has made no progress for 20 minutes (28/30 agents done).",
+            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL, subtype = "workflow_stalled",
+        ),
+        Intervention(
+            id = "dev-7", sessionId = "ra7e1111-7777-0000-1111-222222222222", cwd = "/Users/you/projects/docs-site",
+            projectName = "docs-site", kind = InterventionKind.RATE_LIMIT, openedAt = ago(1800),
+            context = "Codex hit its usage limit. It resets at 3:00 PM.", backend = InterventionBackend.CODEX,
+        ),
+        Intervention(
+            id = "dev-8", sessionId = "page-mac-usage", cwd = "", projectName = "Your Mac", kind = InterventionKind.RATE_LIMIT,
+            openedAt = ago(30), context = "At the current pace the Claude 5-hour limit is reached in about 30 minutes (at 4:10 PM).",
+            backend = InterventionBackend.CLAUDE, subtype = "usage_forecast",
         ),
     )
 
@@ -204,6 +248,45 @@ object Demo {
                 e("a4", TranscriptRole.TOOL, "Edit: ui/theme/Theme.kt", 590, "Edit"),
             ),
             truncated = false, runId = "wf_5efbb134-a4c", agentId = "a501def47993d54be",
+        ),
+    )
+
+    fun diff(): SessionDiff = SessionDiff(
+        sessionId = ACTIVE_SESSION_ID, clientId = null, scope = "turn", repo = "page",
+        files = listOf(
+            DiffFile("android/app/src/main/java/app/page/android/ui/theme/Theme.kt", 12, 3, "modified"),
+            DiffFile("android/README.md", 40, 0, "added"),
+            DiffFile("notes.txt", null, null, "changed"),
+        ),
+        patch = listOf(
+            "diff --git a/android/app/src/main/java/app/page/android/ui/theme/Theme.kt b/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
+            "index 3f2a1c0..9b8e7d1 100644",
+            "--- a/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
+            "+++ b/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
+            "@@ -18,9 +18,12 @@ data class PageColors(",
+            "     val text: Color,",
+            "-    val kindApproval: Color = Color(0xFF14B8A6),",
+            "+    // Darker in light mode so 11sp chip text stays above 4.5:1.",
+            "+    val kindApproval: Color = Color(0xFF0F766E),",
+            "     val kindUserInput: Color,",
+            "diff --git a/android/README.md b/android/README.md",
+            "new file mode 100644",
+            "--- /dev/null",
+            "+++ b/android/README.md",
+            "@@ -0,0 +1,3 @@",
+            "+# Page for Android",
+            "+",
+            "+Build with ./gradlew :app:assembleDebug",
+        ).joinToString("\n"),
+        truncated = false, note = null,
+    )
+
+    fun folders(): StartFolders = StartFolders(
+        clientId = null, enabled = true, agents = listOf("claude"),
+        folders = listOf(
+            StartFolder("/Users/you/projects/page", "page", ago(300)),
+            StartFolder("/Users/you/projects/acme-web", "acme-web", ago(7_200)),
+            StartFolder("/Users/you/projects/orbit-api", "orbit-api", ago(90_000)),
         ),
     )
 

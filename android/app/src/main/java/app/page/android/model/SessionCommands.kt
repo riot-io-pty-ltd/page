@@ -17,12 +17,24 @@ sealed interface SessionCommand {
     /** Watch a workflow agent inside the session (its transcript). */
     data class WatchAgent(val sessionId: String, val runId: String, val agentId: String) : SessionCommand
 
+    /** v4: what this session changed (answered with a `diff`). */
+    data class Diff(val sessionId: String) : SessionCommand
+
+    /** v4: where a new session may be started (answered with `folders`). */
+    data object Folders : SessionCommand
+
+    /** v4: start a new Claude session in [folder] with [text] as its first prompt (may be empty). */
+    data class Start(val folder: String, val text: String) : SessionCommand
+
     val op: String
         get() = when (this) {
             is Watch, is WatchAgent -> "watch"
             Refresh -> "refresh"
             is Input -> "input"
             is Interrupt -> "interrupt"
+            is Diff -> "diff"
+            Folders -> "folders"
+            is Start -> "start"
         }
 
     /** The plaintext JSON. Keys are sorted so the bytes are deterministic. */
@@ -40,6 +52,12 @@ sealed interface SessionCommand {
                 body["text"] = JsonPrimitive(text)
             }
             is Interrupt -> body["sessionId"] = JsonPrimitive(sessionId)
+            is Diff -> body["sessionId"] = JsonPrimitive(sessionId)
+            Folders -> Unit
+            is Start -> {
+                body["folder"] = JsonPrimitive(folder)
+                body["text"] = JsonPrimitive(text)
+            }
             is WatchAgent -> {
                 body["sessionId"] = JsonPrimitive(sessionId)
                 body["runId"] = JsonPrimitive(runId)

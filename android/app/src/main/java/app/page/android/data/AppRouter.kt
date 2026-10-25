@@ -19,7 +19,13 @@ enum class AppTab { SESSIONS, INBOX, HISTORY, SETTINGS }
  * the other.
  */
 object AppRouter {
-    data class Route(val tab: AppTab = AppTab.SESSIONS, val interventionId: String? = null, val sessionId: String? = null)
+    data class Route(
+        val tab: AppTab = AppTab.SESSIONS,
+        val interventionId: String? = null,
+        val sessionId: String? = null,
+        /** v4: the "New session" sheet. */
+        val newSession: Boolean = false,
+    )
 
     private val _route = MutableStateFlow(Route())
     val route: StateFlow<Route> = _route.asStateFlow()
@@ -34,12 +40,20 @@ object AppRouter {
      */
     fun open(interventionId: String, switchTab: Boolean = true) {
         val r = _route.value
-        _route.value = r.copy(tab = if (switchTab) AppTab.INBOX else r.tab, interventionId = interventionId, sessionId = null)
+        _route.value = r.copy(tab = if (switchTab) AppTab.INBOX else r.tab, interventionId = interventionId, sessionId = null, newSession = false)
     }
 
     /** Opens a live session's detail screen (the reply screen's "Open session", or a tap in the list). */
     fun openSession(sessionId: String) {
-        _route.value = _route.value.copy(tab = AppTab.SESSIONS, interventionId = null, sessionId = sessionId)
+        _route.value = _route.value.copy(tab = AppTab.SESSIONS, interventionId = null, sessionId = sessionId, newSession = false)
+    }
+
+    fun openNewSession() {
+        _route.value = _route.value.copy(tab = AppTab.SESSIONS, interventionId = null, sessionId = null, newSession = true)
+    }
+
+    fun closeNewSession() {
+        _route.value = _route.value.copy(newSession = false)
     }
 
     fun closeReply() {

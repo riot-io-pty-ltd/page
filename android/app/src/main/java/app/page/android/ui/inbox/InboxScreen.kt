@@ -186,8 +186,11 @@ fun InterventionCard(intervention: Intervention, isMostUrgent: Boolean, delivery
                 KindChip(intervention.kind, intervention.subtype)
                 intervention.backend?.let { BackendPill(it, intervention.source) }
             }
+            // An idle page's v4 turn summary reads as its own small line.
+            val split = app.page.android.model.TurnSummaryLine.split(intervention.kind, intervention.context)
+            split.summary?.let { Text(it, style = PageType.caption12, color = colors.kindIdle, maxLines = 1, overflow = TextOverflow.Ellipsis) }
             Text(
-                intervention.context.ifEmpty { ReplyCopy.headline(intervention) },
+                split.message.ifEmpty { ReplyCopy.headline(intervention) },
                 style = PageType.body15, color = colors.text, maxLines = 3, overflow = TextOverflow.Ellipsis,
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s)) {

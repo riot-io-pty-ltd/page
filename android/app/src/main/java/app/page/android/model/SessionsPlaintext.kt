@@ -28,6 +28,12 @@ sealed interface SessionsUpdate {
     data class Screen(val screen: SessionScreen) : SessionsUpdate
     data class Workflows(val sessionId: String, val runs: List<WorkflowRun>) : SessionsUpdate
     data class Result(val result: CommandResult) : SessionsUpdate
+
+    /** v4: the answer to a `diff` op. */
+    data class Diff(val diff: SessionDiff) : SessionsUpdate
+
+    /** v4: the answer to a `folders` op. */
+    data class Folders(val folders: StartFolders) : SessionsUpdate
 }
 
 /** One decrypted `sessions.update`. */
@@ -122,6 +128,38 @@ data class SessionsPlaintext(
                         )
                     )
                 }
+                "diff" -> {
+                    val sid = raw.str("sessionId")?.takeIf { it.isNotEmpty() } ?: return null
+                    // Lenient: no file list or patch reads as "nothing to show", with the note.
+                    val files = lossyList(raw["files"], DiffFile::decode)?.elements ?: emptyList()
+                    val patch = raw.str("patch") ?: ""
+                    SessionsUpdate.Diff(
+                        SessionDiff(
+                            sessionId = sid,
+                            clientId = raw.str("clientId")?.takeIf { it.isNotEmpty() },
+                            scope = (raw.str("scope") ?: "turn").capped(20),
+                            repo = raw.str("repo")?.takeIf { it.isNotEmpty() }?.capped(120),
+                            files = files.take(500),
+                            patch = patch.capped(SessionDiff.MAX_PATCH_CHARS),
+                            truncated = (raw.bool("truncated") ?: false) || patch.length > SessionDiff.MAX_PATCH_CHARS,
+                            note = raw.str("note")?.trim()?.takeIf { it.isNotEmpty() }?.capped(300),
+                        )
+                    )
+                }
+                "folders" -> {
+                    val folders = lossyList(raw["folders"], StartFolder::decode)?.elements ?: emptyList()
+                    val agents = (raw["agents"] as? JsonArray)?.mapNotNull { it.asString() } ?: emptyList()
+                    val enabled = raw.bool("enabled") ?: false
+                    SessionsUpdate.Folders(
+                        StartFolders(
+                            clientId = raw.str("clientId")?.takeIf { it.isNotEmpty() },
+                            enabled = enabled,
+                            agents = agents,
+                            // With starting off, the list is empty whatever arrived.
+                            folders = if (enabled) StartFolders.sorted(folders) else emptyList(),
+                        )
+                    )
+                }
                 else -> return null
             }
             return SessionsPlaintext(
@@ -177,7 +215,8 @@ class SessionUpdateGate {
             is SessionsUpdate.Transcript -> if (!advance(lastTranscriptSeq, u.transcript.key, p.seq)) return Verdict.OUT_OF_ORDER
             is SessionsUpdate.Workflows -> if (!advance(lastScreenSeq, "workflows|" + u.sessionId, p.seq)) return Verdict.OUT_OF_ORDER
             is SessionsUpdate.Screen -> if (!advance(lastScreenSeq, u.screen.sessionId, p.seq)) return Verdict.OUT_OF_ORDER
-            is SessionsUpdate.Result -> Unit
+            // Answers to one command each, matched by clientId: age-gated only.
+            is SessionsUpdate.Result, is SessionsUpdate.Diff, is SessionsUpdate.Folders -> Unit
         }
         return Verdict.ACCEPT
     }

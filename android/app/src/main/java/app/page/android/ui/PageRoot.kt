@@ -26,6 +26,7 @@ import app.page.android.ui.history.HistoryScreen
 import app.page.android.ui.inbox.InboxScreen
 import app.page.android.ui.inbox.ReplyScreen
 import app.page.android.ui.pairing.PairScreen
+import app.page.android.ui.sessions.NewSessionScreen
 import app.page.android.ui.sessions.SessionDetailScreen
 import app.page.android.ui.sessions.SessionsScreen
 import app.page.android.ui.settings.SettingsScreen
@@ -65,6 +66,7 @@ private fun MainScreen(onRequestNotifications: () -> Unit) {
         }
         TabBarHost(route.tab, inbox.size, Modifier.align(Alignment.BottomCenter))
 
+        Overlay(visible = route.newSession) { NewSessionScreen(onClose = AppRouter::closeNewSession) }
         Overlay(visible = route.sessionId != null) {
             val id = remember(route.sessionId) { route.sessionId } ?: return@Overlay
             SessionDetailScreen(id, onDismiss = AppRouter::closeSession)

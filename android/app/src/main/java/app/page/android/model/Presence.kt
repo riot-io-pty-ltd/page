@@ -20,6 +20,12 @@ data class MacStatusSnapshot(
      */
     val macEverSeen: Boolean? = null,
     val pendingCount: Int? = null,
+    /** v4: sessions mid-turn. */
+    val working: Int? = null,
+    /** v4: time to the low-battery cutoff (on battery only). */
+    val forecast: BatteryForecast? = null,
+    /** v4: Claude subscription usage, when the user turned on usage capture. */
+    val usage: ClaudeUsage? = null,
 ) {
     /**
      * A Mac has provably never used this pairing: the relay says so and has
@@ -53,7 +59,31 @@ data class MacStatusSnapshot(
             onAC = json.bool("onAC"),
             macEverSeen = json.bool("macEverSeen"),
             pendingCount = json.num("pendingCount")?.toInt(),
+            working = json.num("working")?.takeIf { it >= 0 }?.toInt(),
+            forecast = BatteryForecast.from(json["forecast"]),
+            usage = ClaudeUsage.from(json["usage"]),
         )
+
+        /**
+         * Folds a `heartbeat` frame into what we know. The v4 fields describe
+         * this moment, so a heartbeat without them clears them (a Mac back on
+         * power stops sending a forecast).
+         */
+        fun applyingHeartbeat(old: MacStatusSnapshot?, payload: JsonObject, now: Instant, statusEndpointKnown: Boolean): MacStatusSnapshot {
+            val o = old ?: MacStatusSnapshot()
+            return o.copy(
+                lastHeartbeatAt = PageDate.parseAny(payload["ts"]) ?: now,
+                activeSessions = payload.num("activeSessions")?.toInt() ?: o.activeSessions,
+                battery = payload.num("battery")?.toInt() ?: o.battery,
+                onAC = payload.bool("onAC") ?: o.onAC,
+                // A live heartbeat proves the Mac is connected right now.
+                macConnected = if (statusEndpointKnown) true else o.macConnected,
+                macEverSeen = true,
+                working = payload.num("working")?.takeIf { it >= 0 }?.toInt(),
+                forecast = BatteryForecast.from(payload["forecast"]),
+                usage = ClaudeUsage.from(payload["usage"]),
+            )
+        }
     }
 }
 

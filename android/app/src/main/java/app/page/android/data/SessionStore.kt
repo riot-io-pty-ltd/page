@@ -10,6 +10,10 @@ import app.page.android.model.SessionAvailability
 import app.page.android.model.SessionCommand
 import app.page.android.model.SessionCommandKind
 import app.page.android.model.SessionCommandOutcome
+import app.page.android.model.SessionDiff
+import app.page.android.model.SessionResultCopy
+import app.page.android.model.StartFolders
+import app.page.android.model.StartPrompt
 import app.page.android.model.SessionComposer
 import app.page.android.model.SessionCrypto
 import app.page.android.model.SessionDeliveryState
@@ -77,6 +81,12 @@ object SessionStore {
         /** Bumped when the first-list wait runs out, so screens re-evaluate. */
         val waitTick: Int = 0,
         val isDemoMode: Boolean = false,
+        /** v4: the last `diff` asked for each session, and its answer. */
+        val diffs: Map<String, AnswerRequest<SessionDiff>> = emptyMap(),
+        /** v4: the last `folders` request and its answer. */
+        val folders: AnswerRequest<StartFolders>? = null,
+        /** v4: the last `start`, and what the Mac said. */
+        val start: StartRequest? = null,
     ) {
         fun session(id: String): LiveSession? = sessions.firstOrNull { it.id == id }
 
@@ -106,6 +116,16 @@ object SessionStore {
         fun agentTranscript(sessionId: String, runId: String, agentId: String): SessionTranscript? =
             transcripts[SessionTranscript.key(sessionId, runId, agentId)]
     }
+
+    /**
+     * A command answered by its own kind (`diff`, `folders`): pending until
+     * the answer, a refusal or the relay's failure arrives.
+     */
+    data class AnswerRequest<T>(val clientId: String, val sentAt: Instant, val answer: T? = null, val error: String? = null) {
+        val isPending: Boolean get() = answer == null && error == null
+    }
+
+    data class StartRequest(val clientId: String, val folder: String, val sentAt: Instant, val state: SessionDeliveryState)
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
@@ -328,11 +348,37 @@ object SessionStore {
                 s.copy(transcripts = next)
             }
             is SessionsUpdate.Result -> applyResult(u.result)
+            is SessionsUpdate.Diff -> update { s ->
+                val asked = s.diffs[u.diff.sessionId]
+                // Only the answer to what this phone asked (or a fresh one for that session).
+                if (asked == null || (u.diff.clientId != null && u.diff.clientId != asked.clientId)) return@update s
+                s.copy(diffs = s.diffs + (u.diff.sessionId to asked.copy(answer = u.diff, error = null)))
+            }
+            is SessionsUpdate.Folders -> update { s ->
+                val asked = s.folders ?: return@update s
+                if (u.folders.clientId != null && u.folders.clientId != asked.clientId) return@update s
+                s.copy(folders = asked.copy(answer = u.folders, error = null))
+            }
         }
     }
 
     private fun applyResult(r: CommandResult) {
-        val cmd = _state.value.commands[r.clientId] ?: return
+        val s = _state.value
+        s.start?.takeIf { it.clientId == r.clientId }?.let { start ->
+            update { it.copy(start = start.copy(state = start.state.applying(r, "Claude"))) }
+            timeoutJobs.remove(r.clientId)?.cancel()
+            return
+        }
+        s.diffs.entries.firstOrNull { it.value.clientId == r.clientId && it.value.isPending }?.let { (sid, req) ->
+            val why = SessionResultCopy.refusal(r.reason, r.detail, agentName(sid))
+            update { it.copy(diffs = it.diffs + (sid to req.copy(error = why))) }
+            return
+        }
+        if (s.folders?.clientId == r.clientId && s.folders.isPending) {
+            update { it.copy(folders = s.folders.copy(error = SessionResultCopy.refusal(r.reason, r.detail, "Claude"))) }
+            return
+        }
+        val cmd = s.commands[r.clientId] ?: return
         val next = cmd.copy(state = cmd.state.applying(r, agentName(cmd.sessionId)))
         update { it.copy(commands = it.commands + (r.clientId to next)) }
         Log.i(TAG, "${cmd.kind.wire} ${r.clientId.take(8)} -> ${r.code.wire}${r.reason?.let { "/$it" } ?: ""}")
@@ -457,9 +503,111 @@ object SessionStore {
         }
     }
 
+    // region v4: changes, folders, start
+
+    /** Asks the Mac what this session changed; the answer lands in `diffs`. */
+    fun requestDiff(sessionId: String) {
+        val clientId = UUID.randomUUID().toString().lowercase()
+        update { it.copy(diffs = it.diffs + (sessionId to AnswerRequest(clientId, Instant.now()))) }
+        if (_state.value.isDemoMode) {
+            scope.launch {
+                delay(500)
+                val answer = demoDiff(sessionId)
+                update { s -> s.copy(diffs = s.diffs + (sessionId to AnswerRequest(clientId, Instant.now(), answer = answer?.copy(clientId = clientId), error = if (answer == null) "No changes to show for this session." else null))) }
+            }
+            return
+        }
+        askForAnswer(SessionCommand.Diff(sessionId), clientId, "diff") { error ->
+            update { s -> s.diffs[sessionId]?.takeIf { it.clientId == clientId && it.isPending }?.let { s.copy(diffs = s.diffs + (sessionId to it.copy(error = error))) } ?: s }
+        }
+    }
+
+    /** Asks where a new session may be started; the answer lands in `folders`. */
+    fun requestFolders() {
+        val clientId = UUID.randomUUID().toString().lowercase()
+        update { it.copy(folders = AnswerRequest(clientId, Instant.now())) }
+        if (_state.value.isDemoMode) {
+            scope.launch {
+                delay(400)
+                update { s -> s.copy(folders = AnswerRequest(clientId, Instant.now(), answer = demoFolders?.copy(clientId = clientId))) }
+            }
+            return
+        }
+        askForAnswer(SessionCommand.Folders, clientId, "folders") { error ->
+            update { s -> s.folders?.takeIf { it.clientId == clientId && it.isPending }?.let { s.copy(folders = it.copy(error = error)) } ?: s }
+        }
+    }
+
+    /**
+     * Starts a new Claude session in [folder] (one the `folders` answer
+     * listed; the Mac checks again). Returns the problem to show instead when
+     * the prompt can't be sent.
+     */
+    fun startSession(folder: String, text: String): String? {
+        StartPrompt.problem(text)?.let { return it }
+        val clientId = UUID.randomUUID().toString().lowercase()
+        val prompt = text.trim()
+        update { it.copy(start = StartRequest(clientId, folder, Instant.now(), SessionDeliveryState.Sending)) }
+        if (_state.value.isDemoMode) {
+            scope.launch {
+                delay(800)
+                applyResult(CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, "Started Claude in a new cmux workspace (demo)", null))
+            }
+            return null
+        }
+        val body = encrypt(SessionCommand.Start(folder, prompt), clientId)
+        if (body == null) {
+            update { it.copy(start = it.start?.copy(state = SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."))) }
+            return null
+        }
+        scope.launch {
+            val outcome = RelayClient.postSessionCommand(body)
+            noteOutcome(outcome)
+            Log.i(TAG, "start ${clientId.take(8)} post -> ${outcome.logName}")
+            update { s -> s.start?.takeIf { it.clientId == clientId }?.let { s.copy(start = it.copy(state = it.state.afterPost(outcome))) } ?: s }
+        }
+        timeoutJobs[clientId] = scope.launch {
+            delay((SessionDeliveryState.RESULT_TIMEOUT * 1000).toLong())
+            update { s -> s.start?.takeIf { it.clientId == clientId }?.let { s.copy(start = it.copy(state = it.state.timedOut(it.sentAt, Instant.now()))) } ?: s }
+            timeoutJobs.remove(clientId)
+        }
+        return null
+    }
+
+    fun clearStart() = update { it.copy(start = null) }
+
+    /** Sends an op whose answer is its own kind; [fail] gets the reason it can't come. */
+    private fun askForAnswer(command: SessionCommand, clientId: String, op: String, fail: (String) -> Unit) {
+        val body = encrypt(command, clientId)
+        if (body == null) {
+            fail("This phone has no session key. Re-pair with your Mac.")
+            return
+        }
+        scope.launch {
+            val outcome = RelayClient.postSessionCommand(body)
+            noteOutcome(outcome)
+            Log.i(TAG, "$op ${clientId.take(8)} post -> ${outcome.logName}")
+            outcome.failureMessage?.let(fail)
+        }
+        scope.launch {
+            delay((SessionDeliveryState.RESULT_TIMEOUT * 1000).toLong())
+            fail("Your Mac didn't answer within ${SessionDeliveryState.RESULT_TIMEOUT.toInt()} seconds. Pull to refresh, or try again.")
+        }
+    }
+
     // endregion
 
     // region Demo
+
+    private var demoDiffs: Map<String, SessionDiff> = emptyMap()
+    private var demoFolders: StartFolders? = null
+
+    private fun demoDiff(sessionId: String): SessionDiff? = demoDiffs[sessionId]
+
+    fun seedDemoExtras(diffs: Map<String, SessionDiff>, folders: StartFolders) {
+        demoDiffs = diffs
+        demoFolders = folders
+    }
 
     fun seedDemo(
         macName: String,

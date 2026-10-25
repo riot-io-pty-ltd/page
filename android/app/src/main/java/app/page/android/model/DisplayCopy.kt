@@ -106,8 +106,13 @@ object ReplyCopy {
             }
         }
         InterventionKind.USER_INPUT -> "${iv.agentName} needs your input"
-        InterventionKind.IDLE -> "${iv.agentName} is waiting for you"
-        InterventionKind.RATE_LIMIT -> "Rate limit reached"
+        InterventionKind.IDLE ->
+            if (PageSubtype.isStuck(iv.kind, iv.subtype)) "${iv.agentName} looks stuck" else "${iv.agentName} is waiting for you"
+        InterventionKind.RATE_LIMIT -> when (iv.subtype) {
+            PageSubtype.BATTERY_FORECAST -> "Battery cutoff soon"
+            PageSubtype.USAGE_FORECAST -> "Claude limit soon"
+            else -> "Rate limit reached"
+        }
     }
 
     fun actionLabel(action: String?): String? = when (action) {

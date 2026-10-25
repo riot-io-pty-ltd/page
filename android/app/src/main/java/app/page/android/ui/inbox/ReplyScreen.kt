@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Difference
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Terminal
@@ -65,7 +66,11 @@ import app.page.android.model.ClosedReplyPhase
 import app.page.android.model.Intervention
 import app.page.android.model.InterventionKind
 import app.page.android.model.InterventionSource
+import app.page.android.model.PageSubtype
 import app.page.android.model.PathDisplay
+import app.page.android.model.SessionAvailability
+import app.page.android.model.TurnSummaryLine
+import app.page.android.ui.sessions.DiffScreen
 import app.page.android.model.RelativeTime
 import app.page.android.model.ReplyAction
 import app.page.android.model.ReplyConfirmation
@@ -152,6 +157,7 @@ fun ReplyScreen(interventionId: String, onDismiss: () -> Unit, onOpenSession: (S
     var pendingQuickAction by remember { mutableStateOf<ReplyAction?>(null) }
     var closeLookupFinished by remember { mutableStateOf(false) }
     var lookupRun by remember { mutableStateOf(0) }
+    var showDiff by remember { mutableStateOf(false) }
     // Ticks so "sent but unconfirmed" is noticed without other changes.
     val now = rememberNow(10_000)
 
@@ -251,7 +257,7 @@ fun ReplyScreen(interventionId: String, onDismiss: () -> Unit, onOpenSession: (S
                     .padding(horizontal = Space.xl, vertical = Space.l),
                 verticalArrangement = Arrangement.spacedBy(Space.l),
             ) {
-                Content(intervention, now) { onOpenSession(intervention.sessionId) }
+                Content(intervention, now, onViewChanges = { showDiff = true }) { onOpenSession(intervention.sessionId) }
             }
             StatusArea(phase, legacyRelay, lastAttempt) { a -> send(a.action, a.text) }
             ActionZone(
@@ -275,8 +281,24 @@ fun ReplyScreen(interventionId: String, onDismiss: () -> Unit, onOpenSession: (S
         }
     }
 
+    if (showDiff && intervention != null) {
+        DiffScreen(intervention.sessionId, intervention.projectName) { showDiff = false }
+    }
+
     pendingQuickAction?.let { action ->
         val draft = replyText.trim()
+        val stuck = intervention?.let { PageSubtype.isStuck(it.kind, it.subtype) } == true
+        if (stuck && action == ReplyAction.DENY) {
+            // "Stop it" on a stuck session: the note would replace the Esc.
+            ConfirmDialog(
+                "Stop without your note?", "Your typed text won't be sent with Stop.",
+                listOf(
+                    DialogChoice("Send my note instead") { send(ReplyAction.CUSTOM, draft) },
+                    DialogChoice("Stop and discard note", destructive = true) { replyText = ""; send(ReplyAction.DENY, "") },
+                ),
+            ) { pendingQuickAction = null }
+            return@let
+        }
         val title = when (action) {
             ReplyAction.APPROVE -> "Approve without your note?"
             ReplyAction.DENY -> "Deny with your note?"
@@ -329,14 +351,16 @@ private fun TopBar(iv: Intervention?, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun Content(iv: Intervention, now: java.time.Instant, onOpenSession: () -> Unit) {
+private fun Content(iv: Intervention, now: java.time.Instant, onViewChanges: () -> Unit, onOpenSession: () -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         KindChip(iv.kind, iv.subtype)
         iv.backend?.let { BackendPill(it, iv.source) }
     }
     Text(ReplyCopy.headline(iv), style = PageType.display22, color = colors.text, modifier = Modifier.semantics { heading() })
     Text(RelativeTime.string("Paged", iv.openedAt, now).uppercase(), style = PageType.caption12, color = colors.textMuted)
-    ContextBlock(iv)
+    val split = TurnSummaryLine.split(iv.kind, iv.context)
+    split.summary?.let { TurnSummaryRow(it, onViewChanges) }
+    ContextBlock(iv, split.message)
     if (iv.cwd.isNotEmpty()) {
         SelectionContainer {
             Text("Working directory: ${PathDisplay.abbreviatingHome(iv.cwd)}", style = PageType.caption12, color = colors.textMuted)
@@ -346,7 +370,7 @@ private fun Content(iv: Intervention, now: java.time.Instant, onOpenSession: () 
 }
 
 @Composable
-private fun ContextBlock(iv: Intervention) {
+private fun ContextBlock(iv: Intervention, message: String) {
     // Approvals are usually a command or a diff: monospace, selectable.
     val isCode = iv.kind == InterventionKind.APPROVAL && iv.subtype != "plan"
     val clipboard = LocalClipboardManager.current
@@ -387,12 +411,38 @@ private fun ContextBlock(iv: Intervention) {
         }
         SelectionContainer {
             Text(
-                iv.context.ifEmpty { "No details were sent with this page." },
+                message.ifEmpty { "No details were sent with this page." },
                 style = if (isCode) PageType.mono13 else PageType.body15,
                 color = colors.text,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+    }
+}
+
+/**
+ * The v4 turn summary ("Changed 3 files (+120 −14) · tests passed") above
+ * the agent's message, with "View changes" when live sessions work (the diff
+ * comes over the encrypted sessions channel).
+ */
+@Composable
+private fun TurnSummaryRow(summary: String, onViewChanges: () -> Unit) {
+    val state by SessionStore.state.collectAsStateWithLifecycle()
+    val canAsk = state.isDemoMode || (state.hasKey && state.relayFeatures?.contains(SessionAvailability.FEATURE) != false)
+    val shape = RoundedCornerShape(12.dp)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(colors.kindIdle.copy(alpha = 0.08f))
+            .border(1.dp, colors.kindIdle.copy(alpha = 0.3f), shape)
+            .padding(start = Space.m, end = Space.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Space.s),
+    ) {
+        Icon(Icons.Filled.Difference, contentDescription = null, tint = colors.kindIdle, modifier = Modifier.size(16.dp))
+        Text(summary, style = PageType.caption12, color = colors.text, modifier = Modifier.weight(1f).padding(vertical = Space.m))
+        if (canAsk) TextLink("View changes", modifier = Modifier.padding(horizontal = Space.s), onClick = onViewChanges)
     }
 }
 
@@ -472,19 +522,30 @@ private fun ActionZone(
                 }
             }
             InterventionKind.USER_INPUT -> ReplyField(replyText, onTextChange, "Type your answer…", enabled, onSend = onSend)
-            InterventionKind.IDLE -> {
+            InterventionKind.IDLE -> if (PageSubtype.isStuck(iv.kind, iv.subtype)) {
+                // v4 stuck watch: no Carry on. Stop presses Esc (deny); not for a stalled workflow.
+                if (PageSubtype.canStop(iv.kind, iv.subtype)) {
+                    QuickButton("Stop it", QuickButtonStyle.DESTRUCTIVE, enabled) { onQuick(ReplyAction.DENY) }
+                }
+                ReplyField(replyText, onTextChange, "Tell it what to do instead…", enabled, onSend = onSend)
+            } else {
                 QuickButton("Carry on", QuickButtonStyle.OUTLINE, enabled) { onQuick(ReplyAction.CARRY_ON) }
                 ReplyField(replyText, onTextChange, "Tell it what to do next…", enabled, onSend = onSend)
             }
-            InterventionKind.RATE_LIMIT -> {
-                Text("Nothing to answer. Page on your Mac resumes the session when the limit resets if auto-resume is on.", style = PageType.caption12, color = colors.textMuted)
+            InterventionKind.RATE_LIMIT -> if (PageSubtype.isForecast(iv.kind, iv.subtype)) {
+                Text("Nothing to answer: this is a heads-up from Page on your Mac.", style = PageType.caption12, color = colors.textMuted)
                 QuickButton("Close", QuickButtonStyle.OUTLINE, true, onClick = onClose)
+            } else {
+                // v4: the Mac queues a written reply and types it when the limit resets.
+                ReplyField(replyText, onTextChange, "Send this when the limit resets…", enabled, sendLabel = "Send when the limit resets", onSend = onSend)
             }
         }
     }
 }
 
 private fun footerText(iv: Intervention): String {
+    if (PageSubtype.isForecast(iv.kind, iv.subtype)) return "A heads-up from Page on your Mac."
+    if (iv.kind == InterventionKind.RATE_LIMIT) return "Page on your Mac types your reply into session ${iv.sessionId.take(8)} when the limit resets."
     if (iv.isBlockingHook) return "Your answer goes straight to ${iv.agentName}'s permission hook in session ${iv.sessionId.take(8)}."
     var where = "session ${iv.sessionId.take(8)}"
     val source = iv.source

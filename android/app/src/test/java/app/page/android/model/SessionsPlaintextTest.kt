@@ -55,7 +55,7 @@ class SessionsPlaintextTest {
     fun malformedFramesAreIgnored() {
         assertNull("list without sessions is malformed, not empty", decode("""{"kind":"list","seq":1,"ts":1761300000000}"""))
         assertNull("unknown kind ignored", decode("""{"kind":"sparkles","seq":1,"ts":1761300000000}"""))
-        assertNull("future kind ignored", decode("""{"kind":"diff","seq":1,"ts":1761300000000,"sessionId":"s"}"""))
+        assertNull("future kind ignored", decode("""{"kind":"hologram","seq":1,"ts":1761300000000,"sessionId":"s"}"""))
         assertNull(decode("""{"kind":"list","ts":1761300000000,"sessions":[]}"""))
         assertNull(decode("""{"kind":"list","seq":1,"sessions":[]}"""))
         assertNull("seq must be a number", decode("""{"kind":"list","seq":"1","ts":1761300000000,"sessions":[]}"""))

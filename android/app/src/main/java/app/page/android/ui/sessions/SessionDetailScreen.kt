@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Difference
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -126,6 +127,7 @@ fun SessionDetailScreen(sessionId: String, onDismiss: () -> Unit) {
     var confirmingStop by remember { mutableStateOf(false) }
     var presentedPage by remember { mutableStateOf<String?>(null) }
     var openRun by remember { mutableStateOf(LaunchHints.workflowRunId) }
+    var showDiff by remember { mutableStateOf(LaunchHints.sessionPane == "changes") }
     var pane by rememberSaveable {
         mutableStateOf(
             when (LaunchHints.sessionPane) {
@@ -168,7 +170,7 @@ fun SessionDetailScreen(sessionId: String, onDismiss: () -> Unit) {
         }
     }
     DisposableEffect(sessionId) { onDispose { SessionStore.watch(null) } }
-    BackHandler(enabled = presentedPage == null && openRun == null, onBack = onDismiss)
+    BackHandler(enabled = presentedPage == null && openRun == null && !showDiff, onBack = onDismiss)
 
     fun send(text: String) {
         val problem = SessionStore.sendInput(sessionId, text)
@@ -188,7 +190,10 @@ fun SessionDetailScreen(sessionId: String, onDismiss: () -> Unit) {
             .navigationBarsPadding()
             .imePadding()
     ) {
-        DetailTopBar(session, live, availability, state.latestInterrupt(sessionId, Instant.now()), agent, onDismiss) { confirmingStop = true }
+        DetailTopBar(
+            session, live, availability, state.latestInterrupt(sessionId, Instant.now()), agent, onDismiss,
+            onChanges = { showDiff = true },
+        ) { confirmingStop = true }
         if (session == null) {
             Placeholder(state.hasList, onDismiss)
             return@Column
@@ -238,6 +243,7 @@ fun SessionDetailScreen(sessionId: String, onDismiss: () -> Unit) {
     }
 
     openRun?.let { runId -> WorkflowRunScreen(sessionId, runId) { openRun = null } }
+    if (showDiff) DiffScreen(sessionId, session?.title) { showDiff = false }
     presentedPage?.let { pageId ->
         // "Open session" there just comes back here.
         ReplyScreen(pageId, onDismiss = { presentedPage = null }, onOpenSession = { presentedPage = null })
@@ -260,6 +266,7 @@ private fun DetailTopBar(
     interrupt: SentSessionCommand?,
     agent: String,
     onDismiss: () -> Unit,
+    onChanges: () -> Unit,
     onStop: () -> Unit,
 ) {
     Column {
@@ -279,6 +286,13 @@ private fun DetailTopBar(
                 // Truncated at the head, like iOS: the project end of the path matters.
                 Text(if (cwd.length > 42) "…" + cwd.takeLast(41) else cwd, style = PageType.mono13, color = colors.textMuted, maxLines = 1)
                 Text(session?.title ?: "Session", style = PageType.bodyEm, color = colors.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            // v4: what this session changed (the Mac answers a `diff` op).
+            if (live != null && availability == SessionAvailability.Ready) {
+                Box(
+                    Modifier.size(MinTouch).clickable(role = Role.Button, onClick = onChanges).semantics { contentDescription = "Changes" },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.Filled.Difference, contentDescription = null, tint = colors.text) }
             }
             val stopping = interrupt?.state?.isPending == true
             if (live != null && live.isStoppable && availability == SessionAvailability.Ready) {

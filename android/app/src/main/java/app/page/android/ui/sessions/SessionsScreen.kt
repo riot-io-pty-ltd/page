@@ -16,6 +16,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.BatteryAlert
+import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.Icon
@@ -45,6 +48,8 @@ import app.page.android.data.SessionStore
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
 import app.page.android.model.MacPresence
+import app.page.android.model.MacStatusStrip
+import app.page.android.ui.components.dotColor
 import app.page.android.model.RelativeTime
 import app.page.android.model.SessionAvailability
 import app.page.android.model.SessionGroup
@@ -111,6 +116,7 @@ fun SessionsScreen() {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ScreenTitle("Sessions", Modifier.weight(1f))
+                if (availability == SessionAvailability.Ready) NewSessionButton()
                 PulseMark(size = 24.dp, pulsing = state.sessions.any { it.state == LiveSessionState.ACTIVE })
             }
         }
@@ -126,6 +132,8 @@ fun SessionsScreen() {
             }
             StatusLine(text)
         }
+        // v4: presence, battery forecast and Claude usage at a glance.
+        item { MacStatusStripCard(macStatus, now) }
         when (availability) {
             SessionAvailability.Ready -> if (state.sessions.isEmpty()) {
                 item { EmptySessions() }
@@ -157,6 +165,52 @@ fun SessionsScreen() {
             choices = listOf(DialogChoice("Unpair", destructive = true) { PairingStore.unpair() }),
             onDismiss = { confirmingRepair = false },
         )
+    }
+}
+
+@Composable
+private fun NewSessionButton() {
+    Row(
+        Modifier
+            .padding(end = Space.s)
+            .heightIn(min = MinTouch)
+            .clip(RoundedCornerShape(50))
+            .clickable(role = Role.Button, onClickLabel = "Start a new Claude session on your Mac", onClick = AppRouter::openNewSession)
+            .border(1.dp, colors.hairline, RoundedCornerShape(50))
+            .padding(horizontal = Space.m),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(Icons.Filled.Add, contentDescription = null, tint = colors.text, modifier = Modifier.size(18.dp))
+        Text("New session", style = PageType.bodyEm, color = colors.text)
+    }
+}
+
+/** The compact Mac status strip: online/offline, battery cutoff forecast, Claude usage. */
+@Composable
+private fun MacStatusStripCard(snapshot: app.page.android.model.MacStatusSnapshot?, now: Instant) {
+    val presence = MacPresence.evaluate(snapshot, now)
+    val clock = remember { java.time.format.DateTimeFormatter.ofLocalizedTime(java.time.format.FormatStyle.SHORT).withZone(java.time.ZoneId.systemDefault()) }
+    val lines = MacStatusStrip.lines(snapshot, presence, now) { clock.format(it) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(colors.surfaceInset)
+            .padding(horizontal = Space.m, vertical = Space.s)
+            .clearAndSetSemantics { contentDescription = lines.joinToString(". ") { it.text } },
+        verticalArrangement = Arrangement.spacedBy(Space.xs),
+    ) {
+        for (line in lines) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s)) {
+                when (line.kind) {
+                    MacStatusStrip.Kind.PRESENCE -> StatusDot(presence.dotColor)
+                    MacStatusStrip.Kind.BATTERY -> Icon(Icons.Filled.BatteryAlert, contentDescription = null, tint = colors.warning, modifier = Modifier.size(14.dp))
+                    MacStatusStrip.Kind.USAGE -> Icon(Icons.Filled.DataUsage, contentDescription = null, tint = colors.backendClaude, modifier = Modifier.size(14.dp))
+                }
+                Text(line.text, style = PageType.caption12, color = colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 

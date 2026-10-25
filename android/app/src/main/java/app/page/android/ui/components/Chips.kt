@@ -20,6 +20,7 @@ import app.page.android.model.InterventionKind
 import app.page.android.model.InterventionSource
 import app.page.android.model.LiveSessionState
 import app.page.android.model.WorkflowRun
+import app.page.android.model.chipLabel
 import app.page.android.ui.theme.PageType
 import app.page.android.ui.theme.colors
 
@@ -40,7 +41,7 @@ private fun OutlinedChip(tint: Color, spoken: String, modifier: Modifier = Modif
 
 @Composable
 fun KindChip(kind: InterventionKind, subtype: String? = null) {
-    val text = if (kind == InterventionKind.APPROVAL && subtype == "plan") "PLAN APPROVAL" else kind.label
+    val text = chipLabel(kind, subtype)
     val tint = colors.kind(kind)
     OutlinedChip(tint, kind.accessibilityName) {
         Text(text, style = PageType.chip11, color = tint, maxLines = 1)

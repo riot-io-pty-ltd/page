@@ -224,6 +224,10 @@ object RelayClient {
         _connection.value = ConnectionState.CONNECTED
     }
 
+    fun seedDemoStatus(snapshot: MacStatusSnapshot) {
+        if (isDemoMode) _macStatus.value = snapshot
+    }
+
     fun seedDemoHistory(list: List<Intervention>) {
         if (isDemoMode) _history.value = list
     }
@@ -846,18 +850,8 @@ object RelayClient {
                 applyClose(id, payload.str("reason"))
                 notifier.pagesClosed(listOf(id))
             }
-            "heartbeat" -> {
-                val old = _macStatus.value ?: MacStatusSnapshot()
-                _macStatus.value = old.copy(
-                    lastHeartbeatAt = PageDate.parseAny(payload["ts"]) ?: Instant.now(),
-                    activeSessions = payload.num("activeSessions")?.toInt() ?: old.activeSessions,
-                    battery = payload.num("battery")?.toInt() ?: old.battery,
-                    onAC = payload["onAC"].asBool() ?: old.onAC,
-                    // A live heartbeat proves the Mac is connected right now.
-                    macConnected = if (statusEndpointAvailable == true) true else old.macConnected,
-                    macEverSeen = true,
-                )
-            }
+            "heartbeat" -> _macStatus.value =
+                MacStatusSnapshot.applyingHeartbeat(_macStatus.value, payload, Instant.now(), statusEndpointAvailable == true)
             "mac.status" -> {
                 val old = _macStatus.value ?: MacStatusSnapshot()
                 val wasConnected = old.macConnected == true
