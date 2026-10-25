@@ -435,7 +435,7 @@ final class SessionRemote {
         switch fresh {
         case .busy?: return .active
         case .waiting?: return state == .waitingOnUser || state == .waitingOnApproval ? state : .waitingOnApproval
-        case .idle?: return state == .active || state == .waitingOnApproval ? .idle : state
+        case .idle?, .shell?: return state == .active || state == .waitingOnApproval ? .idle : state
         case .unknown?, nil: return state
         }
     }

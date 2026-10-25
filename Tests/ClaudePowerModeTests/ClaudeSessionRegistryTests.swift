@@ -45,6 +45,7 @@ final class ClaudeSessionRegistryTests: XCTestCase {
         XCTAssertEqual(ClaudeSessionStatus(raw: "busy"), .busy)
         XCTAssertEqual(ClaudeSessionStatus(raw: "WAITING"), .waiting)
         XCTAssertEqual(ClaudeSessionStatus(raw: "idle"), .idle)
+        XCTAssertEqual(ClaudeSessionStatus(raw: "shell"), .shell, "Claude Code 2.1.3xx: idle with a background shell")
         XCTAssertEqual(ClaudeSessionStatus(raw: "compacting"), .unknown)
         XCTAssertEqual(ClaudeSessionStatus(raw: nil), .unknown)
     }

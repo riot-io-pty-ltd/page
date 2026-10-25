@@ -76,6 +76,7 @@ enum SessionInputGate {
     static let unknownStateMessage = "Page can't tell what this session is doing — type at the Mac"
     static let endedMessage = "The session has ended"
     static let notIdleMessage = "It isn't working right now"
+    static let backgroundShellMessage = "Only a background command is running — Stop can't end that; stop it at the Mac"
 
     /// Trimmed text of 1–8000 characters, or why not.
     static func validateText(_ raw: String) -> Result<String, SessionCommandResult> {
@@ -237,6 +238,8 @@ enum SessionInputGate {
         case .busy: break
         case .waiting: return .refused(.waiting, waitingMessage, interventionId: interventionId)
         case .idle: return .refused(.interruptUnsupported, notIdleMessage)
+        // Esc at the prompt doesn't stop a background shell.
+        case .shell: return .refused(.interruptUnsupported, backgroundShellMessage)
         case .unknown: return .refused(.unknownState, unknownStateMessage)
         }
         guard io.isForeground(session.pid) == true else {

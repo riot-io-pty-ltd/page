@@ -443,6 +443,16 @@ final class InjectionSafetyTmuxTests: XCTestCase {
         return (cols[0], try XCTUnwrap(Int32(cols[1])))
     }
 
+    /// Waits (up to 5 s) for the pane to show `text`: a fixed sleep loses
+    /// the race when the machine is busy.
+    private func waitForPane(_ pane: String, toShow text: String) {
+        for _ in 0..<50 {
+            if ProcessRunner.run(wrapper, ["capture-pane", "-p", "-t", pane], timeout: 3).stdout.contains(text) { return }
+            usleep(100_000)
+        }
+        XCTFail("pane never showed \(text)")
+    }
+
     private func screen(_ pane: String) -> String {
         usleep(300_000)
         return ProcessRunner.run(wrapper, ["capture-pane", "-p", "-t", pane], timeout: 3).stdout
@@ -517,7 +527,7 @@ final class InjectionSafetyTmuxTests: XCTestCase {
         try "#!/bin/sh\nprintf '%s\\n' '\(rule)' '> half typed' '\(rule)'\nexec sleep 60\n".write(toFile: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
         let p = try start(script)
-        usleep(200_000)
+        waitForPane(p.pane, toShow: "half typed")
         let host = InjectionExecutor.TerminalHost.tmux(tmuxPath: wrapper, paneId: p.pane, inMode: false)
         XCTAssertEqual(InjectionExecutor.draftRefusal(host: host, requireEmpty: false), CmuxBridge.draftDetail)
     }
@@ -529,14 +539,14 @@ final class InjectionSafetyTmuxTests: XCTestCase {
             .write(toFile: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script)
         let p = try start(script)
-        usleep(200_000)
+        waitForPane(p.pane, toShow: "Try something")
         let host = InjectionExecutor.TerminalHost.tmux(tmuxPath: wrapper, paneId: p.pane, inMode: false)
         XCTAssertNil(InjectionExecutor.draftRefusal(host: host, requireEmpty: true))
     }
 
     func testUnrecognisedScreenOnlyBlocksWhenEmptinessMustBeProven() throws {
         let p = try start("sh -c 'echo some output; exec sleep 60'")
-        usleep(200_000)
+        waitForPane(p.pane, toShow: "some output")
         let host = InjectionExecutor.TerminalHost.tmux(tmuxPath: wrapper, paneId: p.pane, inMode: false)
         XCTAssertNil(InjectionExecutor.draftRefusal(host: host, requireEmpty: false))
         XCTAssertEqual(InjectionExecutor.draftRefusal(host: host, requireEmpty: true), InjectionExecutor.inputUnverifiedMessage)

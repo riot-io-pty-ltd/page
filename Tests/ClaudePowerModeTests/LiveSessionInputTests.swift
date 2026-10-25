@@ -39,6 +39,10 @@ final class LiveSessionInputTests: XCTestCase {
             isForeground: { ProcessRunner.isForeground(pid: $0) },
             sendInterrupt: { InjectionExecutor.sendInterrupt(host: $0) })
 
+        // Lift the no-live-cmux guard for this one command only; deliver
+        // still refuses any pid but the throwaway's.
+        CmuxBridge.liveTestAllowsCLI = true
+        defer { CmuxBridge.liveTestAllowsCLI = false }
         let result: SessionCommandResult
         if env["PAGE_LIVE_OP"] == "interrupt" {
             result = SessionInputGate.runClaudeInterrupt(sessionId: sessionId, interventionId: nil, io: io)

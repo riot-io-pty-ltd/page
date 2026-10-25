@@ -560,6 +560,7 @@ final class SessionListPureTests: XCTestCase {
         XCTAssertEqual(SessionRemote.overlay(.idle, fresh: .busy), .active)
         XCTAssertEqual(SessionRemote.overlay(.rateLimited, fresh: .busy), .active)
         XCTAssertEqual(SessionRemote.overlay(.idle, fresh: .waiting), .waitingOnApproval)
+        XCTAssertEqual(SessionRemote.overlay(.active, fresh: .shell), .idle, "background shell: the prompt is open")
         XCTAssertEqual(SessionRemote.overlay(.waitingOnUser, fresh: .waiting), .waitingOnUser)
         XCTAssertEqual(SessionRemote.overlay(.active, fresh: .idle), .idle)
         XCTAssertEqual(SessionRemote.overlay(.waitingOnUser, fresh: .idle), .waitingOnUser, "an idle page still needs the user")

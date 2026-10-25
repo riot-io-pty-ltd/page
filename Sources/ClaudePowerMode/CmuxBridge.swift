@@ -473,10 +473,14 @@ enum CmuxBridge {
     /// Commands that never connect to the socket.
     static let offlineCommands: Set<String> = ["socket-status", "--version", "version", "--help"]
 
+    /// Set only by LiveSessionInputTests, for one command into a throwaway
+    /// session whose pid it has already checked.
+    static var liveTestAllowsCLI = false
+
     static let defaultRunner: Runner = { cli, args, stdin, env, timeout in
         // Belt and braces: a unit test must never reach the live cmux (the
         // developer's own shell may run inside it and be admitted).
-        if NSClassFromString("XCTestCase") != nil, let verb = args.first, !offlineCommands.contains(verb) {
+        if NSClassFromString("XCTestCase") != nil, !liveTestAllowsCLI, let verb = args.first, !offlineCommands.contains(verb) {
             return .notLaunched
         }
         return ProcessRunner.run(cli, args, timeout: timeout, environment: env, stdin: stdin)

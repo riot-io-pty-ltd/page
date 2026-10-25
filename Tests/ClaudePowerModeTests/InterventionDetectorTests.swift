@@ -365,6 +365,10 @@ final class ClaudeBackendLogicTests: XCTestCase {
         XCTAssertFalse(B.isActive(sessions: [s(.unknown)], unidentifiedInteractive: 0, claudeRunning: true, secondsSinceTranscript: 100, requireRecentActivity: true, activityWindow: 90))
         XCTAssertTrue(B.isActive(sessions: [s(.unknown)], unidentifiedInteractive: 0, claudeRunning: true, secondsSinceTranscript: 100, requireRecentActivity: false, activityWindow: 90))
         XCTAssertTrue(B.isActive(sessions: [], unidentifiedInteractive: 1, claudeRunning: true, secondsSinceTranscript: nil, requireRecentActivity: true, activityWindow: 90))
+        // A background shell (a build, or a dev server that never ends) is
+        // judged like status-less: by recent transcript activity.
+        XCTAssertTrue(B.isActive(sessions: [s(.shell)], unidentifiedInteractive: 0, claudeRunning: true, secondsSinceTranscript: 10, requireRecentActivity: true, activityWindow: 90))
+        XCTAssertFalse(B.isActive(sessions: [s(.shell)], unidentifiedInteractive: 0, claudeRunning: true, secondsSinceTranscript: 100, requireRecentActivity: true, activityWindow: 90))
     }
 
     func testHoldForPages() {

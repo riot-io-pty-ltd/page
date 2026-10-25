@@ -10,6 +10,10 @@ enum ClaudeSessionStatus: String, Equatable {
     case waiting
     /// Turn finished; the input box is focused.
     case idle
+    /// Turn finished with a background shell still running (Claude Code
+    /// 2.1.3xx writes "shell"). The input box is focused, so typing works as
+    /// for idle; Claude may start a turn by itself when the shell ends.
+    case shell
     /// No sessions file (older Claude Code) or a status value we don't know.
     case unknown
 
@@ -18,6 +22,7 @@ enum ClaudeSessionStatus: String, Equatable {
         case "busy": self = .busy
         case "waiting": self = .waiting
         case "idle": self = .idle
+        case "shell": self = .shell
         default: self = .unknown
         }
     }

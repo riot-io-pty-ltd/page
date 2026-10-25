@@ -425,7 +425,7 @@ final class InterventionDetector {
                                context: approvalContext(pendingTools),
                                stateStart: start, promptKey: primary.id))
 
-        case .idle:
+        case .idle, .shell:
             let start = session.statusUpdatedAt ?? now
             guard let tail, tail.lastMeaningfulRole == .assistant, tail.pendingToolUses.isEmpty else {
                 // User spoke last (interrupt, slash command, typed message):

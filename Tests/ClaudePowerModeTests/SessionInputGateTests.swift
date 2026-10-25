@@ -193,6 +193,10 @@ final class SessionInputGateTests: XCTestCase {
         XCTAssertEqual(Gate.claudePlan(target: .live, status: .busy, hasSessionFile: true, host: .iTerm(tty: "/dev/x"),
                                        text: "9 lives", interventionId: nil),
                        .refuse(.refused(.digitWhileBusy, Gate.digitWhileBusyMessage)))
+        // Background shell: the prompt is open, so it types like idle (a
+        // leading digit is fine — no turn is running to pick a menu).
+        XCTAssertEqual(Gate.claudePlan(target: .live, status: .shell, hasSessionFile: true, host: tmux, text: "1 more thing", interventionId: nil),
+                       .deliver(queued: false))
         XCTAssertEqual(Gate.claudePlan(target: .live, status: .unknown, hasSessionFile: true, host: tmux, text: "hi", interventionId: nil),
                        .refuse(.refused(.unknownState, Gate.unknownStateMessage)))
         XCTAssertEqual(Gate.claudePlan(target: .ended, status: .idle, hasSessionFile: true, host: tmux, text: "hi", interventionId: nil),
@@ -221,7 +225,11 @@ final class SessionInputGateTests: XCTestCase {
         let backgrounded = world(session(), status: "busy")
         backgrounded.foregroundAnswers = [true, false]
         XCTAssertEqual(Gate.runClaudeInterrupt(sessionId: sid, interventionId: nil, io: backgrounded.io).reason, .notTypable)
-        for w in [idle, waiting, terminal, suspended, backgrounded] { XCTAssertTrue(w.interrupts.isEmpty) }
+        let shell = world(session(), status: "shell")
+        let r = Gate.runClaudeInterrupt(sessionId: sid, interventionId: nil, io: shell.io)
+        XCTAssertEqual(r.reason, .interruptUnsupported, "Esc at the prompt doesn't stop a background shell")
+        XCTAssertEqual(r.detail, Gate.backgroundShellMessage)
+        for w in [idle, waiting, terminal, suspended, backgrounded, shell] { XCTAssertTrue(w.interrupts.isEmpty) }
         XCTAssertEqual(Gate.runClaudeInterrupt(sessionId: sid, interventionId: nil, io: world(nil).io).reason, .ended)
     }
 

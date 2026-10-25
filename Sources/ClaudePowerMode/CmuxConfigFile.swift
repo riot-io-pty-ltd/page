@@ -1,21 +1,22 @@
 import Foundation
 
-/// Switches cmux's socket to Password mode by editing
+/// Switches cmux's socket to Automation mode by editing
 /// `~/.config/cmux/cmux.json`, for the one-click "Let Page type into cmux"
-/// button in Set up cmux….
+/// button in Set up cmux…. (Password mode would also keep other apps out,
+/// but a Keychain password is one more thing that can go wrong; the user
+/// chose Automation mode. Password mode stays a manual option.)
 ///
 /// cmux.json is JSONC (comments, trailing commas) and the user's own file,
 /// so the edit is as small as possible: one `"automation"` member inserted
 /// right after the root `{`, every existing byte kept. If the file already
 /// sets `automation` (uncommented), Page doesn't touch it and the user
 /// follows the manual steps instead. A timestamped backup is written
-/// first, and the file is written 0600 (it now holds a secret).
+/// first, and the file is written 0600.
 ///
 /// cmux watches the file and applies a mode change within about a second,
 /// without `cmux reload-config` (which Page couldn't call anyway: in the
-/// default mode cmux refuses Page). Processes started inside cmux, such as
-/// cmux's own Claude Code hooks, keep connecting in Password mode; only
-/// apps launched outside cmux need the password.
+/// default mode cmux refuses Page). In Automation mode any app running as
+/// the user can control cmux, cmux's own hooks included.
 enum CmuxConfigFile {
     static var defaultURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/cmux/cmux.json")
@@ -31,11 +32,10 @@ enum CmuxConfigFile {
     }
 
     /// Pure. `text` nil means the file doesn't exist yet.
-    static func plan(text: String?, password: String) -> Plan {
+    static func plan(text: String?) -> Plan {
         let member = """
           "automation": {
-            "socketControlMode": "password",
-            "socketPassword": \(jsonString(password))
+            "socketControlMode": "automation"
           }
         """
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -52,8 +52,7 @@ enum CmuxConfigFile {
 
     /// Backs up, plans and writes. Returns the backup's URL (nil when there
     /// was no file before), or a short reason.
-    static func enablePasswordMode(password: String, url: URL = defaultURL,
-                                   now: Date = Date()) -> Result<URL?, CmuxConfigError> {
+    static func enableAutomationMode(url: URL = defaultURL, now: Date = Date()) -> Result<URL?, CmuxConfigError> {
         let fm = FileManager.default
         // A symlinked cmux.json (a dotfiles repo) would be replaced by a
         // plain file: leave those to the user.
@@ -69,7 +68,7 @@ enum CmuxConfigFile {
             existing = nil
         }
         let newText: String
-        switch plan(text: existing, password: password) {
+        switch plan(text: existing) {
         case .write(let t): newText = t
         case .alreadyHasAutomation: return .failure(.alreadyHasAutomation)
         case .unreadable: return .failure(.unreadable)
@@ -157,11 +156,6 @@ enum CmuxConfigFile {
     }
 
     // MARK: helpers
-
-    private static func jsonString(_ s: String) -> String {
-        let data = (try? JSONSerialization.data(withJSONObject: [s], options: [.withoutEscapingSlashes])) ?? Data("[\"\"]".utf8)
-        return String(String(decoding: data, as: UTF8.self).dropFirst().dropLast())
-    }
 
     private static func backupStamp(_ date: Date) -> String {
         let f = DateFormatter()

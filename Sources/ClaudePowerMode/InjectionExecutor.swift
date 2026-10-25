@@ -152,7 +152,7 @@ enum InjectionExecutor {
             // everything else is typed as a message.
             if kind.isPrompt { return promptPlan() }
             return .send([.text(message), .enter], summary: "Sent your reply")
-        case .idle:
+        case .idle, .shell:
             // Approve/Deny on a prompt page with the session idle: the prompt
             // was answered (at the Mac, or by an earlier reply) before this
             // arrived. Typing "yes, proceed" as a chat message would be read
@@ -377,7 +377,7 @@ enum InjectionExecutor {
             switch session.status {
             case .waiting, .unknown:
                 return refused(closedPageMessage)
-            case .idle, .busy:
+            case .idle, .shell, .busy:
                 if req.action == "approve" || req.action == "deny" { return refused(promptGoneMessage) }
                 kind = .idle
             }
@@ -619,7 +619,7 @@ enum InjectionExecutor {
                     if let since = openSince, let now = rec.statusUpdatedAt, abs(now.timeIntervalSince(since)) > 0.5 {
                         return false
                     }
-                case .idle, .busy:
+                case .idle, .shell, .busy:
                     guard let promptKey, let transcript else { return true }
                     if let tail = InterventionDetector.readTranscriptTail(transcript),
                        !tail.pendingToolUses.contains(where: { $0.id == promptKey }) {

@@ -293,7 +293,9 @@ final class ClaudeBackend: AgentBackend {
                          activityWindow: Double) -> Bool {
         guard claudeRunning else { return false }
         if sessions.contains(where: { $0.status == .busy }) { return true }
-        let hasStatusless = unidentifiedInteractive > 0 || sessions.contains { $0.status == .unknown }
+        // A background shell may be real work (a build) or a dev server that
+        // never ends: judged by recent transcript activity, as status-less.
+        let hasStatusless = unidentifiedInteractive > 0 || sessions.contains { $0.status == .unknown || $0.status == .shell }
         guard hasStatusless else { return false }
         if !requireRecentActivity { return true }
         if let s = secondsSinceTranscript { return s <= activityWindow }
@@ -494,7 +496,7 @@ final class ClaudeBackend: AgentBackend {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) no longer running — leaving it to the scheduled job")
                 continue
             }
-            guard live.status == .idle || live.status == .unknown else {
+            guard live.status == .idle || live.status == .shell || live.status == .unknown else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) is \(live.status.rawValue) — not typing")
                 continue
             }
@@ -517,7 +519,7 @@ final class ClaudeBackend: AgentBackend {
             }
             // Re-checked on the injection queue: only type into an idle
             // session, never over a prompt or a turn the user started.
-            guard session.status == .idle || session.status == .unknown else {
+            guard session.status == .idle || session.status == .shell || session.status == .unknown else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) became \(session.status.rawValue) — skipped")
                 return
             }
@@ -817,7 +819,7 @@ final class ClaudeBackend: AgentBackend {
                 switch s.status {
                 case .busy: state = .active
                 case .waiting: state = .waitingOnApproval
-                case .idle: state = .idle
+                case .idle, .shell: state = .idle
                 case .unknown: state = claudeActive ? .active : .idle
                 }
             }
@@ -1148,7 +1150,7 @@ extension ClaudeBackend: BatteryPausable {
                     Logger.shared.log("Low-battery resume: \(sid) isn't running (or is ambiguous) — skipped")
                     continue
                 }
-                guard s.status == .idle else {
+                guard s.status == .idle || s.status == .shell else {
                     Logger.shared.log("Low-battery resume: \(sid) is \(s.status.rawValue) — skipped")
                     continue
                 }
