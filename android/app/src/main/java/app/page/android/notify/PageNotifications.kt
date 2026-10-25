@@ -21,7 +21,9 @@ import app.page.android.data.RelayClient
 import app.page.android.model.Intervention
 import app.page.android.model.InterventionKind
 import app.page.android.model.NotificationActionId
+import app.page.android.model.NotificationActionUri
 import app.page.android.model.NotificationCategory
+import app.page.android.model.PageSubtype
 
 /**
  * Page's notifications (the Android side of iOS NotificationService): one
@@ -45,7 +47,9 @@ object PageNotifications : PageNotifier {
     private const val NOTICE_NOTIFICATION_ID = 2
     private const val NOTICE_TAG_PREFIX = "notice:"
 
+    const val ACTION_PAGE = "app.page.android.PAGE_ACTION"
     const val EXTRA_ACTION = "page.action"
+    const val EXTRA_PAGE_ID = "page.id"
     const val REMOTE_INPUT_KEY = "page.reply"
 
     private val context: Context get() = AppGraph.app
@@ -84,6 +88,7 @@ object PageNotifications : PageNotifier {
         if (ids.isEmpty()) return
         val nm = NotificationManagerCompat.from(context)
         for (id in ids) nm.cancel(id, PAGE_NOTIFICATION_ID)
+        PostedPages.remove(ids)
         // A page restored later (a blocking hook that gave up) can alert again.
         AppGraph.prefs.forgetNotified(ids)
     }
@@ -99,6 +104,7 @@ object PageNotifications : PageNotifier {
         val nm = NotificationManagerCompat.from(context)
         for (n in active()) if (n.id == PAGE_NOTIFICATION_ID || n.id == NOTICE_NOTIFICATION_ID) nm.cancel(n.tag, n.id)
         AppGraph.prefs.clearNotified()
+        PostedPages.clear()
     }
 
     /**
@@ -126,6 +132,9 @@ object PageNotifications : PageNotifier {
      * which also clears Android's reply spinner.
      */
     fun post(info: PageInfo, silent: Boolean, status: String?) {
+        // Our own record: actions are checked against it, never against
+        // what an action intent claims.
+        PostedPages.record(info)
         val title = "${info.projectName.ifEmpty { "Your Mac" }} paged you"
         val body = status ?: bodyText(info)
         val builder = NotificationCompat.Builder(context, CHANNEL_PAGES)
@@ -156,11 +165,14 @@ object PageNotifications : PageNotifier {
 
     /** The relay's push body: a kind prefix plus the first 180 characters of context. */
     private fun bodyText(info: PageInfo): String {
-        val prefix = when (info.decodedKind) {
-            InterventionKind.APPROVAL -> if (info.subtype == "plan") "Plan ready: " else "Approval needed: "
-            InterventionKind.IDLE -> "Session is waiting: "
-            InterventionKind.RATE_LIMIT -> "Rate-limited: "
-            InterventionKind.USER_INPUT -> ""
+        val kind = info.decodedKind
+        val prefix = when {
+            kind == InterventionKind.APPROVAL -> if (info.subtype == PageSubtype.PLAN) "Plan ready: " else "Approval needed: "
+            PageSubtype.isStuck(kind, info.subtype) -> "Looks stuck: "
+            kind == InterventionKind.IDLE -> "Session is waiting: "
+            PageSubtype.isForecast(kind, info.subtype) -> ""
+            kind == InterventionKind.RATE_LIMIT -> "Rate-limited: "
+            else -> ""
         }
         val context = info.context.take(180)
         return if (context.isEmpty()) prefix.trimEnd(' ', ':').ifEmpty { "Needs your input" } else prefix + context
@@ -173,7 +185,7 @@ object PageNotifications : PageNotifier {
      * screen must not be possible.
      */
     private fun addActions(builder: NotificationCompat.Builder, info: PageInfo) {
-        when (NotificationCategory.forKind(info.decodedKind)) {
+        when (NotificationCategory.forPage(info.decodedKind, info.subtype)) {
             NotificationCategory.APPROVAL -> {
                 builder.addAction(action(info, NotificationActionId.APPROVE, "Approve"))
                 builder.addAction(action(info, NotificationActionId.DENY, "Deny"))
@@ -185,18 +197,32 @@ object PageNotifications : PageNotifier {
                 builder.addAction(replyAction(info, "Reply", "Type a reply…"))
                 builder.addAction(action(info, NotificationActionId.CARRY_ON, "Carry on"))
             }
+            // v4 stuck watch: no Carry on; Stop presses Esc on the Mac.
+            NotificationCategory.STUCK -> {
+                builder.addAction(action(info, NotificationActionId.STOP, "Stop it"))
+                builder.addAction(replyAction(info, "Tell it what to do", "Tell it what to do instead…"))
+            }
+            NotificationCategory.STALLED -> builder.addAction(replyAction(info, "Tell it what to do", "Tell it what to do instead…"))
+            // The Mac queues a written reply until the limit resets.
+            NotificationCategory.LIMIT -> builder.addAction(replyAction(info, "Send when it resets", "Send this when the limit resets…"))
             NotificationCategory.INFO -> Unit
         }
     }
 
+    /**
+     * An explicit intent to the non-exported receiver. The page id and the
+     * action live only in the data URI, which fill-in can't replace: the
+     * reply action's PendingIntent must be mutable for RemoteInput, so its
+     * extras are untrusted. The URI is also distinct per (page, action), so
+     * PendingIntents never collapse and one page's Approve can't act on
+     * another page. The id and action are repeated as extras only so the
+     * receiver can reject an intent whose extras disagree.
+     */
     private fun actionIntent(info: PageInfo, actionId: String): Intent =
         Intent(context, NotificationActionReceiver::class.java)
-            .setAction("app.page.android.PAGE_ACTION")
-            // A distinct data URI per (page, action): PendingIntents that
-            // differ only in extras collapse into one, and one page's Approve
-            // must never act on another page.
-            .setData(Uri.parse("page-action://${Uri.encode(info.id)}/$actionId"))
-            .putExtras(info.toBundle())
+            .setAction(ACTION_PAGE)
+            .setData(Uri.parse(NotificationActionUri.build(info.id, actionId)))
+            .putExtra(EXTRA_PAGE_ID, info.id)
             .putExtra(EXTRA_ACTION, actionId)
 
     private fun action(info: PageInfo, actionId: String, title: String): NotificationCompat.Action {

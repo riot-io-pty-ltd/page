@@ -73,6 +73,15 @@ class AppPrefs(context: Context) {
         prefs.edit().putString(KEY_NOTIFIED, next.joinToString("\n")).apply()
     }
 
+    /**
+     * What the phone itself posted for each page notification, so an action
+     * can be checked against our own record instead of the intent's extras
+     * (see notify/PostedPages). JSON; bounded by its owner.
+     */
+    var postedPagesJson: String?
+        get() = prefs.getString(KEY_POSTED, null)
+        set(value) = prefs.edit().apply { if (value == null) remove(KEY_POSTED) else putString(KEY_POSTED, value) }.apply()
+
     @Synchronized
     fun clearNotified() {
         prefs.edit().remove(KEY_NOTIFIED).apply()
@@ -85,6 +94,7 @@ class AppPrefs(context: Context) {
         private const val KEY_STAY_CONNECTED = "page.stayConnected"
         private const val KEY_ASKED_NOTIFICATIONS = "page.askedNotifications"
         private const val KEY_NOTIFIED = "page.notifiedIds"
+        private const val KEY_POSTED = "page.postedPages"
         private const val MAX_NOTIFIED = 300
     }
 }

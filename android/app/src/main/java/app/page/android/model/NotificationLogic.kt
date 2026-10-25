@@ -8,19 +8,29 @@ object NotificationActionId {
     const val DENY = "DENY"
     const val REPLY = "REPLY"
     const val CARRY_ON = "CARRY_ON"
+
+    /** v4 "looks stuck" pages: Stop it (sent as deny; the Mac presses Esc). */
+    const val STOP = "STOP"
 }
 
-/** The relay's per-kind categories (PROTOCOL.md §11); Android maps each to its actions. */
+/**
+ * Which actions a page notification offers. The relay's per-kind categories
+ * (PROTOCOL.md §11), refined by the v4 subtypes: a stuck session gets Stop it
+ * and a reply but never Carry on, a plain rate limit takes a reply to send
+ * when it resets, and forecasts take nothing.
+ */
 enum class NotificationCategory {
-    APPROVAL, INPUT, IDLE, INFO;
+    APPROVAL, INPUT, IDLE, STUCK, STALLED, LIMIT, INFO;
 
     companion object {
-        /** The category the relay would pick for this page's raw wire kind. */
-        fun forKind(kind: InterventionKind): NotificationCategory = when (kind) {
-            InterventionKind.APPROVAL -> APPROVAL
-            InterventionKind.USER_INPUT -> INPUT
-            InterventionKind.IDLE -> IDLE
-            InterventionKind.RATE_LIMIT -> INFO
+        fun forPage(kind: InterventionKind, subtype: String?): NotificationCategory = when {
+            kind == InterventionKind.APPROVAL -> APPROVAL
+            kind == InterventionKind.USER_INPUT -> INPUT
+            PageSubtype.canStop(kind, subtype) -> STUCK
+            PageSubtype.isStuck(kind, subtype) -> STALLED
+            kind == InterventionKind.IDLE -> IDLE
+            PageSubtype.isForecast(kind, subtype) -> INFO
+            else -> LIMIT
         }
     }
 }
@@ -47,10 +57,13 @@ sealed interface NotificationDecision {
          * [rawKind] is the raw wire kind carried with the notification (may
          * be null for payloads from very old relays). Approve/Deny are only
          * honoured for approval kinds, so a stale action on an idle page can't
-         * type "yes, proceed" into a session that never asked.
+         * type "yes, proceed" into a session that never asked. [subtype]
+         * refines the v4 pages: Stop only for a stuck session, no Carry on for
+         * one, and nothing at all for a forecast.
          */
-        fun decide(response: NotificationResponseKind, userText: String?, rawKind: String?): NotificationDecision {
+        fun decide(response: NotificationResponseKind, userText: String?, rawKind: String?, subtype: String? = null): NotificationDecision {
             val kind = rawKind?.let(InterventionKind::fromWire)
+            val forecast = kind != null && PageSubtype.isForecast(kind, subtype)
             return when (response) {
                 NotificationResponseKind.Open -> Open
                 NotificationResponseKind.Dismiss -> Ignore
@@ -62,16 +75,28 @@ sealed interface NotificationDecision {
                             Send("", if (response.id == NotificationActionId.APPROVE) ReplyAction.APPROVE else ReplyAction.DENY)
                         }
                     }
-                    NotificationActionId.CARRY_ON -> {
-                        if (kind == InterventionKind.APPROVAL) {
-                            Refuse("This session is waiting for an approval. Open Page to approve or deny it.")
+                    NotificationActionId.STOP -> {
+                        if (kind != null && PageSubtype.canStop(kind, subtype)) {
+                            Send("", ReplyAction.DENY)
                         } else {
-                            Send("", ReplyAction.CARRY_ON)
+                            Refuse("Stop only applies to a session that looks stuck. Open Page to answer this one.")
                         }
+                    }
+                    NotificationActionId.CARRY_ON -> when {
+                        kind == InterventionKind.APPROVAL ->
+                            Refuse("This session is waiting for an approval. Open Page to approve or deny it.")
+                        kind != null && PageSubtype.isStuck(kind, subtype) ->
+                            Refuse("This session looks stuck, so carrying on won't help. Open Page to tell it what to do.")
+                        forecast -> Refuse("Nothing to answer: this is a heads-up from your Mac.")
+                        else -> Send("", ReplyAction.CARRY_ON)
                     }
                     NotificationActionId.REPLY -> {
                         val text = (userText ?: "").trim()
-                        if (text.isEmpty()) Ignore else Send(text, ReplyAction.CUSTOM)
+                        when {
+                            text.isEmpty() -> Ignore
+                            forecast -> Refuse("Nothing to answer: this is a heads-up from your Mac.")
+                            else -> Send(text, ReplyAction.CUSTOM)
+                        }
                     }
                     else -> Ignore
                 }
