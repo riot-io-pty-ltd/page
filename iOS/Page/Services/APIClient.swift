@@ -37,7 +37,12 @@ final class APIClient: NSObject, ObservableObject {
         // every page that opened meanwhile (the relay's alert pushes set the
         // badge from its own pending count then). Recounting a stale list
         // would undercount, so the badge waits for the next successful fetch.
-        didSet { if inboxLoad == .loaded, inboxIsFresh { NotificationService.shared.setBadge(inbox.count) } }
+        didSet {
+            if inboxLoad == .loaded, inboxIsFresh {
+                NotificationService.shared.setBadge(inbox.count)
+                WidgetShare.reload(needsYou: inbox.count, working: macStatus?.working)
+            }
+        }
     }
     /// True from a successful inbox fetch until the socket is closed for
     /// the background (or the pairing changes): while it holds, socket

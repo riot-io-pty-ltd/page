@@ -16,6 +16,12 @@ final class PairingStore: ObservableObject {
     @Published private(set) var retirementNotice: String?
 
     private static let pairedKey = "page.pairedMac"
+
+    /// The paired Mac's name from the Keychain (no instance needed).
+    nonisolated static func currentMacName() -> String? {
+        guard let json = KeychainStore.get(pairedKey), let data = json.data(using: .utf8) else { return nil }
+        return (try? JSONDecoder().decode(PairedMac.self, from: data))?.name
+    }
     private static let retirementNoticeKey = "page.retirementNotice"
     private var retiredSubscription: AnyCancellable?
 
@@ -85,6 +91,7 @@ final class PairingStore: ObservableObject {
         #endif
         relayHost = pairing.relayHost
         pairedMac = mac
+        WidgetShare.sync()
         // MainTabView's .task connects and loads once it appears.
         NotificationService.shared.pairingChanged()
         return true
@@ -104,6 +111,7 @@ final class PairingStore: ObservableObject {
         #endif
         pairedMac = nil
         relayHost = nil
+        WidgetShare.sync()
         APIClient.shared.reset()
         AppRouter.shared.reset()
         NotificationService.shared.clearAll()
@@ -129,6 +137,7 @@ final class PairingStore: ObservableObject {
         #endif
         pairedMac = nil
         relayHost = nil
+        WidgetShare.sync()
         APIClient.shared.reset()
         AppRouter.shared.reset()
         // APIClient already cleared banners and the badge when it saw the

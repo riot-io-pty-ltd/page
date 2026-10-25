@@ -447,6 +447,19 @@ final class SessionStore: ObservableObject {
         return clientId
     }
 
+    /// Siri / Shortcuts: Esc in every working session. Returns what the
+    /// relay said (the Mac's own answer comes over the socket, which may be
+    /// closed while the app is in the background).
+    func interruptAll() async -> SessionCommandOutcome {
+        let clientId = UUID().uuidString.lowercased()
+        guard let body = encrypt(.interruptAll, clientId: clientId) else {
+            return .failed("This iPhone has no session key. Re-pair with your Mac.")
+        }
+        let outcome = await APIClient.shared.postSessionCommand(body: body)
+        noteOutcome(outcome)
+        return outcome
+    }
+
     private func encrypt(_ command: SessionCommand, clientId: String) -> Data? {
         if rootKey == nil { reloadKey() }
         guard let root = rootKey else { return nil }

@@ -8,5 +8,13 @@
          relay, so the Worker uses the matching APNs gateway. -->
     <key>aps-environment</key>
     <string>development</string>
+    <!-- The widget reads the relay credentials from the shared group. The
+         app's own group comes first so its existing items stay where
+         they are. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)$(PAGE_BUNDLE_ID)</string>
+        <string>$(AppIdentifierPrefix)$(PAGE_BUNDLE_ID).shared</string>
+    </array>
 </dict>
 </plist>

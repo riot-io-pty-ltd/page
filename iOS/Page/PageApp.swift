@@ -46,6 +46,8 @@ struct RootView: View {
                 // Unreadable before the first unlock after a reboot.
                 if !SessionStore.shared.hasKey { SessionStore.shared.reloadKey() }
                 Task { await notifications.refreshAuthorization() }
+                // Backfills the widget's copy for pairings made before it.
+                WidgetShare.sync()
                 if pairing.isPaired {
                     api.activate()
                     Task { await notifications.requestAuthorizationIfNeeded() }
@@ -54,6 +56,7 @@ struct RootView: View {
                 // iOS would freeze the socket anyway; close it cleanly and
                 // rely on APNs until we're back.
                 api.disconnect()
+                WidgetShare.reload()
             default:
                 break
             }

@@ -44,3 +44,26 @@ targets:
         # account; device builds sign with DEVELOPMENT_TEAM from Local.xcconfig.
         "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "NO"
         "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": "NO"
+    dependencies:
+      - target: PageWidget
+
+  # Home Screen / Lock Screen widget: reads GET /status with the relay
+  # credentials the app shares through a Keychain access group.
+  PageWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: PageWidget
+      - path: Page/Models
+      - path: Page/Design/Theme.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PAGE_BUNDLE_ID).widget
+        INFOPLIST_FILE: PageWidget/Info.plist
+        CODE_SIGN_ENTITLEMENTS: PageWidget/PageWidget.entitlements
+        TARGETED_DEVICE_FAMILY: "1"
+        GENERATE_INFOPLIST_FILE: "NO"
+        SKIP_INSTALL: "YES"
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "NO"
+        "CODE_SIGNING_REQUIRED[sdk=iphonesimulator*]": "NO"

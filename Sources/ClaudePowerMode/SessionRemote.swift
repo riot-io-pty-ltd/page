@@ -1020,6 +1020,31 @@ final class SessionRemote {
             }
         case "folders":
             sendFolders(clientId: cmd.clientId)
+        case "interruptAll":
+            // Siri / Shortcuts "Stop my agents": Esc in every session that is
+            // working, each through the same gate as the Stop button.
+            let targets = sessions.filter { state(of: $0) == .active && hosts[$0.sessionId]?.info.canInterrupt != false }
+            Logger.shared.log("Sessions: interruptAll (\(targets.count) working)")
+            guard !targets.isEmpty else {
+                return sendResult(cmd.clientId, SessionCommandResult(code: .delivered, reason: nil, detail: "No agents were working"))
+            }
+            let clientId = cmd.clientId
+            let group = DispatchGroup()
+            let lock = NSLock()
+            var stopped = 0
+            for s in targets {
+                group.enter()
+                backends.interrupt(s, interventionId: openPage(for: s)?.id) { r in
+                    if r.code == .delivered || r.code == .queued { lock.lock(); stopped += 1; lock.unlock() }
+                    group.leave()
+                }
+            }
+            group.notify(queue: queue) { [weak self] in
+                let n = targets.count
+                let detail = stopped == n ? "Stopped \(n) agent\(n == 1 ? "" : "s")" : "Stopped \(stopped) of \(n) agents"
+                self?.sendResult(clientId, SessionCommandResult(code: stopped > 0 ? .delivered : .refused,
+                                                                reason: stopped > 0 ? nil : .interruptUnsupported, detail: detail))
+            }
         case "start":
             guard startEnabled else {
                 Logger.shared.log("Sessions: start → refused/disabled")

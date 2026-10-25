@@ -68,9 +68,14 @@ final class AppRouter: ObservableObject {
         }
     }
 
-    /// Handles `page://intervention/<id>`. Returns false for anything else.
+    /// Handles `page://intervention/<id>` and `page://sessions` (the
+    /// widget). Returns false for anything else.
     @discardableResult
     func handle(url: URL) -> Bool {
+        if url.scheme == "page", url.host == "sessions" {
+            tab = .sessions
+            return true
+        }
         guard let id = DeepLink.interventionId(from: url) else { return false }
         open(interventionId: id)
         return true

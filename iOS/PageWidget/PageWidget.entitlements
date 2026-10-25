@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Reads the relay URL and token the app copies into the shared group
+         (Keychain Sharing works with free Personal Team signing; App
+         Groups don't). -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)$(PAGE_BUNDLE_ID).shared</string>
+    </array>
+</dict>
+</plist>

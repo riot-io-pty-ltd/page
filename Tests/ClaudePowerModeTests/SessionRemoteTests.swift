@@ -517,6 +517,22 @@ final class SessionRemoteTests: XCTestCase {
         XCTAssertEqual(frames("result").last?["reason"] as? String, "not_found")
     }
 
+    func testInterruptAllStopsOnlyWorkingSessions() {
+        backends.hosts = ["s2": .blocked("Terminal", "x"),
+                          "s3": SessionHostInfo(host: "tmux", canType: true, canInterrupt: true),
+                          "s4": SessionHostInfo(host: "cmux", canType: true, canInterrupt: true)]
+        remote.update(sessions: [session("s1", .idle), session("s2", .active), session("s3", .active),
+                                 session("s4", .active)], pending: [])
+        lookingPhone()
+        send(command(["op": "interruptAll", "clientId": "all1"]))
+        remote.waitUntilIdle()
+        XCTAssertEqual(Set(backends.interrupts), ["s3", "s4"], "not idle s1, not s2 where Esc can't be pressed")
+        XCTAssertEqual(frames("result").last?["detail"] as? String, "Stopped 2 agents")
+        remote.update(sessions: [session("s1", .idle)], pending: [])
+        send(command(["op": "interruptAll", "clientId": "all2"]))
+        XCTAssertEqual(frames("result").last?["detail"] as? String, "No agents were working")
+    }
+
     func testUnknownOpIsIgnored() {
         send(command(["op": "selfDestruct", "sessionId": "s1"]))
         XCTAssertTrue(sink.sent.isEmpty)

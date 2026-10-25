@@ -752,5 +752,22 @@ check(st4.forecast == nil && st4.usage == nil && st4.working == nil, "a heartbea
 check(MacUsage(["fiveHour": ["pct": "x"]]) == nil, "bad usage ignored")
 check(MacBatteryForecast(["cutoff": 10]) == nil, "incomplete forecast ignored")
 
+// MARK: widget
+
+let wNow = PageDate.parse("2026-10-25T15:30:00Z")!
+let wJSON: [String: Any] = ["macConnected": true, "lastHeartbeatAt": "2026-10-25T15:29:50Z", "pendingCount": 2,
+                            "working": 3, "activeSessions": 9, "battery": 30, "onAC": false,
+                            "forecast": ["cutoff": 10, "minutes": 50, "drainPerHour": 24]]
+let w = WidgetStatus.from(json: wJSON, macName: "Studio", now: wNow, format: { _ in "t" })
+check(w.presence == .online, "widget online")
+check(w.headline == "2 need you", "widget headline")
+check(w.detail == "3 working · 9 live", "widget detail")
+check(w.batteryLine == "Battery 30% · cutoff in about 50 min", "widget battery line")
+check(w.macName == "Studio", "widget mac name")
+let w1 = WidgetStatus.from(json: ["macConnected": false, "pendingCount": 1, "lastHeartbeatAt": "2026-10-25T10:00:00Z"],
+                           macName: nil, now: wNow, format: { _ in "t" })
+check(w1.headline == "1 needs you" && w1.presence == .offline && w1.macName == "Your Mac", "widget offline, singular")
+check(WidgetStatus.from(json: [:], macName: nil, now: wNow, format: { _ in "t" }).headline == "All quiet", "widget quiet")
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

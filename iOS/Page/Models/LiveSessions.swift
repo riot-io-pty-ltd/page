@@ -746,6 +746,8 @@ enum SessionCommand: Equatable {
     case folders
     /// Start a new Claude session in `folder` with `prompt`.
     case start(folder: String, prompt: String)
+    /// Esc in every working session (Siri / Shortcuts).
+    case interruptAll
 
     var op: String {
         switch self {
@@ -756,6 +758,7 @@ enum SessionCommand: Equatable {
         case .diff:      return "diff"
         case .folders:   return "folders"
         case .start:     return "start"
+        case .interruptAll: return "interruptAll"
         }
     }
 
@@ -774,6 +777,7 @@ enum SessionCommand: Equatable {
         case .diff(let sid):           body["sessionId"] = sid
         case .folders:                 break
         case .start(let folder, let prompt): body["folder"] = folder; body["text"] = prompt
+        case .interruptAll:            break
         }
         return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }
