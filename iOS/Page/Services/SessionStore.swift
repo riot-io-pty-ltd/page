@@ -24,6 +24,8 @@ final class SessionStore: ObservableObject {
     @Published private(set) var macName: String?
     @Published private(set) var lastListAt: Date?
     @Published private(set) var transcripts: [String: SessionTranscript] = [:]
+    /// The watched session's terminal, from Macs that send it.
+    @Published private(set) var screens: [String: SessionScreen] = [:]
     /// Messages and Stops sent from this phone, by `clientId`.
     @Published private(set) var commands: [String: SentSessionCommand] = [:]
     /// From GET /status; nil until known.
@@ -124,6 +126,7 @@ final class SessionStore: ObservableObject {
         macName = nil
         lastListAt = nil
         transcripts = [:]
+        screens = [:]
         commands = [:]
         relayFeatures = nil
         macOfflineHint = false
@@ -243,6 +246,12 @@ final class SessionStore: ObservableObject {
             let live = Set(list.map(\.id))
             let stale = transcripts.keys.filter { !live.contains($0) && $0 != watchedSessionId }
             for id in stale { transcripts[id] = nil }
+            for id in screens.keys where !live.contains(id) && id != watchedSessionId { screens[id] = nil }
+        case .screen(let s):
+            screens[s.sessionId] = s
+            if screens.count > 4 {
+                for id in screens.keys where id != s.sessionId && id != watchedSessionId { screens[id] = nil; break }
+            }
         case .transcript(let t):
             transcripts[t.sessionId] = t
             if transcripts.count > 12 {

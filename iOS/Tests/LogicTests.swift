@@ -483,6 +483,21 @@ let res = SessionsUpdate.result(CommandResult(clientId: "c", ok: true, code: .de
 check(gate.admit(pt(res, boot: "b2", seq: 1), now: cmdNow) == .accept, "results aren't seq-gated")
 check(gate.admit(pt(res, boot: "b2", seq: 1, age: 1200), now: cmdNow) == .tooOld, "results are age-gated")
 check(gate.admit(pt(tA, boot: "b3", seq: 1), now: cmdNow) == .accept, "new boot resets transcript tracking")
+// Screens (the Mac's terminal mirror): per-session seq, independent of transcripts.
+let scrA = SessionsUpdate.screen(SessionScreen(sessionId: "A", lines: ["x"], at: cmdNow))
+check(gate.admit(pt(scrA, boot: "b3", seq: 1), now: cmdNow) == .accept, "screen A, same seq as transcript A is fine")
+check(gate.admit(pt(scrA, boot: "b3", seq: 1), now: cmdNow) == .outOfOrder, "repeated screen dropped")
+check(gate.admit(pt(scrA, boot: "b3", seq: 2), now: cmdNow) == .accept, "newer screen")
+if let p = SessionsPlaintext.decode(Data(#"{"kind":"screen","seq":3,"ts":1761300000000,"sessionId":"S","lines":["❯ hi","  ○ wf 11/23"]}"#.utf8)),
+   case .screen(let sc) = p.update {
+    check(sc.sessionId == "S" && sc.lines == ["❯ hi", "  ○ wf 11/23"], "screen decodes")
+} else { check(false, "screen decodes") }
+check(SessionsPlaintext.decode(Data(#"{"kind":"screen","seq":3,"ts":1761300000000,"lines":["x"]}"#.utf8)) == nil, "screen without sessionId rejected")
+check(SessionsPlaintext.decode(Data(#"{"kind":"screen","seq":3,"ts":1761300000000,"sessionId":"S"}"#.utf8)) == nil, "screen without lines rejected")
+let longScreen = "{\"kind\":\"screen\",\"seq\":3,\"ts\":1761300000000,\"sessionId\":\"S\",\"lines\":[" + (0..<200).map { "\"\(String(repeating: "a", count: 500))\($0)\"" }.joined(separator: ",") + "]}"
+if let p = SessionsPlaintext.decode(Data(longScreen.utf8)), case .screen(let sc) = p.update {
+    check(sc.lines.count == SessionScreen.maxLines && sc.lines.allSatisfy { $0.count <= SessionScreen.maxLineChars }, "screen capped on the phone too")
+} else { check(false, "long screen decodes") }
 gate.reset()
 check(gate.boot == nil && gate.lastListSeq == nil && gate.admit(pt(emptyList, boot: "b3", seq: 1), now: cmdNow) == .accept, "reset clears")
 

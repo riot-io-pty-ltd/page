@@ -115,7 +115,10 @@ encrypted with a second secret, the **session key**:
   prompt, no typing over a draft, no background resume).
 - **Only while someone is looking.** The Mac sends the list only while a
   phone socket is open, and transcripts only for sessions a phone is
-  viewing. Tool output is never sent; text is redacted before it's cut.
+  viewing. The transcript never includes tool output; text is redacted
+  before it's cut. The Terminal view mirrors the watched session's visible
+  screen (tmux and cmux only), which can show tool output: every line is
+  redacted, and it's sent only while that session is open on the phone.
   The Mac logs session id prefixes, the operation, the outcome and lengths,
   never content.
 - **If the session key leaks** (a QR screenshot, a backup of the phone's

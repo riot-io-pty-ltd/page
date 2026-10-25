@@ -220,6 +220,19 @@ struct SessionTranscript: Equatable {
     let truncated: Bool
 }
 
+/// The bottom of a session's terminal (the Mac's `screen` kind): Claude
+/// Code's footer — background workflows, shells, sub-agents — and whatever
+/// else is on screen. Plain text, redacted on the Mac.
+struct SessionScreen: Equatable {
+    let sessionId: String
+    let lines: [String]
+    /// Mac clock.
+    let at: Date
+
+    static let maxLines = 80
+    static let maxLineChars = 300
+}
+
 // MARK: - Command results
 
 struct CommandResult: Equatable {
@@ -241,6 +254,7 @@ struct CommandResult: Equatable {
 enum SessionsUpdate: Equatable {
     case list(macName: String?, sessions: [LiveSession])
     case transcript(SessionTranscript)
+    case screen(SessionScreen)
     case result(CommandResult)
 }
 
@@ -276,10 +290,11 @@ struct SessionsPlaintext: Equatable {
         let detail: String?
         let interventionId: String?
         let disabled: Bool?
+        let lines: [String]?
 
         private enum CodingKeys: String, CodingKey {
             case kind, seq, ts, boot, macName, sessions, sessionId, entries, truncated
-            case clientId, ok, code, reason, detail, interventionId, disabled
+            case clientId, ok, code, reason, detail, interventionId, disabled, lines
         }
 
         init(from decoder: Decoder) throws {
@@ -300,6 +315,7 @@ struct SessionsPlaintext: Equatable {
             detail = c.lenientString(.detail)
             interventionId = c.lenientString(.interventionId)
             disabled = c.lenientBool(.disabled)
+            lines = try? c.decodeIfPresent([String].self, forKey: .lines)
         }
     }
 
@@ -321,6 +337,11 @@ struct SessionsPlaintext: Equatable {
             guard let sid = raw.sessionId, !sid.isEmpty, let entries = raw.entries else { return nil }
             update = .transcript(SessionTranscript(sessionId: sid, entries: Array(entries.elements.suffix(maxEntries)),
                                                    truncated: raw.truncated ?? false))
+        case "screen":
+            guard let sid = raw.sessionId, !sid.isEmpty, let lines = raw.lines else { return nil }
+            update = .screen(SessionScreen(sessionId: sid,
+                                           lines: lines.suffix(SessionScreen.maxLines).map { String($0.prefix(SessionScreen.maxLineChars)) },
+                                           at: Date(timeIntervalSince1970: raw.ts / 1000)))
         case "result":
             guard let cid = raw.clientId, !cid.isEmpty else { return nil }
             let ok = raw.ok ?? false
@@ -361,6 +382,7 @@ struct SessionUpdateGate {
     private(set) var boot: String?
     private(set) var lastListSeq: Int?
     private var lastTranscriptSeq: [String: Int] = [:]
+    private var lastScreenSeq: [String: Int] = [:]
 
     mutating func admit(_ p: SessionsPlaintext, now: Date) -> Verdict {
         // Age first: a stale frame from a new boot mustn't reset tracking.
@@ -369,6 +391,7 @@ struct SessionUpdateGate {
             boot = p.boot
             lastListSeq = nil
             lastTranscriptSeq = [:]
+            lastScreenSeq = [:]
         }
         switch p.update {
         case .list:
@@ -378,6 +401,10 @@ struct SessionUpdateGate {
             if let last = lastTranscriptSeq[t.sessionId], p.seq <= last { return .outOfOrder }
             if lastTranscriptSeq.count > 200 { lastTranscriptSeq = [:] }
             lastTranscriptSeq[t.sessionId] = p.seq
+        case .screen(let s):
+            if let last = lastScreenSeq[s.sessionId], p.seq <= last { return .outOfOrder }
+            if lastScreenSeq.count > 200 { lastScreenSeq = [:] }
+            lastScreenSeq[s.sessionId] = p.seq
         case .result:
             break
         }
@@ -388,6 +415,7 @@ struct SessionUpdateGate {
         boot = nil
         lastListSeq = nil
         lastTranscriptSeq = [:]
+        lastScreenSeq = [:]
     }
 }
 

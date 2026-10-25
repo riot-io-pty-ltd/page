@@ -43,6 +43,11 @@ protocol SessionRemoteBackends: AnyObject {
     /// the list doesn't lag a long check interval.
     func liveStatuses(_ sessions: [AgentSession]) -> [String: ClaudeSessionStatus]
     func transcriptFile(for session: AgentSession) -> SessionTranscriptFile?
+    /// Where the session's screen can be read (tmux / cmux only), or nil.
+    /// Blocking; called only on the probe queue, only for a watched session.
+    func screenSource(for session: AgentSession) -> SessionScreen.Source?
+    /// The screen's text, or nil. Blocking, as above.
+    func readScreen(_ source: SessionScreen.Source) -> String?
     /// Runs the input gate and delivers, on the backend's own queue.
     /// `completion` may run on any queue.
     func input(_ session: AgentSession, clientId: String, text: String, interventionId: String?,
@@ -75,6 +80,11 @@ struct SessionCommand: Equatable {
         return SessionCommand(op: op, clientId: clientId, ts: ts, viewer: viewer, sessionId: sessionId,
                               text: obj["text"] as? String)
     }
+}
+
+extension SessionRemoteBackends {
+    func screenSource(for session: AgentSession) -> SessionScreen.Source? { nil }
+    func readScreen(_ source: SessionScreen.Source) -> String? { SessionScreen.read(source) }
 }
 
 /// Client ids seen in the last 15 minutes (at most 2000): a replayed
@@ -180,6 +190,14 @@ enum SessionsSchedule {
         return since >= liveness || (changed && since >= listThrottle)
     }
 
+    /// A watched session's screen is re-read at most every 2.5 s, never
+    /// while a read is still running.
+    static func screenDue(phones: Int, lastCheckedAt: Date?, reading: Bool, now: Date) -> Bool {
+        guard phones > 0, !reading else { return false }
+        guard let last = lastCheckedAt else { return true }
+        return now.timeIntervalSince(last) >= SessionScreen.interval
+    }
+
     /// A watched session's transcript is re-checked at most every 1.5 s.
     static func transcriptDue(phones: Int, lastCheckedAt: Date?, now: Date) -> Bool {
         guard phones > 0 else { return false }
@@ -283,6 +301,10 @@ final class SessionRemote {
     private var lastListBody: Data?
     private var lastTranscriptCheck: [String: Date] = [:]
     private var lastTranscriptBody: [String: Data] = [:]
+    private var screenSources: [String: (source: SessionScreen.Source?, at: Date)] = [:]
+    private var lastScreenCheck: [String: Date] = [:]
+    private var lastScreenBody: [String: [String]] = [:]
+    private var screensReading = Set<String>()
     private var timer: DispatchSourceTimer?
     private var macName: String?
     private var stopped = false
@@ -511,9 +533,47 @@ final class SessionRemote {
             sendList(rows, body: body, at: t)
         }
         guard enabled else { return }
-        for sid in watchers.watched(now: t)
+        let watched = watchers.watched(now: t)
+        for sid in watched
         where SessionsSchedule.transcriptDue(phones: phones, lastCheckedAt: lastTranscriptCheck[sid], now: t) {
             sendTranscript(sid, force: false, at: t)
+        }
+        for sid in watched
+        where SessionsSchedule.screenDue(phones: phones, lastCheckedAt: lastScreenCheck[sid], reading: screensReading.contains(sid), now: t) {
+            readScreen(sid, at: t)
+        }
+        // Forget screens nobody is watching any more.
+        for sid in Set(screenSources.keys).union(lastScreenBody.keys) where !watched.contains(sid) {
+            screenSources[sid] = nil
+            lastScreenBody[sid] = nil
+            lastScreenCheck[sid] = nil
+        }
+    }
+
+    /// Reads a watched session's screen on the probe queue and sends it
+    /// when it changed. The source is re-resolved every `sourceTTL`.
+    private func readScreen(_ sessionId: String, at t: Date) {
+        lastScreenCheck[sessionId] = t
+        guard let s = sessions.first(where: { $0.sessionId == sessionId }) else { return }
+        let cached = screenSources[sessionId].flatMap { t.timeIntervalSince($0.at) < SessionScreen.sourceTTL ? $0 : nil }
+        screensReading.insert(sessionId)
+        let backends = self.backends
+        probeQueue.async { [weak self] in
+            let source = cached.map(\.source) ?? backends.screenSource(for: s)
+            let raw = source.flatMap { backends.readScreen($0) }
+            let lines = raw.map(SessionScreen.lines(from:))
+            guard let self else { return }
+            self.queue.async {
+                self.screensReading.remove(sessionId)
+                if cached == nil { self.screenSources[sessionId] = (source, t) }
+                guard !self.stopped, self.phones > 0, let lines,
+                      self.watchers.watched(now: self.now()).contains(sessionId),
+                      lines != self.lastScreenBody[sessionId] else { return }
+                var head = self.header("screen", at: self.now())
+                head["sessionId"] = sessionId
+                guard let data = SessionScreen.plaintext(header: head, lines: lines), self.seal(data) else { return }
+                self.lastScreenBody[sessionId] = lines
+            }
         }
     }
 
@@ -727,7 +787,10 @@ final class SessionRemote {
         case "watch":
             guard let viewer = cmd.viewer else { return }
             watchers.set(viewer: viewer, sessionId: cmd.sessionId, now: t)
-            if let id = cmd.sessionId { sendTranscript(id, force: true, at: t) }
+            if let id = cmd.sessionId {
+                sendTranscript(id, force: true, at: t)
+                lastScreenBody[id] = nil   // the next read is sent even if unchanged
+            }
         case "refresh":
             if phones > 0 {
                 let rows = enabled ? currentRows(t) : []
@@ -735,6 +798,7 @@ final class SessionRemote {
             }
             if let viewer = cmd.viewer, let id = watchers.session(forViewer: viewer, now: t) {
                 sendTranscript(id, force: true, at: t)
+                lastScreenBody[id] = nil
             }
         case "input":
             let length = cmd.text?.count ?? 0
@@ -956,6 +1020,25 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .codex:
             return codex.remoteThread(session.sessionId)?.path
                 .flatMap { $0.isEmpty ? nil : SessionTranscriptFile(path: $0, format: .codex) }
+        }
+    }
+
+    func screenSource(for session: AgentSession) -> SessionScreen.Source? {
+        let table = ProcessRunner.processTable()
+        guard !table.isEmpty else { return nil }
+        switch session.backend {
+        case .claude:
+            let candidates = claude.remoteLiveSessions.filter { $0.sessionId == session.sessionId }
+            guard case .success(let s) = InjectionExecutor.pickSession(candidates, pagePid: nil, pageStateStart: nil),
+                  s.tty != nil else { return nil }
+            return SessionScreen.source(for: InjectionExecutor.resolveHost(for: s, processTable: table))
+        case .codex:
+            guard let t = codex.remoteThread(session.sessionId), let cwd = t.cwd, !cwd.isEmpty else { return nil }
+            let target = CodexInjector.resolveTarget(cwd: CodexProcessScanner.canonicalPath(cwd), rolloutPath: t.path,
+                                                     processes: CodexProcessScanner.liveSessions(table: table),
+                                                     cwdFallback: .forSource(CodexBackend.mapSource(t.source)))
+            guard case .tty(let tty, let pid) = target else { return nil }
+            return SessionScreen.source(for: CodexInjector.terminal(tty: tty, pid: pid, threadId: t.id, table: table))
         }
     }
 

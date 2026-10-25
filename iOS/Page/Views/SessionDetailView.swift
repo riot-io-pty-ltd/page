@@ -24,6 +24,12 @@ struct SessionDetailView: View {
     /// The bottom of the transcript is on screen: new entries scroll in.
     @State private var atBottom = true
     @State private var scrollRequest = 0
+    @State private var pane: Pane = .conversation
+
+    /// Conversation (the transcript) or Terminal (the Mac's mirror of the
+    /// session's screen, footer included). Terminal appears only once the
+    /// Mac has sent a screen: older Macs, Terminal.app and iTerm2 don't.
+    enum Pane: String, CaseIterable { case conversation = "Conversation", terminal = "Terminal" }
 
     private static let watchInterval: UInt64 = 30
 
@@ -47,7 +53,21 @@ struct SessionDetailView: View {
                 if let s = session {
                     header(s)
                     banners(s)
-                    transcript(s)
+                    if let screen = sessions.screens[sessionId] {
+                        Picker("View", selection: $pane) {
+                            ForEach(Pane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.horizontal, Theme.Space.l)
+                        .padding(.bottom, Theme.Space.s)
+                        if pane == .terminal {
+                            TerminalMirror(screen: screen)
+                        } else {
+                            transcript(s)
+                        }
+                    } else {
+                        transcript(s)
+                    }
                     bottomZone(s)
                 } else {
                     placeholder
@@ -542,5 +562,52 @@ struct SessionDetailView: View {
             ProgressView("Loading…")
         }
         Spacer()
+    }
+}
+
+// MARK: - Terminal mirror
+
+/// The session's screen as the Mac last read it: monospace, unwrapped
+/// (scrolls sideways), pinned to the bottom where the footer is.
+struct TerminalMirror: View {
+    let screen: SessionScreen
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(screen.lines.enumerated()), id: \.offset) { i, line in
+                            Text(line.isEmpty ? " " : line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Theme.Colour.text)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .id(i)
+                        }
+                    }
+                    .padding(Theme.Space.m)
+                    .textSelection(.enabled)
+                }
+                .background(Theme.Colour.surfaceInset)
+                .onAppear { proxy.scrollTo(screen.lines.count - 1, anchor: .bottomLeading) }
+                .onChange(of: screen.lines) { _, lines in
+                    proxy.scrollTo(lines.count - 1, anchor: .bottomLeading)
+                }
+            }
+            TimelineView(.periodic(from: .now, by: 5)) { context in
+                Text("Mirrored from your Mac · \(Self.age(screen.at, now: context.date))")
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .padding(.vertical, Theme.Space.xs)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Terminal: " + screen.lines.suffix(12).joined(separator: ", "))
+    }
+
+    static func age(_ at: Date, now: Date) -> String {
+        let s = max(0, Int(now.timeIntervalSince(at)))
+        return s < 10 ? "live" : s < 60 ? "\(s)s ago" : "\(s / 60)m ago"
     }
 }

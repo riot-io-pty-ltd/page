@@ -168,6 +168,27 @@ When it changes, the phone resets its `seq` tracking.
 - `id` is stable across snapshots so the phone can diff and keep its
   scroll position. Use the transcript record's uuid, or the line's offset.
 
+### `screen`
+
+```json
+{ "kind": "screen", "boot": "…", "seq": 14, "ts": …, "sessionId": "…",
+  "lines": ["❯ ", "  ⏵⏵ auto mode on · 1 shell", "  ○ design-pass  11/23 · 2h05m"] }
+```
+
+- The visible screen of a watched session's terminal, so the phone can show
+  what the transcript can't: the agent's footer (background workflows and
+  their progress, shells, sub-agents, todo lists).
+- Only for sessions a phone is watching, re-read at most every 2.5 s and
+  sent only when it changed (and once on each `watch` / `refresh`). tmux
+  and cmux only (`capture-pane -p` / `read-screen --surface … --workspace …`);
+  Terminal.app and iTerm2 aren't mirrored.
+- Plain text: escape codes stripped, trailing spaces and blank lines
+  dropped, the last 80 lines kept, each capped at 300 characters and
+  **redacted**, lines dropped from the top until the plaintext fits 32 KiB.
+  Unlike `transcript`, this can include tool output that is on screen.
+- Per-session `seq` on the phone, like transcripts. A phone that doesn't
+  know the kind ignores it (§4), so older apps are unaffected.
+
 ### `result`
 
 ```json
@@ -289,6 +310,7 @@ replies `refused/interrupt_unsupported`. Claude and Codex both treat Esc as
 | `sessions.update` payload at the Worker | 256 KiB |
 | list throttle / liveness refresh | 1 s / 20 s |
 | transcript throttle | 1.5 s per session |
+| screen lines / line / plaintext / interval | 80 / 300 chars / 32 KiB / 2.5 s |
 | watch TTL / phone re-send | 90 s / 30 s |
 | command freshness / replay window | ±5 min / 15 min, 2000 ids |
 | phone result timeout | 20 s |

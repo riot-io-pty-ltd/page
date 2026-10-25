@@ -187,8 +187,13 @@ at any time, not only when a page is open.
   it (AES-256-GCM); the relay only forwards opaque envelopes and never
   stores them. Phones paired before this shipped need to scan the QR again.
 - **Only while you're looking.** The Mac sends the list only while the app
-  is open, and a transcript only for the session on screen. Tool output is
-  never included, and every line is redacted before it's cut.
+  is open, and a transcript only for the session on screen. The transcript
+  never includes tool output, and every line is redacted before it's cut.
+- **Terminal view.** In a session, switch to Terminal to see its screen as
+  it is on the Mac, including Claude Code's footer (background workflows,
+  shells, sub-agents). tmux and cmux sessions only. It can show tool
+  output, so every line is redacted first, and the Mac reads it only while
+  that session is open on your phone.
 - **Typing goes through the same gate as replies.** Claude Code gets your
   text as a message (Enter), queued behind the current step when it's
   busy, never Esc and never a background resume. Page refuses while a

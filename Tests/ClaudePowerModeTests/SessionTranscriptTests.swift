@@ -224,4 +224,29 @@ final class SessionTranscriptTests: XCTestCase {
         XCTAssertFalse(SessionTranscript.toolLine(name: "Workflow", input: ["description": "token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"]).contains("abcdefghijklmnop"),
                        "values are redacted")
     }
+
+    func testScreenLinesAreCleanedCappedAndRedacted() {
+        let raw = "\u{1B}]0;title\u{07}\u{1B}[38;5;208mWorking\u{1B}[0m  \r\nnext\tcol\u{08}\n\n\n"
+        XCTAssertEqual(SessionScreen.lines(from: raw), ["Working", "next\tcol"])
+        let many = (1...200).map { "line \($0)" }.joined(separator: "\n")
+        let kept = SessionScreen.lines(from: many)
+        XCTAssertEqual(kept.count, SessionScreen.maxLines)
+        XCTAssertEqual(kept.last, "line 200", "the bottom is what matters")
+        let wide = SessionScreen.lines(from: String(repeating: "─", count: 1000))
+        XCTAssertEqual(wide.first?.count, SessionScreen.maxLineChars)
+        // Box-drawing is 3 bytes per character: the byte cap still holds.
+        let heavy = SessionScreen.lines(from: Array(repeating: String(repeating: "─", count: 300), count: 80).joined(separator: "\n"))
+        XCTAssertLessThanOrEqual((try JSONSerialization.data(withJSONObject: heavy)).count, SessionScreen.maxPlaintextBytes)
+        XCTAssertNotNil(SessionScreen.plaintext(header: ["kind": "screen", "seq": 1], lines: heavy))
+        XCTAssertFalse(SessionScreen.lines(from: "export GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789").joined().contains("ghp_abcdefghijklmnop"))
+    }
+
+    func testScreenSourcesOnlyForTmuxAndCmux() {
+        let target = CmuxBridge.Target(surfaceId: "S", workspaceId: "W", cliPath: "/x/cmux", source: "environment")
+        XCTAssertEqual(SessionScreen.source(for: InjectionExecutor.TerminalHost.cmux(target)), .cmux(target))
+        XCTAssertEqual(SessionScreen.source(for: InjectionExecutor.TerminalHost.tmux(tmuxPath: "/t", paneId: "%1", inMode: false)),
+                       .tmux(tmuxPath: "/t", pane: "%1", serverArgs: []))
+        XCTAssertNil(SessionScreen.source(for: InjectionExecutor.TerminalHost.terminalApp(tty: "/dev/ttys1")))
+        XCTAssertNil(SessionScreen.source(for: InjectionExecutor.TerminalHost.unknown))
+    }
 }

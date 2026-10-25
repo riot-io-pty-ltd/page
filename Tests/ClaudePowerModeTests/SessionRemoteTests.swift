@@ -31,6 +31,18 @@ final class SessionRemoteTests: XCTestCase {
         var inputs: [(sessionId: String, clientId: String, text: String, page: String?)] = []
         var interrupts: [String] = []
         var probes = 0
+        /// Screen text by session id; a session absent here has no source.
+        var screens: [String: String] = [:]
+        var screenReads: [String] = []
+
+        func screenSource(for session: AgentSession) -> SessionScreen.Source? {
+            screens[session.sessionId] == nil ? nil : .tmux(tmuxPath: "/fake/tmux", pane: session.sessionId, serverArgs: [])
+        }
+        func readScreen(_ source: SessionScreen.Source) -> String? {
+            guard case .tmux(_, let pane, _) = source else { return nil }
+            screenReads.append(pane)
+            return screens[pane]
+        }
 
         func probeHosts(_ sessions: [AgentSession]) -> [String: SessionHostInfo] {
             probes += 1
@@ -498,6 +510,55 @@ final class SessionRemoteTests: XCTestCase {
         _ = writeTranscript("s1", ["first", "second", "third"])
         advance(2)
         XCTAssertEqual(frames("transcript").count, 3)
+    }
+
+    /// The watched session's screen: sent on watch, re-read every 2.5 s,
+    /// sent only when it changed, redacted, and never for an unwatched
+    /// session or one with no readable terminal.
+    func testScreenIsMirroredOnlyWhileWatched() throws {
+        remote.update(sessions: [session("s1", .active), session("s2", .active), session("bg", .active)], pending: [])
+        backends.screens = ["s1": "\u{1B}[1m❯ \u{1B}[0mhello   \n\n  ○ design-pass  11/23 · 2h05m\n\n", "s2": "other"]
+        lookingPhone()
+        advance(3)
+        remote.waitUntilIdle()
+        XCTAssertTrue(backends.screenReads.isEmpty, "nothing watched: no screen reads at all")
+
+        send(command(["op": "watch", "sessionId": "s1", "viewer": "v1"]))
+        advance(0.1)
+        remote.waitUntilIdle()
+        var screen = try XCTUnwrap(frames("screen").last)
+        XCTAssertEqual(screen["sessionId"] as? String, "s1")
+        XCTAssertEqual(screen["lines"] as? [String], ["❯ hello", "", "  ○ design-pass  11/23 · 2h05m"])
+        XCTAssertEqual(Set(backends.screenReads), ["s1"], "only the watched session")
+
+        advance(1)
+        remote.waitUntilIdle()
+        XCTAssertEqual(backends.screenReads.count, 1, "not again within 2.5 s")
+        advance(2)
+        remote.waitUntilIdle()
+        XCTAssertEqual(backends.screenReads.count, 2)
+        XCTAssertEqual(frames("screen").count, 1, "unchanged: not re-sent")
+
+        backends.screens["s1"] = "token sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF done"
+        advance(2.6)
+        remote.waitUntilIdle()
+        screen = try XCTUnwrap(frames("screen").last)
+        XCTAssertEqual(frames("screen").count, 2)
+        XCTAssertFalse((screen["lines"] as? [String])?.joined().contains("abcdefghijklmnop") ?? true, "redacted before sealing")
+
+        // A session with no tmux/cmux terminal is never read.
+        send(command(["op": "watch", "sessionId": "bg", "viewer": "v2"]))
+        advance(2.6)
+        remote.waitUntilIdle()
+        XCTAssertFalse(frames("screen").contains { $0["sessionId"] as? String == "bg" })
+
+        // Stopped watching: no more reads.
+        send(command(["op": "watch", "sessionId": NSNull(), "viewer": "v1"]))
+        send(command(["op": "watch", "sessionId": NSNull(), "viewer": "v2"]))
+        let reads = backends.screenReads.count
+        advance(5)
+        remote.waitUntilIdle()
+        XCTAssertEqual(backends.screenReads.count, reads)
     }
 
     func testWatchExpiresAfter90Seconds() {
