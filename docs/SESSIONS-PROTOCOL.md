@@ -220,6 +220,44 @@ A `transcript` may carry `runId` and `agentId`: it is then that workflow
 agent's transcript (same shape and caps), sent while a viewer watches the
 agent (§5 `watch`). The phone keys it apart from the session's own.
 
+### `diff`
+
+```json
+{ "kind": "diff", "boot": "…", "seq": 16, "ts": …, "sessionId": "…", "clientId": "…",
+  "scope": "turn", "repo": "page",
+  "files": [{ "path": "Sources/a.swift", "added": 12, "removed": 3, "status": "modified" },
+            { "path": "docs/new.md", "added": 40, "removed": 0, "status": "added" },
+            { "path": "notes.txt", "status": "changed" }],
+  "patch": "diff --git a/Sources/a.swift b/Sources/a.swift\n…", "truncated": false }
+```
+
+- The answer to a `diff` op (§5). `scope` is `turn` when the session's
+  current turn edited files (its Edit/MultiEdit/Write/NotebookEdit calls),
+  else `uncommitted` (every uncommitted change in the repository).
+- `status`: `modified` (diff against HEAD), `added` (untracked: shown as a
+  new file), `changed` (no stats: outside the repository, or already
+  committed). `added`/`removed` are absent when unknown.
+- `patch` is a unified diff against HEAD, redacted like everything else,
+  at most 48 KiB, cut at a line; untracked files are included only when
+  they're regular text files inside the repository (never symlinks).
+  `truncated` is true when the patch or the file list was cut. With no
+  repository, `files` is empty, `patch` is `""` and `note` says why.
+- Plaintext at most 64 KiB.
+
+### `folders`
+
+```json
+{ "kind": "folders", "boot": "…", "seq": 17, "ts": …, "clientId": "…",
+  "enabled": true, "agents": ["claude"],
+  "folders": [{ "path": "/Users/me/projects/page", "name": "page", "lastUsedAt": 1761290000000 }] }
+```
+
+The answer to a `folders` op: where a new session may be started (§5
+`start`), newest first, at most 40: the folders of live Claude sessions and
+of Claude transcripts written in the last 30 days (never `/` or the home
+folder). With "Let my phone start sessions" off, `enabled` is false and
+`folders` is empty.
+
 ### `result`
 
 ```json
@@ -243,6 +281,9 @@ phone clock) and `viewer` (a random id per app install, persisted).
 | `refresh` | — | Sends a `list` now, plus the `transcript` for this viewer's watched session. No `result`. |
 | `input` | `sessionId`, `text` (1–8000 characters after trimming) | Runs the input gate, then delivers. Always replies with a `result`. |
 | `interrupt` | `sessionId` | Presses Esc in the session (`sendInterrupt`). Only when `canInterrupt` and state is `active`. Always replies with a `result`. |
+| `diff` | `sessionId` | Replies with a `diff` (§4), or a `result` `refused/not_found` for a session that isn't running. |
+| `folders` | — | Replies with a `folders` (§4). |
+| `start` | `folder`, `text` (the prompt, 0–4000 characters; may be empty) | Starts a new Claude session: a cmux workspace in `folder` running `claude -- '<text>'`. Off unless "Let my phone start sessions" is on (`phoneStartSessionsEnabled`, default false): `refused/disabled`. `folder` must be one the `folders` list would contain, compared after standardising (`refused/not_found`). The prompt is folded to one line, control characters stripped, and passed as one shell-quoted argument after `--`, so it can never be read as a flag. Needs cmux in a mode that lets Page in (`refused/not_typable` with cmux's reason). Always replies with a `result`. |
 
 ### Acceptance (before any op)
 
