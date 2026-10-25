@@ -211,4 +211,17 @@ final class SessionTranscriptTests: XCTestCase {
         XCTAssertEqual(mkfifo(fifo, 0o600), 0)
         XCTAssertNil(BoundedFileRead.tail(fifo, maxBytes: 1000), "a FIFO must not hang the caller")
     }
+
+    /// Unfamiliar tools get a readable line, never their input as JSON.
+    func testUnfamiliarToolsAreSummarisedNotDumped() {
+        XCTAssertEqual(SessionTranscript.toolLine(name: "Workflow",
+                                                  input: ["scriptPath": "/Users/alex/.claude/projects/x/wf/review.js", "args": ["a": 1]]),
+                       "Workflow: review.js")
+        XCTAssertEqual(SessionTranscript.toolLine(name: "mcp__claude-in-chrome__navigate", input: ["url": "https://example.com"]),
+                       "navigate · claude-in-chrome: https://example.com")
+        XCTAssertEqual(SessionTranscript.toolLine(name: "TodoWrite", input: ["todos": [["content": "x"]]]), "TodoWrite")
+        XCTAssertEqual(SessionTranscript.toolLine(name: "Bash", input: ["command": "npm test"]), "Bash: npm test", "known tools unchanged")
+        XCTAssertFalse(SessionTranscript.toolLine(name: "Workflow", input: ["description": "token sk-ant-abcdefghijklmnopqrstuvwxyz0123456789"]).contains("abcdefghijklmnop"),
+                       "values are redacted")
+    }
 }

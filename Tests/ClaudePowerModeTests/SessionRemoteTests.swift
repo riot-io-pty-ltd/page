@@ -692,4 +692,32 @@ final class SessionHostMappingTests: XCTestCase {
         XCTAssertEqual(L.wireHost(app: "cmux NEXT"), "cmux")
         XCTAssertEqual(L.wireHost(app: "iTerm2"), "iTerm")
     }
+
+    /// A failed probe (no process table while the Mac is busy) never flips
+    /// known hosts to "Couldn't find the session's terminal".
+    func testFailedProbeKeepsKnownHosts() {
+        let cmux = SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: .anthropic)
+        let t0 = Date(timeIntervalSince1970: 1000), t1 = t0.addingTimeInterval(40)
+        let known: [String: (info: SessionHostInfo, at: Date)] = ["a": (cmux, t0)]
+        let kept = SessionRemote.mergeProbe([:], due: ["a", "b"], into: known, live: ["a", "b"], at: t1)
+        XCTAssertEqual(kept["a"]?.info, cmux)
+        XCTAssertEqual(kept["a"]?.at, t0, "still due, so the next tick probes again")
+        XCTAssertNil(kept["b"])
+
+        let tmux = SessionHostInfo(host: "tmux", canType: true, canInterrupt: true, provider: .anthropic)
+        let merged = SessionRemote.mergeProbe(["c": tmux], due: ["a", "b", "c"], into: known, live: ["a", "b", "c"], at: t1)
+        XCTAssertEqual(merged["a"]?.info, cmux, "skipped by the probe: keeps its last host")
+        XCTAssertEqual(merged["b"]?.info.host, "unknown", "never seen: unknown")
+        XCTAssertEqual(merged["c"]?.info, tmux)
+        XCTAssertNil(SessionRemote.mergeProbe(["c": tmux], due: ["gone"], into: [:], live: ["c"], at: t1)["gone"])
+    }
+
+    func testFolderTitles() {
+        XCTAssertEqual(SessionRemote.folderTitle("/Users/alex/projects/page", home: "/Users/alex"), "page")
+        XCTAssertEqual(SessionRemote.folderTitle("/Users/alex/projects/page/", home: "/Users/alex"), "page")
+        XCTAssertEqual(SessionRemote.folderTitle("/", home: "/Users/alex"), "/ (root folder)")
+        XCTAssertEqual(SessionRemote.folderTitle("/Users/alex", home: "/Users/alex"), "~ (home folder)")
+        XCTAssertNil(SessionRemote.folderTitle(nil))
+        XCTAssertNil(SessionRemote.folderTitle(""))
+    }
 }

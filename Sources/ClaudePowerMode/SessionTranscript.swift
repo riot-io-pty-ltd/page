@@ -156,7 +156,7 @@ enum SessionTranscript {
                     out.append(SessionTranscriptEntry(id: "\(base)#\(i)", role: isError ? .system : .assistant, text: clean(t), at: at))
                 case "tool_use":
                     guard let name = item["name"] as? String else { continue }
-                    let line = toolLine(InterventionDetector.describeToolUse(name: name, input: item["input"] as? [String: Any] ?? [:]))
+                    let line = toolLine(name: name, input: item["input"] as? [String: Any] ?? [:])
                     out.append(SessionTranscriptEntry(id: "\(base)#\(i)", role: .tool, text: line, at: at, tool: name))
                 default:
                     continue   // thinking, images, …
@@ -208,6 +208,38 @@ enum SessionTranscript {
               let close = text.range(of: "</\(tag)>", range: open.upperBound..<text.endIndex) else { return nil }
         let inner = text[open.upperBound..<close.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
         return inner.isEmpty ? nil : inner
+    }
+
+    /// Tools the page detector describes by name; anything else (MCP tools,
+    /// Workflow, new tools) would come out as raw input JSON.
+    static let describedTools: Set<String> = [
+        "Bash", "Edit", "MultiEdit", "Write", "NotebookEdit", "Read", "Glob", "Grep",
+        "WebFetch", "WebSearch", "Task", "Agent", "ExitPlanMode", "AskUserQuestion",
+    ]
+
+    /// Input keys worth showing for an unfamiliar tool, best first. Paths
+    /// show their last component.
+    static let briefKeys = ["description", "title", "name", "query", "prompt", "command", "url",
+                            "file_path", "path", "scriptPath", "pattern"]
+
+    /// One line for a tool call in the session view: the detector's summary
+    /// for known tools; for others the tool's name (an MCP tool as "tool ·
+    /// server") and its most telling input, never a JSON dump.
+    static func toolLine(name: String, input: [String: Any]) -> String {
+        if describedTools.contains(name) {
+            return toolLine(InterventionDetector.describeToolUse(name: name, input: input))
+        }
+        var label = name
+        let parts = name.components(separatedBy: "__")
+        if parts.count >= 3, parts[0] == "mcp" {
+            label = parts[2...].joined(separator: "__") + " · " + parts[1]
+        }
+        for key in briefKeys {
+            guard let raw = (input[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { continue }
+            let value = key.lowercased().hasSuffix("path") ? (raw as NSString).lastPathComponent : raw
+            return clean("\(label): \(ContextRedactor.redactedPrefix(value, 300))")
+        }
+        return clean(label)
     }
 
     /// The first line of a page detector summary as a one-liner:

@@ -450,6 +450,17 @@ final class SessionRemote {
         return out
     }
 
+    /// A session's folder as a title: its last component, except the root
+    /// and home folders, whose last component ("/", the user name) says
+    /// nothing.
+    static func folderTitle(_ cwd: String?, home: String = NSHomeDirectory()) -> String? {
+        guard let cwd, !cwd.isEmpty else { return nil }
+        let trimmed = cwd.count > 1 && cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        if trimmed == "/" { return "/ (root folder)" }
+        if !home.isEmpty, home != "/", trimmed == home { return "~ (home folder)" }
+        return (trimmed as NSString).lastPathComponent
+    }
+
     static func homeAbbreviated(_ path: String, home: String = NSHomeDirectory()) -> String {
         guard !home.isEmpty, home != "/" else { return path }
         if path == home { return "~" }
@@ -523,13 +534,30 @@ final class SessionRemote {
             guard let self else { return }
             self.queue.async {
                 self.probing = false
-                let at = self.now()
-                let live = Set(self.sessions.map(\.sessionId))
-                for s in due where live.contains(s.sessionId) {
-                    self.hosts[s.sessionId] = (found[s.sessionId] ?? .blocked("unknown", "Couldn't find the session's terminal"), at)
-                }
+                self.hosts = Self.mergeProbe(found, due: due.map(\.sessionId), into: self.hosts,
+                                             live: Set(self.sessions.map(\.sessionId)), at: self.now())
             }
         }
+    }
+
+    /// Pure. An empty `found` means the probe itself failed (no process
+    /// table, e.g. `ps` timing out while the Mac is busy): every host keeps
+    /// what it had and stays due, so a hiccup never flips the whole list to
+    /// "Couldn't find the session's terminal". A session the probe skipped
+    /// keeps its last host too; only one never seen falls back to unknown.
+    static func mergeProbe(_ found: [String: SessionHostInfo], due: [String],
+                           into hosts: [String: (info: SessionHostInfo, at: Date)],
+                           live: Set<String>, at: Date) -> [String: (info: SessionHostInfo, at: Date)] {
+        guard !found.isEmpty else { return hosts }
+        var out = hosts
+        for id in due where live.contains(id) {
+            if let info = found[id] {
+                out[id] = (info, at)
+            } else if out[id] == nil {
+                out[id] = (.blocked("unknown", "Couldn't find the session's terminal"), at)
+            }
+        }
+        return out
     }
 
     private func state(of s: AgentSession) -> AgentSessionState {
@@ -545,7 +573,7 @@ final class SessionRemote {
             rows.append(RemoteSessionRow(
                 id: s.sessionId,
                 backend: s.backend.rawValue,
-                title: String((s.title ?? s.cwd.map { ($0 as NSString).lastPathComponent } ?? s.backend.rawValue).prefix(Self.maxTitle)),
+                title: String((s.title ?? Self.folderTitle(s.cwd) ?? s.backend.rawValue).prefix(Self.maxTitle)),
                 cwd: s.cwd.map { String(Self.homeAbbreviated($0).prefix(Self.maxCwd)) },
                 state: st,
                 host: host,

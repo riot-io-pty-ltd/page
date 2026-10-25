@@ -3,7 +3,8 @@ import SwiftUI
 /// Four tabs: Stats lives inside History as a segment, which keeps the bar
 /// at four and the Dynamic Type cap below workable.
 enum AppTab: Hashable, CaseIterable {
-    case inbox, sessions, history, settings
+    // Sessions first: the live list is home; the inbox holds what needs an answer.
+    case sessions, inbox, history, settings
 
     var label: String {
         switch self {

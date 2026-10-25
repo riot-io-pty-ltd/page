@@ -22,7 +22,7 @@ final class AppRouter: ObservableObject {
         let id: String
     }
 
-    @Published var tab: AppTab = .inbox
+    @Published var tab: AppTab = .sessions
     @Published var presented: PresentedIntervention?
     @Published var presentedSession: PresentedSession?
 
@@ -77,7 +77,7 @@ final class AppRouter: ObservableObject {
     }
 
     func reset() {
-        tab = .inbox
+        tab = .sessions
         presented = nil
         presentedSession = nil
         pendingIntervention = nil

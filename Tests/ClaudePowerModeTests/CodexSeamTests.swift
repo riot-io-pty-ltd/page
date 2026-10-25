@@ -321,16 +321,23 @@ final class CodexComposerTmuxTests: XCTestCase {
         if let dir { try? FileManager.default.removeItem(at: dir) }
     }
 
-    private func pane(printing script: String) throws -> String {
+    /// Starts a pane running `script` and waits (up to 5 s) until it shows
+    /// `marker`: a fixed sleep loses the race when the machine is busy.
+    private func pane(printing script: String, showing marker: String) throws -> String {
         let file = dir.appendingPathComponent("screen-\(UUID().uuidString.prefix(6)).sh").path
         try "#!/bin/sh\n\(script)\nexec sleep 30\n".write(toFile: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file)
         let r = ProcessRunner.run(tmuxPath, ["-L", socket, "-f", "/dev/null", "new-session", "-d", "-P", "-F", "#{pane_id}",
                                              "-x", "100", "-y", "12", file], timeout: 5)
         guard r.succeeded else { throw XCTSkip("couldn't start private tmux server: \(r.stderr)") }
-        usleep(500_000)
+        let id = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         CodexInjector.tmuxServerArgs = ["-L", socket]
-        return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        for _ in 0..<50 {
+            if ProcessRunner.run(tmuxPath, ["-L", socket, "capture-pane", "-p", "-t", id], timeout: 3).stdout.contains(marker) { return id }
+            usleep(100_000)
+        }
+        XCTFail("pane never showed \(marker)")
+        return id
     }
 
     func testRealCaptureOfAnEmptyComposer() throws {
@@ -338,7 +345,7 @@ final class CodexComposerTmuxTests: XCTestCase {
         printf '\\033[1mWorked for 12s\\033[0m\\n\\n'
         printf '\\033[48;2;40;40;40m\\033[1m\\342\\200\\272\\033[22m \\033[2mAsk Codex to do anything\\033[0m\\n\\n'
         printf '  \\033[2m? for shortcuts\\033[22m      \\033[2m100%% context left\\033[0m\\n'
-        """)
+        """, showing: "context left")
         XCTAssertNil(CodexInjector.composerRefusal(.tmux(pane: p)), CodexInjector.capturePane(p) ?? "no capture")
     }
 
@@ -347,12 +354,12 @@ final class CodexComposerTmuxTests: XCTestCase {
         printf 'Done.\\n\\n'
         printf '\\033[48;2;40;40;40m\\033[1m\\342\\200\\272\\033[22m fix the flaky test\\033[0m\\n\\n'
         printf '  \\033[2m? for shortcuts\\033[0m\\n'
-        """)
+        """, showing: "for shortcuts")
         XCTAssertEqual(CodexInjector.composerRefusal(.tmux(pane: p)), CmuxBridge.draftDetail)
     }
 
     func testMissingPaneIsUnverified() throws {
-        _ = try pane(printing: "printf 'x\\n'")
+        _ = try pane(printing: "printf 'x\\n'", showing: "x")
         XCTAssertEqual(CodexInjector.composerRefusal(.tmux(pane: "%999")), CodexInjector.composerUnverifiedDetail)
     }
 }
