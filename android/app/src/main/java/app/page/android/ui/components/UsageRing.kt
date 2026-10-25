@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -19,8 +20,10 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -92,9 +95,14 @@ fun UsageRing(
             if (elapsed != null) evenPaceTick(elapsed, diameter / 2, lw, tickColor)
         }
         if (showsValue) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(gauge.percentText, style = valueStyle, color = colors.text, modifier = Modifier.alignByBaseline())
-                Text("%", style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold), color = colors.text, modifier = Modifier.alignByBaseline())
+            // A fixed size, as on iOS: scaled with the system font it would
+            // spill out of the ring. The caller's description speaks the number.
+            val density = LocalDensity.current
+            CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = 1f)) {
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(gauge.percentText, style = valueStyle, color = colors.text, modifier = Modifier.alignByBaseline())
+                    Text("%", style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold), color = colors.text, modifier = Modifier.alignByBaseline())
+                }
             }
         }
     }

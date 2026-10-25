@@ -157,7 +157,9 @@ fun NewSessionScreen(onClose: () -> Unit) {
                     if (state.awaitingStartedSession) {
                         StartedOpeningStrip(detail ?: "Started")
                     } else {
-                        StatusStrip(Icons.Filled.CheckCircle, detail ?: "Started, but it hasn't shown up here yet. Look for it in Sessions, or in cmux on your Mac.", colors.success)
+                        // Gave up waiting (90 s). The Mac always sends a detail
+                        // ("Started Claude in X"), so keep the pointer to where it is.
+                        StatusStrip(Icons.Filled.CheckCircle, "${detail ?: "Started"}, but it hasn't shown up here yet. Look for it in Sessions, or in cmux on your Mac.", colors.success)
                     }
                 }
                 else -> StatusStrip(Icons.Filled.Warning, "Couldn't start: ${s.explanation(SessionCommandKind.INPUT, "Claude") ?: s.label(SessionCommandKind.INPUT)}", colors.destructiveText)
