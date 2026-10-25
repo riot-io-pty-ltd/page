@@ -771,13 +771,26 @@ final class LiveSessionBackends: SessionRemoteBackends {
     func probeHosts(_ sessions: [AgentSession]) -> [String: SessionHostInfo] {
         let table = ProcessRunner.processTable()
         guard !table.isEmpty else { return [:] }
+        // Whether cmux lets Page in, once per cmux channel per probe: a
+        // cmux session Page can't reach is shown as such, not as typable.
+        var cmuxChecked: [String: String?] = [:]
+        let cmuxBlocker: (CmuxBridge.Target) -> String? = { target in
+            if let known = cmuxChecked[target.cliPath] { return known }
+            let why: String?
+            switch CmuxBridge.connect(cliPath: target.cliPath) {
+            case .success: why = nil
+            case .failure(let f): why = Self.cmuxBlockerText(f.detail)
+            }
+            cmuxChecked[target.cliPath] = why
+            return why
+        }
         let live = Dictionary(grouping: claude.remoteLiveSessions, by: \.sessionId)
         var codexProcesses: [CodexProcess]?
         var out: [String: SessionHostInfo] = [:]
         for s in sessions {
             switch s.backend {
             case .claude:
-                out[s.sessionId] = Self.claudeHost(candidates: live[s.sessionId] ?? [], table: table)
+                out[s.sessionId] = Self.claudeHost(candidates: live[s.sessionId] ?? [], table: table, cmuxBlocker: cmuxBlocker)
             case .codex:
                 guard let t = codex.remoteThread(s.sessionId) else {
                     out[s.sessionId] = .blocked("unknown", "Page no longer knows this Codex session")
@@ -802,7 +815,8 @@ final class LiveSessionBackends: SessionRemoteBackends {
                     continue
                 }
                 let terminal = CodexInjector.terminal(tty: tty, pid: pid, threadId: t.id, table: table)
-                out[s.sessionId] = Self.codexHost(terminal, appHost: CodexInjector.host(ofPid: pid, table: table), provider: provider)
+                out[s.sessionId] = Self.codexHost(terminal, appHost: CodexInjector.host(ofPid: pid, table: table), provider: provider,
+                                                  cmuxBlocker: cmuxBlocker)
             }
         }
         return out
@@ -812,23 +826,28 @@ final class LiveSessionBackends: SessionRemoteBackends {
     /// phone is told why not.
     static func claudeHost(candidates: [ClaudeLiveSession], table: [ProcessRunner.ProcessInfoRow],
                            resolveHost: (ClaudeLiveSession, [ProcessRunner.ProcessInfoRow]) -> InjectionExecutor.TerminalHost
-                               = { InjectionExecutor.resolveHost(for: $0, processTable: $1) }) -> SessionHostInfo {
+                               = { InjectionExecutor.resolveHost(for: $0, processTable: $1) },
+                           cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil }) -> SessionHostInfo {
         guard !candidates.isEmpty else { return .blocked("unknown", "Page can't tell which Claude session this is") }
         switch InjectionExecutor.pickSession(candidates, pagePid: nil, pageStateStart: nil) {
         case .failure(let f):
             return .blocked("unknown", f.detail)
         case .success(let s):
             guard s.tty != nil else { return .blocked("unknown", "This session isn't running in a terminal Page can type into", provider: s.provider) }
-            return claudeHostInfo(resolveHost(s, table), provider: s.provider)
+            return claudeHostInfo(resolveHost(s, table), provider: s.provider, cmuxBlocker: cmuxBlocker)
         }
     }
 
-    static func claudeHostInfo(_ host: InjectionExecutor.TerminalHost, provider: ModelProvider) -> SessionHostInfo {
+    /// `cmuxBlocker`: why Page can't reach that cmux (nil: it can).
+    static func claudeHostInfo(_ host: InjectionExecutor.TerminalHost, provider: ModelProvider,
+                               cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil }) -> SessionHostInfo {
         switch host {
         case .tmux: return SessionHostInfo(host: "tmux", canType: true, canInterrupt: true, provider: provider)
         case .terminalApp: return SessionHostInfo(host: "Terminal", canType: true, canInterrupt: false, provider: provider)
         case .iTerm: return SessionHostInfo(host: "iTerm", canType: true, canInterrupt: true, provider: provider)
-        case .cmux: return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
+        case .cmux(let target):
+            if let why = cmuxBlocker(target) { return .blocked("cmux", why, provider: provider) }
+            return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
         case .unreachable(let why): return .blocked("cmux", why, provider: provider)
         case .unsupported(let app): return .blocked(wireHost(app: app), "Page can't type into \(app) yet", provider: provider)
         case .unknown: return .blocked("unknown", "Couldn't find the session's terminal", provider: provider)
@@ -846,10 +865,13 @@ final class LiveSessionBackends: SessionRemoteBackends {
         }
     }
 
-    static func codexHost(_ terminal: CodexInjector.Terminal, appHost: CodexInjector.Host, provider: ModelProvider) -> SessionHostInfo {
+    static func codexHost(_ terminal: CodexInjector.Terminal, appHost: CodexInjector.Host, provider: ModelProvider,
+                          cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil }) -> SessionHostInfo {
         switch terminal {
         case .tmux: return SessionHostInfo(host: "tmux", canType: true, canInterrupt: true, provider: provider)
-        case .cmux: return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
+        case .cmux(let target):
+            if let why = cmuxBlocker(target) { return .blocked("cmux", why, provider: provider) }
+            return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
         case .terminalApp: return .blocked("Terminal", SessionInputGate.codexTerminalAppBlocker, provider: provider)
         case .unavailable(let why):
             let host: String
@@ -860,6 +882,17 @@ final class LiveSessionBackends: SessionRemoteBackends {
             case .unknown: host = "unknown"
             }
             return .blocked(host, why, provider: provider)
+        }
+    }
+
+    /// The phone shows this instead of the composer: the Mac-side fix, in
+    /// words that make sense on the phone.
+    static func cmuxBlockerText(_ detail: String) -> String {
+        switch detail {
+        case CmuxBridge.blockedDetail, CmuxBridge.needsPasswordDetail, CmuxBridge.passwordRejectedDetail:
+            return "cmux isn't letting Page type yet — on your Mac, open Page ▸ Integrations ▸ Set up cmux… and click “Let Page type into cmux”"
+        default:
+            return detail
         }
     }
 

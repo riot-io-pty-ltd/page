@@ -715,6 +715,13 @@ enum CmuxBridge {
             run(["ping"], timeout: 5, fallback: "cmux didn't answer")
         }
 
+        /// A read-only call cmux only answers for an admitted client (in
+        /// Password mode `ping` is answered before login, so it proves
+        /// nothing about access).
+        func verifyAccess() -> Result<String, Failure> {
+            run(["list-workspaces"], timeout: 5, fallback: "cmux didn't answer")
+        }
+
         func inputState(surface: String) -> Result<InputState, Failure> {
             guard ClaudeSessionRegistry.isValidSessionId(surface) else { return .failure(Failure(paneNotFoundDetail)) }
             return rpc("surface.input_state", ["surface_id": surface],

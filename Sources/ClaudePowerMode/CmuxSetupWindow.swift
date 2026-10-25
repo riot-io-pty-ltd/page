@@ -24,6 +24,8 @@ final class CmuxSetupWindowController: NSWindowController, NSWindowDelegate {
     private lazy var testStatus = NSTextField(wrappingLabelWithString: "")
     private lazy var testButton = NSButton(title: "Test connection", target: nil, action: nil)
     private lazy var removeButton = NSButton(title: "Remove", target: nil, action: nil)
+    private lazy var enableButton = NSButton(title: "Let Page type into cmux", target: nil, action: nil)
+    private lazy var enableStatus = NSTextField(wrappingLabelWithString: "")
 
     /// The window is built on first `show()` (always on main), so touching
     /// `shared` from another thread never creates AppKit objects there.
@@ -41,7 +43,7 @@ final class CmuxSetupWindowController: NSWindowController, NSWindowDelegate {
     private func present() {
         if window == nil {
             let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 720),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
@@ -115,8 +117,15 @@ final class CmuxSetupWindowController: NSWindowController, NSWindowDelegate {
         root.addArrangedSubview(versionLabel)
         root.addArrangedSubview(row([modeLabel, button(NSButton(title: "Refresh", target: nil, action: nil), #selector(refreshClicked))]))
 
+        // One click
+        root.addArrangedSubview(heading("Let Page in"))
+        root.addArrangedSubview(body("Switches cmux to Password mode with a random password only Page knows (kept in your Keychain), by adding it to ~/.config/cmux/cmux.json after backing the file up. cmux's own Claude and Codex hooks keep working: programs started inside cmux don't need the password."))
+        root.addArrangedSubview(row([button(enableButton, #selector(enableForPage)), enableStatus]))
+        enableStatus.font = .systemFont(ofSize: 12)
+        enableStatus.preferredMaxLayoutWidth = 330
+
         // Steps
-        root.addArrangedSubview(heading("Switch cmux to Password mode"))
+        root.addArrangedSubview(heading("Or switch cmux to Password mode yourself"))
         root.addArrangedSubview(body("""
         1. In cmux, open Settings ▸ Automation ▸ Socket Control Mode and choose “Password mode”.
         2. Under Socket Password, click Set and choose a password.
@@ -273,7 +282,7 @@ final class CmuxSetupWindowController: NSWindowController, NSWindowDelegate {
                 case .failure(let f):
                     outcome = (false, f.detail)
                 case .success(let client):
-                    switch client.ping() {
+                    switch client.verifyAccess() {
                     case .success: outcome = (true, "Connected — Page can reach your cmux sessions.")
                     case .failure(let f): outcome = (false, f.detail)
                     }
@@ -289,6 +298,71 @@ final class CmuxSetupWindowController: NSWindowController, NSWindowDelegate {
                 self.refreshPasswordStatus()
             }
         }
+    }
+
+    /// One click: random password → cmux.json (backed up) → Keychain →
+    /// wait for cmux to pick the file up → prove Page gets in. Any failure
+    /// after the file changed puts the backup back and forgets the password.
+    @objc private func enableForPage() {
+        enableButton.isEnabled = false
+        enableStatus.textColor = .labelColor
+        enableStatus.stringValue = "Setting up…"
+        let secrets = self.secrets
+        workQueue.async { [weak self] in
+            let outcome = Self.enable(secrets: secrets)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.enableButton.isEnabled = true
+                self.enableStatus.textColor = outcome.ok ? .systemGreen : .systemOrange
+                self.enableStatus.stringValue = outcome.text
+                self.refreshStatus()
+                self.refreshPasswordStatus()
+            }
+        }
+    }
+
+    private static func enable(secrets: SecretStore) -> (ok: Bool, text: String) {
+        guard let cli = CmuxBridge.cliPath(forBundlePath: nil) else { return (false, "cmux isn't installed.") }
+        guard CmuxBridge.isTrustedCLI(cli) else { return (false, CmuxBridge.unverifiedCLIDetail) }
+        CmuxBridge.invalidateStatusCache()
+        if let status = CmuxBridge.socketStatus(cliPath: cli, useCache: false), status.effectiveMode.admitsExternalClients,
+           case .success(let client) = CmuxBridge.connect(cliPath: cli, secrets: secrets, allowKeychainUI: true),
+           case .success = client.verifyAccess() {
+            return (true, "Already set up — Page can type into your cmux sessions.")
+        }
+        var bytes = [UInt8](repeating: 0, count: 24)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            return (false, "Couldn't generate a password.")
+        }
+        let password = SessionCrypto.base64URLEncode(Data(bytes))
+        let backup: URL?
+        switch CmuxConfigFile.enablePasswordMode(password: password) {
+        case .failure(let e): return (false, e.message)
+        case .success(let b): backup = b
+        }
+        func undo(_ why: String) -> (ok: Bool, text: String) {
+            CmuxConfigFile.restore(backup: backup)
+            secrets.delete()
+            CmuxBridge.invalidateStatusCache()
+            Logger.shared.log("cmux one-click setup rolled back: \(why)")
+            return (false, "\(why) Your cmux settings were put back.")
+        }
+        if let error = secrets.write(password) { return undo("Couldn't save the password to your Keychain (\(error)).") }
+        // cmux applies cmux.json changes on its own within about a second.
+        var admitted = false
+        for _ in 0..<16 {
+            usleep(500_000)
+            CmuxBridge.invalidateStatusCache()
+            guard CmuxBridge.socketStatus(cliPath: cli, useCache: false)?.effectiveMode == .password else { continue }
+            if case .success(let client) = CmuxBridge.connect(cliPath: cli, secrets: secrets, allowKeychainUI: true),
+               case .success = client.verifyAccess() {
+                admitted = true
+                break
+            }
+        }
+        guard admitted else { return undo("cmux didn't let Page in within 8 seconds.") }
+        Logger.shared.log("cmux switched to Password mode for Page (backup: \(backup?.lastPathComponent ?? "none"))")
+        return (true, "Done — Page can type into your cmux sessions.")
     }
 
     @objc private func openCmux() {
