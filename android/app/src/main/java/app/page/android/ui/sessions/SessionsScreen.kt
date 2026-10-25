@@ -208,7 +208,7 @@ private fun MacStatusStripCard(snapshot: app.page.android.model.MacStatusSnapsho
                     MacStatusStrip.Kind.BATTERY -> Icon(Icons.Filled.BatteryAlert, contentDescription = null, tint = colors.warning, modifier = Modifier.size(14.dp))
                     MacStatusStrip.Kind.USAGE -> Icon(Icons.Filled.DataUsage, contentDescription = null, tint = colors.backendClaude, modifier = Modifier.size(14.dp))
                 }
-                Text(line.text, style = PageType.caption12, color = colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(line.text, style = PageType.caption12, color = colors.textMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }

@@ -386,6 +386,15 @@ pages and send replies. If it leaks, use **Regenerate token…** in the pairing
 window. The old token is retired on the Worker, and phones paired with it are
 told to re-pair.
 
+#### Android
+
+A native Android app with the same features lives in [`android/`](android/).
+It pairs with the same QR code (or a pasted pairing code), needs no Google
+account or Play services, and, without push, pages you through an opt-in
+**Stay connected** service or a 15-minute background check.
+[`android/README.md`](android/README.md) covers building, installing with
+`adb install` and how notifications work.
+
 ### 5. cmux setup (optional)
 
 cmux's default socket mode only accepts processes cmux started itself, so it
@@ -692,6 +701,8 @@ Logs:
 │   ├── Tests/                   logic tests (run-logic-tests.sh)
 │   ├── Config/                  xcconfig + Local.xcconfig.example
 │   └── project.yml              XcodeGen spec (edit this, not the .xcodeproj)
+├── android/                     Android app, Kotlin + Compose (see its README)
+│   └── app/src/main/java/app/page/android/  model/ (pure, JUnit-tested), data/, notify/, ui/
 ├── hooks/                       page-notify.sh + page-extract-context.py (bundled into Page.app)
 ├── docs/                        PROTOCOL.md (wire protocol), ROADMAP.md
 ├── Tools/                       icon generator, parser test pointer

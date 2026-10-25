@@ -8,6 +8,8 @@ import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
 import app.page.android.model.AgentBackend
+import app.page.android.notify.PageInfo
+import app.page.android.notify.PageNotifications
 import app.page.android.model.BatteryForecast
 import app.page.android.model.ClaudeUsage
 import app.page.android.model.DiffFile
@@ -81,6 +83,13 @@ object Demo {
         extras.getString("page_demo_open")?.let { AppRouter.open(it) }
         extras.getString("page_demo_session")?.let { AppRouter.openSession(if (it == "active") ACTIVE_SESSION_ID else it) }
         if (extras.getBoolean("page_demo_new")) AppRouter.openNewSession()
+        // Posts sample page notifications (approval, stuck, idle) to check how
+        // they render; their actions find no pairing and say so in a notice.
+        if (extras.getBoolean("page_demo_notify")) {
+            interventions().filter { it.id in setOf("dev-1", "dev-5", "dev-4") }.forEach {
+                PageNotifications.post(PageInfo.of(it), silent = false, status = null)
+            }
+        }
         LaunchHints.sessionPane = extras.getString("page_demo_pane")
         LaunchHints.workflowRunId = extras.getString("page_demo_run")
     }
