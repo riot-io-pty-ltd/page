@@ -69,6 +69,36 @@ There are three pieces, all of which you run yourself:
   schedule a system wake a minute before the reset and continue the
   conversation afterwards; see [Rate limits](#rate-limits).
 
+### Alerts beyond "it needs you"
+
+Settings live in **Preferences ▸ Alerts**.
+
+- **Looks stuck.** Page pages you when a working session is getting
+  nowhere: the same command fails 3 times in a row (or 5 times in its last
+  12 steps), nothing has been written for 15 minutes (adjustable), or one of
+  its background workflows stopped making progress. Reply to steer it, or
+  **Stop it** to press Esc. Read from the transcript; nothing is typed until
+  you answer.
+- **What changed.** A finished-turn page starts with a summary such as
+  "Changed 3 files (+120 −14) · tests passed". Only these counts go through
+  the relay. Tap the summary (or **Changes** in a session) to see the file
+  list and the diff on your phone, sent end-to-end encrypted and redacted.
+- **Battery forecast.** The menu shows how long until your low-battery
+  cutoff at the current drain ("Cutoff (10%) in about 40 min at this rate").
+  The phone shows the same, and you get one page when the cutoff is about 15
+  minutes away while agents are working. Opt in to **Pause early**
+  (Preferences ▸ Battery) to run the usual pause about 10 minutes before the
+  cutoff, so agents have time to write their summary.
+- **Claude usage and limit forecast.** Turn on **Show my Claude usage**
+  (Preferences ▸ Rate limits). Claude Code only gives the 5-hour and 7-day
+  usage numbers to your status line, so Page wraps it: a small script saves
+  the numbers, then runs your own status line command unchanged. Turning it
+  off restores `~/.claude/settings.json` exactly. The menu and phone then
+  show your usage, and you get a page about 30 minutes before you'd hit the
+  5-hour limit at the current pace.
+- **Send at reset.** Reply to a rate-limit page with a message, and Page
+  types it into the session when the limit resets.
+
 ### Low-battery pause and resume
 
 When the battery reaches `lowBatteryCutoff` on battery power, Page does what
@@ -206,6 +236,19 @@ at any time, not only when a page is open.
   a digit (it could pick a menu option). Codex is typed into once its turn
   ends, or mid-turn only in a cmux pane with an empty composer. **Stop**
   presses Esc in a working session (tmux, iTerm2, cmux).
+- **New session.** The **+** on the Sessions tab starts a new Claude
+  session on the Mac: pick one of the folders Claude has worked in during
+  the last 30 days, type what it should do, and Page opens a cmux workspace
+  running `claude` there. Off until you turn on **Preferences ▸ Phone ▸ Let
+  my phone start new Claude sessions** (`phoneStartSessionsEnabled`).
+- **Widgets and Siri.** A Home Screen and Lock Screen widget shows how many
+  sessions need you, how many agents are working, and the battery forecast.
+  Siri and Shortcuts can answer "What are my agents doing?" and "Stop my
+  agents" (which asks first and needs an unlocked phone).
+- **Several Macs.** **Settings ▸ Add another Mac** pairs a second Mac
+  without forgetting the first. One Mac is live at a time: switch from the
+  Sessions header or Settings. The others are checked in the background, and
+  a banner tells you when one of them has pages waiting.
 - **Which sessions can be typed into** follows the table above; the phone
   shows why when one can't. Turn the view off with
   **Preferences ▸ Phone ▸ Show my live sessions on my phone**

@@ -126,6 +126,29 @@ encrypted with a second secret, the **session key**:
   once. Turn the view off entirely with `remoteSessionsEnabled: false`
   (**Preferences ▸ Phone**); the Mac then refuses every command.
 
+## Features that act on the Mac from the phone (v4)
+
+- **Starting a session** runs a command on the Mac, so it is off by default
+  (`phoneStartSessionsEnabled`). When on, it accepts only an authenticated
+  `sessions.command` (the pairing's session key), only for a folder where
+  Claude sessions already ran in the last 30 days (exact match), and runs a
+  fixed command, `claude -- '<prompt>'`: the prompt is one shell-quoted
+  argument after `--`, folded to one line with control characters
+  stripped, so it can't become a flag or a second command. cmux only, with
+  the same socket gate as typing.
+- **Stop my agents** (Siri / Shortcuts) presses Esc in every working
+  session through the same gate as the Stop button, and needs an unlocked
+  phone.
+- **Diffs** are sent only over the encrypted sessions channel, redacted,
+  capped at 48 KiB. Untracked files are included only when they are regular
+  text files inside the repository; symlinks are never followed. The page
+  itself carries only counts ("Changed 3 files (+12 −4)").
+- **Usage capture** edits `~/.claude/settings.json` (`statusLine.command`)
+  only when you turn it on, after a backup, and puts the original back
+  byte for byte when you turn it off. The wrapper script is 0700 in Page's
+  Application Support folder; the saved status line input (model, folder,
+  usage numbers, no secrets) is 0600.
+
 ## What the Worker stores, and for how long
 
 Everything lives in the Durable Object for your token, on your Cloudflare
