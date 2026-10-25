@@ -14,6 +14,7 @@ import app.page.android.model.SessionDiff
 import app.page.android.model.SessionResultCopy
 import app.page.android.model.StartFolders
 import app.page.android.model.StartPrompt
+import app.page.android.model.StartedSessionMatch
 import app.page.android.model.SessionComposer
 import app.page.android.model.SessionCrypto
 import app.page.android.model.SessionDeliveryState
@@ -87,6 +88,10 @@ object SessionStore {
         val folders: AnswerRequest<StartFolders>? = null,
         /** v4: the last `start`, and what the Mac said. */
         val start: StartRequest? = null,
+        /** v4: a `start` is waiting for its session to show up in the list (up to 90 s). */
+        val awaitingStartedSession: Boolean = false,
+        /** v4: the session started from the phone, now in the list: open it. */
+        val startedSessionId: String? = null,
     ) {
         fun session(id: String): LiveSession? = sessions.firstOrNull { it.id == id }
 
@@ -127,6 +132,12 @@ object SessionStore {
 
     data class StartRequest(val clientId: String, val folder: String, val sentAt: Instant, val state: SessionDeliveryState)
 
+    /** A start waiting for its session: the folder, the sessions that existed before, when. */
+    private data class PendingStart(val folder: String, val existing: Set<String>, val at: Instant)
+
+    /** How long a start waits for its session to appear before giving up. */
+    const val STARTED_SESSION_WAIT_SECONDS = 90L
+
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
 
@@ -146,6 +157,8 @@ object SessionStore {
     private var undecryptableInARow = 0
     private val timeoutJobs = HashMap<String, Job>()
     private var waitJob: Job? = null
+    private var pendingStart: PendingStart? = null
+    private var pendingStartJob: Job? = null
 
     private val viewer: String get() = AppGraph.prefs.viewer
 
@@ -168,6 +181,9 @@ object SessionStore {
         timeoutJobs.clear()
         waitJob?.cancel()
         waitJob = null
+        pendingStart = null
+        pendingStartJob?.cancel()
+        pendingStartJob = null
         gate.reset()
         undecryptableInARow = 0
         watchedSessionId = null
@@ -318,6 +334,7 @@ object SessionStore {
                         workflows = s.workflows.filterKeys { it in live || it == watched },
                     )
                 }
+                matchStartedSession(u.sessions)
             }
             is SessionsUpdate.Workflows -> update { s ->
                 val next = LinkedHashMap(s.workflows)
@@ -548,6 +565,7 @@ object SessionStore {
         val clientId = UUID.randomUUID().toString().lowercase()
         val prompt = text.trim()
         update { it.copy(start = StartRequest(clientId, folder, Instant.now(), SessionDeliveryState.Sending)) }
+        if (!_state.value.isDemoMode) awaitStartedSession(folder)
         if (_state.value.isDemoMode) {
             scope.launch {
                 delay(800)
@@ -574,7 +592,49 @@ object SessionStore {
         return null
     }
 
-    fun clearStart() = update { it.copy(start = null) }
+    /** Forgets the last start, including any wait for its session (the sheet opening afresh). */
+    fun clearStart() {
+        stopAwaitingStartedSession()
+        update { it.copy(start = null, startedSessionId = null) }
+    }
+
+    /** The started session has been opened. */
+    fun clearStartedSession() = update { it.copy(startedSessionId = null) }
+
+    /** Watches the next lists for the session a start creates in [folder], for up to 90 s. */
+    private fun awaitStartedSession(folder: String) {
+        pendingStartJob?.cancel()
+        pendingStart = PendingStart(folder, _state.value.sessions.map { it.id }.toSet(), Instant.now())
+        update { it.copy(awaitingStartedSession = true, startedSessionId = null) }
+        pendingStartJob = scope.launch {
+            delay(STARTED_SESSION_WAIT_SECONDS * 1000)
+            pendingStart = null
+            pendingStartJob = null
+            update { it.copy(awaitingStartedSession = false) }
+        }
+    }
+
+    private fun stopAwaitingStartedSession() {
+        pendingStart = null
+        pendingStartJob?.cancel()
+        pendingStartJob = null
+        if (_state.value.awaitingStartedSession) update { it.copy(awaitingStartedSession = false) }
+    }
+
+    private fun matchStartedSession(sessions: List<LiveSession>) {
+        val p = pendingStart ?: return
+        val outcome = _state.value.start?.state
+        // A refused or failed start made no session: don't open someone else's.
+        if (outcome is SessionDeliveryState.Refused || outcome is SessionDeliveryState.Failed ||
+            Instant.now().toEpochMilli() - p.at.toEpochMilli() > STARTED_SESSION_WAIT_SECONDS * 1000
+        ) {
+            stopAwaitingStartedSession()
+            return
+        }
+        val found = StartedSessionMatch.find(sessions, p.folder, p.existing) ?: return
+        stopAwaitingStartedSession()
+        update { it.copy(startedSessionId = found.id) }
+    }
 
     /** Sends an op whose answer is its own kind; [fail] gets the reason it can't come. */
     private fun askForAnswer(command: SessionCommand, clientId: String, op: String, fail: (String) -> Unit) {

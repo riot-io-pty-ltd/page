@@ -49,16 +49,16 @@ data class ClaudeUsage(val fiveHour: UsageWindow?, val sevenDay: UsageWindow?, v
 }
 
 /**
- * The compact Mac status strip at the top of Sessions: presence, the battery
- * forecast and Claude usage, one short line each. Pure; [clock] formats a
- * time of day in the phone's locale ("5:00 PM").
+ * The compact Mac status strip at the top of Sessions: presence and the
+ * battery forecast, one short line each. Pure. Claude usage is the usage
+ * card under it ([UsageCardModel]).
  */
 object MacStatusStrip {
     data class Line(val kind: Kind, val text: String)
 
-    enum class Kind { PRESENCE, BATTERY, USAGE }
+    enum class Kind { PRESENCE, BATTERY }
 
-    fun lines(snapshot: MacStatusSnapshot?, presence: MacPresence, now: Instant, clock: (Instant) -> String): List<Line> {
+    fun lines(snapshot: MacStatusSnapshot?, presence: MacPresence, now: Instant): List<Line> {
         val out = mutableListOf<Line>()
         out.add(Line(Kind.PRESENCE, presenceText(presence, snapshot, now)))
         if (!presence.isReachable || snapshot == null) return out
@@ -67,15 +67,6 @@ object MacStatusStrip {
         if (forecast != null && snapshot.onAC != true) {
             val battery = snapshot.batteryPercent?.let { "Battery $it% · " } ?: ""
             out.add(Line(Kind.BATTERY, "${battery}cutoff in ~${duration(forecast.minutes)}"))
-        }
-        snapshot.usage?.let { usage ->
-            val window = usage.fiveHour?.let { "5-hour" to it } ?: usage.sevenDay?.let { "7-day" to it }
-            if (window != null) {
-                var text = "Claude ${window.first} ${window.second.pct.toInt()}%"
-                window.second.resetsAt?.let { text += " · resets ${clock(it)}" }
-                usage.hitAt?.let { text += " · limit ~${clock(it)}" }
-                out.add(Line(Kind.USAGE, text))
-            }
         }
         return out
     }

@@ -128,21 +128,24 @@ class ProtocolV4Test {
         assertEquals(BatteryForecast(10, 35, 55.0), s.forecast)
         assertEquals(62.0, s.usage!!.fiveHour!!.pct, 0.0)
         assertNull("malformed window dropped", s.usage!!.sevenDay)
-        val lines = MacStatusStrip.lines(s, MacPresence.evaluate(s, now), now) { if (it == PageDate.parse("2026-10-25T17:00:00Z")) "5:00 PM" else "4:10 PM" }
-        assertEquals(
-            listOf("Mac online · 2 working", "Battery 42% · cutoff in ~35 min", "Claude 5-hour 62% · resets 5:00 PM · limit ~4:10 PM"),
-            lines.map { it.text },
-        )
+        // Usage is the usage card now, not a strip line.
+        val lines = MacStatusStrip.lines(s, MacPresence.evaluate(s, now), now)
+        assertEquals(listOf("Mac online · 2 working", "Battery 42% · cutoff in ~35 min"), lines.map { it.text })
+        val card = UsageCardModel.from(s.usage, now)!!
+        assertEquals("5-hour", card.fiveHour?.label)
+        assertNull(card.sevenDay)
+        assertEquals("Resets in 4h 59m", card.fiveHour?.resetLine(now))
+        assertEquals(UsageCardModel.Verdict("At this pace you'll hit the 5-hour limit around 4:10 PM", true), card.verdict { "4:10 PM" })
         // Next heartbeat on power: no forecast; bad shapes are dropped, not trusted.
         val onAC = parseJsonObject("""{"ts":"2026-10-25T12:00:25Z","activeSessions":1,"battery":90,"onAC":true,"working":"two","usage":{"fiveHour":{"pct":"x"}}}""")!!
         val s2 = MacStatusSnapshot.applyingHeartbeat(s, onAC, now, true)
         assertTrue(s2.forecast == null && s2.usage == null && s2.working == null)
-        assertEquals(listOf("Mac online"), MacStatusStrip.lines(s2, MacPresence.evaluate(s2, now), now) { "" }.map { it.text })
+        assertEquals(listOf("Mac online"), MacStatusStrip.lines(s2, MacPresence.evaluate(s2, now), now).map { it.text })
         // /status carries them too.
         val st = MacStatusSnapshot.from(parseJsonObject("""{"macConnected":false,"forecast":{"cutoff":10,"minutes":12,"drainPerHour":40},"usage":{"sevenDay":{"pct":80}}}""")!!)
         assertEquals(12, st.forecast?.minutes)
         assertEquals(80.0, st.usage?.sevenDay?.pct ?: 0.0, 0.0)
-        assertEquals(listOf("Mac offline"), MacStatusStrip.lines(st, MacPresence.evaluate(st, now), now) { "" }.map { it.text })
+        assertEquals(listOf("Mac offline"), MacStatusStrip.lines(st, MacPresence.evaluate(st, now), now).map { it.text })
         assertEquals("1 h 20 min", MacStatusStrip.duration(80))
         assertEquals("2 h", MacStatusStrip.duration(120))
     }

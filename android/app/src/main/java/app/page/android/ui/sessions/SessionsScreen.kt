@@ -18,7 +18,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BatteryAlert
-import androidx.compose.material.icons.filled.DataUsage
 import androidx.compose.material.icons.filled.KeyboardHide
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material3.Icon
@@ -49,6 +48,7 @@ import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
 import app.page.android.model.MacPresence
 import app.page.android.model.MacStatusStrip
+import app.page.android.model.UsageCardModel
 import app.page.android.ui.components.dotColor
 import app.page.android.model.RelativeTime
 import app.page.android.model.SessionAvailability
@@ -132,8 +132,9 @@ fun SessionsScreen() {
             }
             StatusLine(text)
         }
-        // v4: presence, battery forecast and Claude usage at a glance.
+        // v4: presence and battery forecast at a glance, then Claude usage.
         item { MacStatusStripCard(macStatus, now) }
+        UsageCardModel.from(macStatus?.usage, now)?.let { usage -> item(key = "usage") { UsageCard(usage, now) } }
         when (availability) {
             SessionAvailability.Ready -> if (state.sessions.isEmpty()) {
                 item { EmptySessions() }
@@ -186,12 +187,11 @@ private fun NewSessionButton() {
     }
 }
 
-/** The compact Mac status strip: online/offline, battery cutoff forecast, Claude usage. */
+/** The compact Mac status strip: online/offline and the battery cutoff forecast. */
 @Composable
 private fun MacStatusStripCard(snapshot: app.page.android.model.MacStatusSnapshot?, now: Instant) {
     val presence = MacPresence.evaluate(snapshot, now)
-    val clock = remember { java.time.format.DateTimeFormatter.ofLocalizedTime(java.time.format.FormatStyle.SHORT).withZone(java.time.ZoneId.systemDefault()) }
-    val lines = MacStatusStrip.lines(snapshot, presence, now) { clock.format(it) }
+    val lines = MacStatusStrip.lines(snapshot, presence, now)
     Column(
         Modifier
             .fillMaxWidth()
@@ -206,7 +206,6 @@ private fun MacStatusStripCard(snapshot: app.page.android.model.MacStatusSnapsho
                 when (line.kind) {
                     MacStatusStrip.Kind.PRESENCE -> StatusDot(presence.dotColor)
                     MacStatusStrip.Kind.BATTERY -> Icon(Icons.Filled.BatteryAlert, contentDescription = null, tint = colors.warning, modifier = Modifier.size(14.dp))
-                    MacStatusStrip.Kind.USAGE -> Icon(Icons.Filled.DataUsage, contentDescription = null, tint = colors.backendClaude, modifier = Modifier.size(14.dp))
                 }
                 Text(line.text, style = PageType.caption12, color = colors.textMuted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }

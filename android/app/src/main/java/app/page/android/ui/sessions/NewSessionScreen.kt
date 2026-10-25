@@ -51,7 +51,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import app.page.android.data.AppRouter
 import app.page.android.data.SessionStore
+import app.page.android.ui.components.strip
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import app.page.android.model.PathDisplay
 import app.page.android.model.RelativeTime
 import app.page.android.model.SessionCommandKind
@@ -83,9 +90,21 @@ fun NewSessionScreen(onClose: () -> Unit) {
     var problem by remember { mutableStateOf<String?>(null) }
     val now = rememberNow(60_000)
 
+    // Cleared once per opening, not again when the activity is recreated
+    // (a rotation would otherwise drop the start and its wait).
+    var cleared by rememberSaveable { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
-        SessionStore.clearStart()
+        if (!cleared) {
+            SessionStore.clearStart()
+            cleared = true
+        }
         SessionStore.requestFolders()
+        // The session this sheet started showed up on the Mac: close the
+        // sheet and open it. (clearStart above dropped any earlier one.)
+        val id = SessionStore.state.map { it.startedSessionId }.filterNotNull().first()
+        SessionStore.clearStartedSession()
+        AppRouter.openSession(id)
     }
     BackHandler(onBack = onClose)
 
@@ -133,8 +152,14 @@ fun NewSessionScreen(onClose: () -> Unit) {
             val s = start.state
             when (s) {
                 SessionDeliveryState.Sending -> StatusStrip(null, "Starting…", colors.textMuted)
-                is SessionDeliveryState.Typed, is SessionDeliveryState.Queued ->
-                    StatusStrip(Icons.Filled.CheckCircle, (s as? SessionDeliveryState.Typed)?.detail ?: "Started. It shows up in Sessions in a moment.", colors.success)
+                is SessionDeliveryState.Typed, is SessionDeliveryState.Queued -> {
+                    val detail = (s as? SessionDeliveryState.Typed)?.detail
+                    if (state.awaitingStartedSession) {
+                        StartedOpeningStrip(detail ?: "Started")
+                    } else {
+                        StatusStrip(Icons.Filled.CheckCircle, detail ?: "Started, but it hasn't shown up here yet. Look for it in Sessions, or in cmux on your Mac.", colors.success)
+                    }
+                }
                 else -> StatusStrip(Icons.Filled.Warning, "Couldn't start: ${s.explanation(SessionCommandKind.INPUT, "Claude") ?: s.label(SessionCommandKind.INPUT)}", colors.destructiveText)
             }
         }
@@ -150,6 +175,30 @@ fun NewSessionScreen(onClose: () -> Unit) {
             style = PageType.caption12, color = colors.textMuted, textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth().padding(start = Space.xl, end = Space.xl, bottom = Space.l),
         )
+    }
+}
+
+/**
+ * The start worked; the sheet stays up until the new session appears in the
+ * list (it's a background cmux workspace on the Mac), then opens it.
+ */
+@Composable
+private fun StartedOpeningStrip(text: String) {
+    Column(
+        Modifier.strip().semantics { liveRegion = LiveRegionMode.Polite },
+        verticalArrangement = Arrangement.spacedBy(Space.xs),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalAlignment = Alignment.Top) {
+            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = colors.success, modifier = Modifier.size(18.dp))
+            Text(text, style = PageType.caption12, color = colors.text, modifier = Modifier.weight(1f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = colors.textMuted)
+            Text(
+                "Opening it here as soon as it appears… On your Mac it's a new cmux workspace.",
+                style = PageType.caption12, color = colors.textMuted, modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 

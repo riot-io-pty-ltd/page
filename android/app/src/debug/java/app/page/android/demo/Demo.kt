@@ -65,7 +65,7 @@ object Demo {
                 macConnected = true, lastHeartbeatAt = Instant.now(), activeSessions = 7, battery = 42, onAC = false,
                 working = 2, forecast = BatteryForecast(cutoff = 10, minutes = 35, drainPerHour = 55.0),
                 usage = ClaudeUsage(
-                    fiveHour = UsageWindow(62.0, Instant.now().plusSeconds(2 * 3600)), sevenDay = UsageWindow(31.0, null),
+                    fiveHour = UsageWindow(62.0, Instant.now().plusSeconds(2 * 3600)), sevenDay = UsageWindow(31.0, Instant.now().plusSeconds(3 * 24 * 3600 + 5 * 3600)),
                     hitAt = Instant.now().plusSeconds(80 * 60), updatedAt = Instant.now(),
                 ),
             )

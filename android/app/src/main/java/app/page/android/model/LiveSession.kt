@@ -193,3 +193,23 @@ object SessionGrouping {
 
     fun needsYouCount(sessions: List<LiveSession>): Int = sessions.count { it.state.isWaiting }
 }
+
+/**
+ * Finds the session a `start` created, once it shows up in the list: new
+ * since the request, in the requested folder (the list's cwd is
+ * home-abbreviated by the Mac, the folder absolute). iOS StartedSessionMatch.
+ */
+object StartedSessionMatch {
+    private val home = Regex("^/Users/[^/]+")
+
+    /** `/Users/roy/x` -> `~/x`, as the Mac abbreviates the list's cwd. */
+    fun abbreviated(path: String): String {
+        val m = home.find(path) ?: return path
+        return "~" + path.substring(m.range.last + 1)
+    }
+
+    fun find(sessions: List<LiveSession>, folder: String, existing: Set<String>): LiveSession? {
+        val want = listOf(folder, abbreviated(folder)).map { it.removeSuffix("/") }
+        return sessions.firstOrNull { it.id !in existing && it.cwd in want }
+    }
+}
