@@ -769,5 +769,25 @@ let w1 = WidgetStatus.from(json: ["macConnected": false, "pendingCount": 1, "las
 check(w1.headline == "1 needs you" && w1.presence == .offline && w1.macName == "Your Mac", "widget offline, singular")
 check(WidgetStatus.from(json: [:], macName: nil, now: wNow, format: { _ in "t" }).headline == "All quiet", "widget quiet")
 
+// MARK: several Macs
+
+let mA = SavedMac(id: "a", name: "Studio", relayURL: "https://r.example", token: "tokA", sessionKey: nil, pairedAt: Date(timeIntervalSince1970: 100))
+let mB = SavedMac(id: "b", name: "Laptop", relayURL: "https://r.example", token: "tokB", sessionKey: "k", pairedAt: Date(timeIntervalSince1970: 200))
+var macs = SavedMacs.upsert([], mA)
+macs = SavedMacs.upsert(macs, mB)
+check(macs.map(\.id) == ["b", "a"], "newest first")
+let mA2 = SavedMac(id: "a2", name: "Studio", relayURL: "https://r.example", token: "tokA", sessionKey: "k2", pairedAt: Date(timeIntervalSince1970: 300))
+macs = SavedMacs.upsert(macs, mA2)
+check(macs.map(\.id) == ["a2", "b"], "same token replaces the old entry")
+check(SavedMacs.next(in: macs, excluding: "a2")?.id == "b", "next after removing the active one")
+check(SavedMacs.next(in: [mA], excluding: "a") == nil, "no other Mac")
+check(SavedMacs.decode(SavedMacs.encode(macs)) == macs, "round trip")
+check(SavedMacs.decode("not json").isEmpty && SavedMacs.decode(nil).isEmpty, "bad stored list is empty")
+check(SavedMacs.removing("b", from: macs).map(\.id) == ["a2"], "remove")
+var manyMacs: [SavedMac] = []
+for i in 0..<12 { manyMacs = SavedMacs.upsert(manyMacs, SavedMac(id: "\(i)", name: "M\(i)", relayURL: "https://r", token: "t\(i)", sessionKey: nil, pairedAt: Date())) }
+check(manyMacs.count == SavedMacs.maxMacs && manyMacs.first?.id == "11", "capped, newest kept")
+check(mA.relayHost == "r.example", "relay host")
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

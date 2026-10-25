@@ -6,6 +6,8 @@ struct SettingsView: View {
     @EnvironmentObject var api: APIClient
     @EnvironmentObject var notifications: NotificationService
     @State private var confirmingUnpair = false
+    @State private var addingMac = false
+    @State private var removingMac: SavedMac?
 
     static let feedbackURL = URL(string: "https://github.com/riot-io-pty-ltd/page/issues")!
 
@@ -21,10 +23,20 @@ struct SettingsView: View {
                             .accessibilityAddTraits(.isHeader)
 
                         VStack(alignment: .leading, spacing: Theme.Space.m) {
-                            SectionTitle("YOUR MAC")
+                            SectionTitle(pairing.savedMacs.count > 1 ? "YOUR MACS" : "YOUR MAC")
                             if let mac = pairing.pairedMac {
                                 macCard(mac, now: context.date)
                             }
+                            ForEach(pairing.savedMacs.filter { $0.id != pairing.activeMacId }) { other in
+                                otherMacRow(other)
+                            }
+                            Button { addingMac = true } label: {
+                                Label("Add another Mac", systemImage: "plus")
+                                    .font(Theme.Font.bodyEm)
+                                    .foregroundStyle(Theme.Colour.text)
+                                    .frame(minHeight: 44)
+                            }
+                            .accessibilityHint("Scan the pairing code on another Mac. You can switch between them.")
                         }
 
                         VStack(alignment: .leading, spacing: Theme.Space.m) {
@@ -50,6 +62,23 @@ struct SettingsView: View {
         .task {
             await api.refreshStatus()
             await notifications.refreshAuthorization()
+            await pairing.refreshOthers()
+        }
+        .sheet(isPresented: $addingMac) {
+            PairMacView(onPaired: {
+                addingMac = false
+                api.activate()
+            })
+            .environmentObject(pairing)
+            .environmentObject(api)
+        }
+        .confirmationDialog("Remove \(removingMac?.name ?? "this Mac")?",
+                            isPresented: Binding(get: { removingMac != nil }, set: { if !$0 { removingMac = nil } }),
+                            titleVisibility: .visible) {
+            Button("Remove", role: .destructive) { if let m = removingMac { pairing.remove(m.id) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This iPhone forgets that Mac. Scan its pairing code again to add it back.")
         }
         .confirmationDialog("Unpair \(pairing.pairedMac?.name ?? "this Mac")?",
                             isPresented: $confirmingUnpair, titleVisibility: .visible) {
@@ -61,6 +90,32 @@ struct SettingsView: View {
     }
 
     // MARK: Mac
+
+    private func otherMacRow(_ mac: SavedMac) -> some View {
+        let status = pairing.otherStatus[mac.id]
+        return HStack(spacing: Theme.Space.m) {
+            StatusDot(color: status?.presence == .online ? Theme.Colour.success
+                      : status?.presence == .offline ? Theme.Colour.destructiveText : Theme.Colour.textMuted)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mac.name).font(Theme.Font.bodyEm).foregroundStyle(Theme.Colour.text)
+                Text(status.map { $0.headline + ($0.detail.map { " · " + $0 } ?? "") } ?? (mac.relayHost ?? ""))
+                    .font(Theme.Font.caption12)
+                    .foregroundStyle(Theme.Colour.textMuted)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Switch") { pairing.switchTo(mac.id) }
+                .font(Theme.Font.bodyEm)
+                .frame(minHeight: 44)
+            Menu {
+                Button("Remove", role: .destructive) { removingMac = mac }
+            } label: {
+                Image(systemName: "ellipsis").frame(width: 32, height: 44)
+            }
+            .accessibilityLabel("More for \(mac.name)")
+        }
+        .cardStyle()
+    }
 
     private func macCard(_ mac: PairedMac, now: Date) -> some View {
         let presence = MacPresence.evaluate(api.macStatus, now: now)

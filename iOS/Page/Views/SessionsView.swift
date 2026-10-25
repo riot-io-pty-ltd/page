@@ -24,6 +24,7 @@ struct SessionsView: View {
                         headerRow(availability)
                         statusLine(availability, now: context.date)
                         macStrip(now: context.date)
+                        OtherMacsBanner()
                         content(availability, now: context.date)
                         Spacer().frame(height: 120)  // tab-bar padding
                     }
@@ -34,6 +35,13 @@ struct SessionsView: View {
             .refreshable {
                 sessions.refresh()
                 await api.refreshAll()
+                await pairing.refreshOthers()
+            }
+            .task {
+                while !Task.isCancelled, pairing.savedMacs.count > 1 {
+                    await pairing.refreshOthers()
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                }
             }
         }
         .confirmationDialog("Unpair this Mac?", isPresented: $confirmingRepair, titleVisibility: .visible) {
@@ -58,6 +66,7 @@ struct SessionsView: View {
                 .foregroundStyle(Theme.Colour.text)
                 .accessibilityAddTraits(.isHeader)
             Spacer()
+            if pairing.savedMacs.count > 1 { MacSwitcher() }
             if availability == .ready {
                 Button { startingSession = true } label: {
                     Image(systemName: "plus")

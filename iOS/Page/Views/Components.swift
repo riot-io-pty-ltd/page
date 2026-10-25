@@ -419,3 +419,59 @@ extension View {
             .padding(.top, Theme.Space.s)
     }
 }
+
+// MARK: - Several Macs
+
+/// The active Mac's name; a menu switches to another paired Mac.
+struct MacSwitcher: View {
+    @EnvironmentObject var pairing: PairingStore
+
+    var body: some View {
+        Menu {
+            ForEach(pairing.savedMacs) { mac in
+                Button {
+                    pairing.switchTo(mac.id)
+                } label: {
+                    if mac.id == pairing.activeMacId {
+                        Label(mac.name, systemImage: "checkmark")
+                    } else if let s = pairing.otherStatus[mac.id] {
+                        Text("\(mac.name) · \(s.headline)")
+                    } else {
+                        Text(mac.name)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(pairing.pairedMac?.name ?? "Mac").lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down").font(.caption2)
+            }
+            .font(Theme.Font.caption12)
+            .foregroundStyle(Theme.Colour.text)
+            .frame(minHeight: 44)
+        }
+        .accessibilityLabel("Switch Mac, now \(pairing.pairedMac?.name ?? "Mac")")
+    }
+}
+
+/// "Studio has 2 sessions that need you" for each other paired Mac with
+/// pages waiting, with a Switch button.
+struct OtherMacsBanner: View {
+    @EnvironmentObject var pairing: PairingStore
+
+    var body: some View {
+        let waiting = pairing.savedMacs.filter { $0.id != pairing.activeMacId }
+            .compactMap { mac in pairing.otherStatus[mac.id].map { (mac, $0) } }
+            .filter { $0.1.needsYou > 0 }
+        if !waiting.isEmpty {
+            VStack(spacing: Theme.Space.s) {
+                ForEach(waiting, id: \.0.id) { mac, status in
+                    StatusBanner(tone: .info, systemImage: "desktopcomputer",
+                                 title: "\(mac.name): \(status.headline.lowercased())",
+                                 message: "Pages from your other Macs show here once you switch to them.",
+                                 actionTitle: "Switch to \(mac.name)") { pairing.switchTo(mac.id) }
+                }
+            }
+        }
+    }
+}

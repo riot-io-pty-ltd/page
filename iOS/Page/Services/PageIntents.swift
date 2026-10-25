@@ -48,6 +48,8 @@ struct StopAgentsIntent: AppIntent {
     static let title: LocalizedStringResource = "Stop my agents"
     static let description = IntentDescription("Presses Esc in every agent session that's working on your Mac.")
     static let openAppWhenRun = false
+    /// Never from a locked phone (like the notification actions).
+    static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {

@@ -6,6 +6,9 @@ import UIKit
 /// probed against the relay (is it a Page relay, does it accept the token?)
 /// and only saved after the user confirms the Mac and relay it points at.
 struct PairMacView: View {
+    /// Set when adding another Mac from Settings (a sheet): called once the
+    /// new pairing is saved.
+    var onPaired: (() -> Void)? = nil
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var api: APIClient
     @Environment(\.colorScheme) private var scheme
@@ -280,7 +283,9 @@ struct PairMacView: View {
     }
 
     private func confirm(_ p: ValidatedPairing) {
-        if !pairing.adopt(p) {
+        if pairing.adopt(p) {
+            onPaired?()
+        } else {
             stage = .problem(title: "Couldn't save the pairing",
                              message: "iOS refused to store the pairing in the Keychain. Unlock your iPhone and try again.",
                              retry: p, openSettings: false)

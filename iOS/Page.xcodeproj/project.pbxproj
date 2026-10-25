@@ -12,6 +12,7 @@
 		0E56119499652580EB6A3B46 /* SessionCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2113C8513AE372F02DBB8456 /* SessionCrypto.swift */; };
 		16B0B6C1266A94F0875DE3E5 /* Intervention.swift in Sources */ = {isa = PBXBuildFile; fileRef = D7B0C560E57C871E726A7532 /* Intervention.swift */; };
 		17C1D6CD5537DD926402DAA3 /* SessionCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2113C8513AE372F02DBB8456 /* SessionCrypto.swift */; };
+		259A44C7E4BC7521359FA52C /* SavedMacs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A234C85EA4474C63E7686E8F /* SavedMacs.swift */; };
 		281C928F9B6B1350C617CEA9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 845602164982E5669D68D3FB /* Assets.xcassets */; };
 		290E676AFAD122D118588FBF /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E838C576A5B10869C98300A /* HistoryView.swift */; };
 		2A7C111F3B0430DAA2C9B157 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BAEF88F841A9AD5CC4D047C /* Pairing.swift */; };
@@ -34,6 +35,7 @@
 		9071A00618434AF1DF738F47 /* AppRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110E21D804E2A13DD3CCD3A1 /* AppRouter.swift */; };
 		988EDA7AAEAB79ACFDB0F5AC /* LiveSessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB0CC580ED82212F602FF975 /* LiveSessions.swift */; };
 		9911E8F0041BFA32697D6BAA /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28A74B3ABFC77430DD6374EC /* NotificationService.swift */; };
+		9DA7A2F8FDA9BD771F6ED252 /* SavedMacs.swift in Sources */ = {isa = PBXBuildFile; fileRef = A234C85EA4474C63E7686E8F /* SavedMacs.swift */; };
 		AACE7808002E2BE61CE32318 /* PageWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87F90880A9F324A1582416D0 /* PageWidget.swift */; };
 		B3FD579131040AD2207955DA /* ReplyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4166A3E9885E7A77A254D6 /* ReplyView.swift */; };
 		B612378CE23F4962FA83205F /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFCDE27EAF40DFCBFC0460CC /* Theme.swift */; };
@@ -106,6 +108,7 @@
 		8B55D2B6DF5836E88C21D57E /* PageIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageIntents.swift; sourceTree = "<group>"; };
 		99C79525F5A446B6B96F4205 /* PageApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageApp.swift; sourceTree = "<group>"; };
 		A00BDC20DEA20F3600E08062 /* WorkflowViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkflowViews.swift; sourceTree = "<group>"; };
+		A234C85EA4474C63E7686E8F /* SavedMacs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedMacs.swift; sourceTree = "<group>"; };
 		A2DDBFDBF730C6E6C0FE4102 /* StatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatsView.swift; sourceTree = "<group>"; };
 		AE75A73D4256FFE3CF18AD87 /* DevBypass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevBypass.swift; sourceTree = "<group>"; };
 		AFCDE27EAF40DFCBFC0460CC /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -217,6 +220,7 @@
 				CB0CC580ED82212F602FF975 /* LiveSessions.swift */,
 				2A71F62EEF65742FEB0AB638 /* PageLogic.swift */,
 				7BAEF88F841A9AD5CC4D047C /* Pairing.swift */,
+				A234C85EA4474C63E7686E8F /* SavedMacs.swift */,
 				2113C8513AE372F02DBB8456 /* SessionCrypto.swift */,
 				50B587A02CEE72845414D065 /* SharedWidgetStore.swift */,
 				1D8FC33307E6D89193C51CF7 /* WireDecoding.swift */,
@@ -332,6 +336,7 @@
 				BE818C1B268CC095003715E8 /* PageLogic.swift in Sources */,
 				AACE7808002E2BE61CE32318 /* PageWidget.swift in Sources */,
 				2A7C111F3B0430DAA2C9B157 /* Pairing.swift in Sources */,
+				9DA7A2F8FDA9BD771F6ED252 /* SavedMacs.swift in Sources */,
 				17C1D6CD5537DD926402DAA3 /* SessionCrypto.swift in Sources */,
 				D6CA5054513A6DF3E6A5CDFB /* SharedWidgetStore.swift in Sources */,
 				C6E08BEBBF26FBD93990B0B6 /* Theme.swift in Sources */,
@@ -364,6 +369,7 @@
 				CAE618EC374EEF4FDC26BDC3 /* PillTabBar.swift in Sources */,
 				E0AAB24D6AE2F98A42F51B56 /* PulseMark.swift in Sources */,
 				B3FD579131040AD2207955DA /* ReplyView.swift in Sources */,
+				259A44C7E4BC7521359FA52C /* SavedMacs.swift in Sources */,
 				0E56119499652580EB6A3B46 /* SessionCrypto.swift in Sources */,
 				329FD32E3FB6A4BF5D60BA51 /* SessionDetailView.swift in Sources */,
 				DDC805C97580CDC17C6CF5B1 /* SessionStore.swift in Sources */,

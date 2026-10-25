@@ -15,6 +15,7 @@ struct InboxView: View {
                     VStack(spacing: Theme.Space.xl) {
                         headerRow
                         InboxBanners(now: context.date)
+                        OtherMacsBanner()
                         statusLine(now: context.date)
                         content(now: context.date)
                         Spacer().frame(height: 120)  // tab-bar padding
