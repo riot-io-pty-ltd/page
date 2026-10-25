@@ -468,6 +468,39 @@ test("heartbeats pass through, persist at most every few minutes, and feed /stat
   assert.equal((await call(relay, "GET", "/status")).body.battery, undefined, "unknown battery omitted");
 });
 
+test("v4 heartbeat fields (working, forecast, usage) are validated, passed on and in /status", async () => {
+  const phone = connect({ mac: false });
+  const mac = connect({ mac: true });
+  await macFrame(relay, mac, "heartbeat", {
+    ts: "t", activeSessions: 4, battery: 18, onAC: false, working: 2.7,
+    forecast: { cutoff: 10, minutes: 12.4, drainPerHour: 40.04, extra: "x" },
+    usage: { fiveHour: { pct: 82.25, resetsAt: "2026-10-25T17:00:00.500Z" }, sevenDay: { pct: 140 },
+             hitAt: "2026-10-25T16:30:00Z", updatedAt: "nope", junk: 1 }
+  });
+  const hb = phone.frames("heartbeat").at(-1).payload;
+  assert.equal(hb.working, 2);
+  assert.deepEqual(hb.forecast, { cutoff: 10, minutes: 12, drainPerHour: 40 });
+  assert.deepEqual(hb.usage, {
+    fiveHour: { pct: 82.3, resetsAt: "2026-10-25T17:00:00Z" }, sevenDay: { pct: 100 }, hitAt: "2026-10-25T16:30:00Z"
+  });
+  let s = (await call(relay, "GET", "/status")).body;
+  assert.equal(s.working, 2);
+  assert.equal(s.forecast.minutes, 12);
+  assert.equal(s.usage.fiveHour.pct, 82.3);
+
+  // Bad shapes are dropped, not trusted; a forecast on AC isn't reported.
+  await macFrame(relay, mac, "heartbeat", {
+    ts: "t", activeSessions: 1, battery: 90, onAC: true,
+    forecast: { cutoff: 10, minutes: 5, drainPerHour: 9 }, usage: { fiveHour: { pct: "high" } }, working: "two"
+  });
+  const hb2 = phone.frames("heartbeat").at(-1).payload;
+  assert.equal(hb2.working, undefined);
+  assert.equal(hb2.usage, undefined);
+  s = (await call(relay, "GET", "/status")).body;
+  assert.equal(s.forecast, undefined);
+  assert.equal(s.usage, undefined);
+});
+
 test("webSocketClose reciprocates and announces the Mac going offline", async () => {
   const phone = connect({ mac: false });
   const mac = connect({ mac: true });

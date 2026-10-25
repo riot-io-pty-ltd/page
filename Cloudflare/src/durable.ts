@@ -3,7 +3,7 @@ import type {
 } from "./types.ts";
 import { apnsConfigured, sendApnsPush, type PushRequest } from "./apns.ts";
 import {
-  type BuiltPush, type PendingRecord, type Tombstone,
+  type BuiltPush, type PendingRecord, type Tombstone, type HeartbeatForecast, type HeartbeatUsage,
   buildAlertPush, buildClosePush, buildReplyFailedPush, decideOpenPush, decideReply, idFromTimeKey,
   hookCloseResolvedPrompt, hookHoldMs, hookPageExpiresAt, isExpiredHookPage, isHookBlocking,
   isHookPreId, keys, MAX_ID_LENGTH, normalizeApnsToken, normalizeCloseReason,
@@ -41,6 +41,9 @@ interface Meta {
   activeSessions?: number;
   battery?: number;
   onAC?: boolean;
+  working?: number;
+  forecast?: HeartbeatForecast;
+  usage?: HeartbeatUsage;
   /// When presence was last written (ms). Survives hibernation so a DO that
   /// wakes for every 15 s heartbeat doesn't rewrite storage every time.
   presenceSavedAt?: number;
@@ -62,6 +65,9 @@ interface Presence {
   activeSessions: number;
   battery: number;
   onAC?: boolean;
+  working?: number;
+  forecast?: HeartbeatForecast;
+  usage?: HeartbeatUsage;
 }
 
 /// The pre-v2 single-blob layout, migrated on first load then deleted.
@@ -1112,7 +1118,10 @@ export class UserRelay {
       lastHeartbeatAt: isoSeconds(now),
       activeSessions: hb.activeSessions,
       battery: hb.battery,
-      ...(hb.onAC !== undefined ? { onAC: hb.onAC } : {})
+      ...(hb.onAC !== undefined ? { onAC: hb.onAC } : {}),
+      ...(hb.working !== undefined ? { working: hb.working } : {}),
+      ...(hb.forecast ? { forecast: hb.forecast } : {}),
+      ...(hb.usage ? { usage: hb.usage } : {})
     };
     // Forward to phone clients so the UI can show live session counts.
     this.broadcastToPhones({ type: "heartbeat", payload: hb });
@@ -1143,6 +1152,9 @@ export class UserRelay {
     meta.activeSessions = this.presence.activeSessions;
     meta.battery = this.presence.battery;
     if (this.presence.onAC !== undefined) meta.onAC = this.presence.onAC; else delete meta.onAC;
+    if (this.presence.working !== undefined) meta.working = this.presence.working; else delete meta.working;
+    if (this.presence.forecast) meta.forecast = this.presence.forecast; else delete meta.forecast;
+    if (this.presence.usage) meta.usage = this.presence.usage; else delete meta.usage;
     meta.presenceSavedAt = now;
     await this.storage.put(keys.meta, meta);
     this.presenceSavedAt = now;
@@ -1154,7 +1166,10 @@ export class UserRelay {
       lastHeartbeatAt: meta.lastHeartbeatAt,
       activeSessions: meta.activeSessions,
       battery: meta.battery,
-      onAC: meta.onAC
+      onAC: meta.onAC,
+      working: meta.working,
+      forecast: meta.forecast,
+      usage: meta.usage
     };
     const [pending, queue, devices] = await Promise.all([
       this.storage.list({ prefix: prefixes.pending }),
@@ -1175,6 +1190,10 @@ export class UserRelay {
     if (typeof p.activeSessions === "number") out.activeSessions = p.activeSessions;
     if (typeof p.battery === "number" && p.battery >= 0) out.battery = p.battery;
     if (typeof p.onAC === "boolean") out.onAC = p.onAC;
+    if (typeof p.working === "number") out.working = p.working;
+    // A forecast only means something on battery.
+    if (p.forecast && p.onAC === false) out.forecast = p.forecast;
+    if (p.usage) out.usage = p.usage;
     if (this.lastPushError) out.lastPushError = this.lastPushError;
     return out;
   }

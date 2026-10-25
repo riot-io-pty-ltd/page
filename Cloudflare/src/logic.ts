@@ -486,11 +486,77 @@ export function parseReplyInjected(raw: unknown): ParsedInjected | null {
   return { interventionId: raw.interventionId, method, success, detail };
 }
 
+export interface HeartbeatForecast {
+  cutoff: number;                  // low-battery cutoff, %
+  minutes: number;                 // to the cutoff at the current drain
+  drainPerHour: number;            // percentage points per hour
+}
+
+export interface UsageWindow {
+  pct: number;                     // 0-100 used
+  resetsAt?: string;               // ISO, whole seconds
+}
+
+export interface HeartbeatUsage {
+  fiveHour?: UsageWindow;
+  sevenDay?: UsageWindow;
+  hitAt?: string;                  // forecast: when 100% is reached
+  updatedAt?: string;              // when the Mac last read the numbers
+}
+
 export interface ParsedHeartbeat {
   ts: string;
   activeSessions: number;
   battery: number;                 // -1 when unknown
   onAC?: boolean;
+  /// v4, all optional: sessions mid-turn, battery forecast, Claude usage.
+  working?: number;
+  forecast?: HeartbeatForecast;
+  usage?: HeartbeatUsage;
+}
+
+function finiteNumber(v: unknown, min: number, max: number): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : undefined;
+}
+
+/// An ISO timestamp re-emitted in whole seconds, or undefined.
+function isoField(v: unknown): string | undefined {
+  if (typeof v !== "string" || v.length > 64) return undefined;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? isoSeconds(ms) : undefined;
+}
+
+export function parseForecast(raw: unknown): HeartbeatForecast | undefined {
+  if (!isObject(raw)) return undefined;
+  const cutoff = finiteNumber(raw.cutoff, 0, 100);
+  const minutes = finiteNumber(raw.minutes, 0, 7 * 24 * 60);
+  const drain = finiteNumber(raw.drainPerHour, 0, 1000);
+  if (cutoff === undefined || minutes === undefined || drain === undefined) return undefined;
+  return { cutoff: Math.round(cutoff), minutes: Math.round(minutes), drainPerHour: Math.round(drain * 10) / 10 };
+}
+
+function parseUsageWindow(raw: unknown): UsageWindow | undefined {
+  if (!isObject(raw)) return undefined;
+  const pct = finiteNumber(raw.pct, 0, 100);
+  if (pct === undefined) return undefined;
+  const w: UsageWindow = { pct: Math.round(pct * 10) / 10 };
+  const resetsAt = isoField(raw.resetsAt);
+  if (resetsAt) w.resetsAt = resetsAt;
+  return w;
+}
+
+export function parseUsage(raw: unknown): HeartbeatUsage | undefined {
+  if (!isObject(raw)) return undefined;
+  const u: HeartbeatUsage = {};
+  const five = parseUsageWindow(raw.fiveHour);
+  const seven = parseUsageWindow(raw.sevenDay);
+  if (five) u.fiveHour = five;
+  if (seven) u.sevenDay = seven;
+  const hitAt = isoField(raw.hitAt);
+  const updatedAt = isoField(raw.updatedAt);
+  if (hitAt) u.hitAt = hitAt;
+  if (updatedAt) u.updatedAt = updatedAt;
+  return five || seven ? u : undefined;
 }
 
 export function parseHeartbeat(raw: unknown, nowMs: number): ParsedHeartbeat {
@@ -505,6 +571,12 @@ export function parseHeartbeat(raw: unknown, nowMs: number): ParsedHeartbeat {
     battery
   };
   if (typeof p.onAC === "boolean") hb.onAC = p.onAC;
+  const working = finiteNumber(p.working, 0, 10000);
+  if (working !== undefined) hb.working = Math.floor(working);
+  const forecast = parseForecast(p.forecast);
+  if (forecast) hb.forecast = forecast;
+  const usage = parseUsage(p.usage);
+  if (usage) hb.usage = usage;
   return hb;
 }
 

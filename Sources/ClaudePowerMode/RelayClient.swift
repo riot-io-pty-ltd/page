@@ -684,13 +684,20 @@ final class RelayClient: NSObject, RelaySink, SessionsUpdateSink, URLSessionWebS
 
     /// `battery` is the real percentage, or -1 when unknown / no battery.
     /// `onAC` is optional only so pre-v2 call sites keep compiling.
-    func sendHeartbeat(activeSessions: Int, battery: Int, onAC: Bool? = nil) {
+    /// v4 optional fields (older Workers drop them): `working` (sessions
+    /// mid-turn), `forecast` (`BatteryForecast.Estimate`), `usage`
+    /// (`UsageForecast`).
+    func sendHeartbeat(activeSessions: Int, battery: Int, onAC: Bool? = nil, working: Int? = nil,
+                       forecast: [String: Any]? = nil, usage: [String: Any]? = nil) {
         var payload: [String: Any] = [
             "ts": Self.isoFormatter.string(from: Date()),
             "activeSessions": activeSessions,
             "battery": battery
         ]
         if let onAC { payload["onAC"] = onAC }
+        if let working { payload["working"] = working }
+        if let forecast { payload["forecast"] = forecast }
+        if let usage { payload["usage"] = usage }
         send(type: "heartbeat", key: nil, payload: payload)
     }
 

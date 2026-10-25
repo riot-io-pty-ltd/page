@@ -98,6 +98,14 @@ struct Config: Codable, Equatable {
     /// command on this Mac.
     var phoneStartSessionsEnabled: Bool = false
 
+    // Battery forecast (v4).
+    /// Page once when, at the current drain, the cutoff is 15 min away
+    /// while agents are working.
+    var batteryForecastPageEnabled: Bool = true
+    /// Opt-in: start the low-battery pause about 10 min before the cutoff
+    /// (by the forecast) instead of at it, so agents have time to wrap up.
+    var earlyBatteryPause: Bool = false
+
     init() {}
 
     // `interventionScanIntervalSeconds` used to live here but nothing ever
@@ -118,6 +126,7 @@ struct Config: Codable, Equatable {
         case keepAwakeLidClosedOnAC, keepAwakeLidClosedOnBattery
         case lowBatteryAction, lowBatteryPauseGraceSeconds, resumeAfterBatteryRecovery
         case stuckAlertsEnabled, stuckAfterMinutes, turnSummaryEnabled, phoneStartSessionsEnabled
+        case batteryForecastPageEnabled, earlyBatteryPause
     }
 
     /// Collects per-key decode problems. Passed through `decoder.userInfo`
@@ -180,6 +189,8 @@ struct Config: Codable, Equatable {
         stuckAfterMinutes = field(.stuckAfterMinutes, d.stuckAfterMinutes)
         turnSummaryEnabled = field(.turnSummaryEnabled, d.turnSummaryEnabled)
         phoneStartSessionsEnabled = field(.phoneStartSessionsEnabled, d.phoneStartSessionsEnabled)
+        batteryForecastPageEnabled = field(.batteryForecastPageEnabled, d.batteryForecastPageEnabled)
+        earlyBatteryPause = field(.earlyBatteryPause, d.earlyBatteryPause)
     }
 
     // MARK: validation

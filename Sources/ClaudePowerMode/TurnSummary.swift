@@ -134,7 +134,7 @@ enum TurnSummary {
             if let s = stats[rel] {
                 out.append(FileChange(path: rel, added: s.0, removed: s.1, status: "modified"))
             } else if untracked.contains(rel) {
-                out.append(FileChange(path: rel, added: lineCount(root + "/" + rel), removed: 0, status: "added"))
+                out.append(FileChange(path: rel, added: lineCount(rel, root: root), removed: 0, status: "added"))
             } else {
                 // Edited, then committed (or reverted): no diff against HEAD.
                 out.append(FileChange(path: rel, added: nil, removed: nil, status: "changed"))
@@ -154,7 +154,7 @@ enum TurnSummary {
         let others = ProcessRunner.run(git, ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], timeout: gitTimeout)
         if others.succeeded {
             for rel in others.stdout.split(separator: "\0").map(String.init).sorted() {
-                files.append(FileChange(path: rel, added: lineCount(root + "/" + rel), removed: 0, status: "added"))
+                files.append(FileChange(path: rel, added: lineCount(rel, root: root), removed: 0, status: "added"))
             }
         }
         return Changes(root: root, files: Array(files.prefix(maxFiles)))
@@ -179,9 +179,20 @@ enum TurnSummary {
         return (ContextRedactor.redact(cut), truncated)
     }
 
+    /// A file inside the repository that may be read: not a symlink (an
+    /// untracked link could point at ~/.ssh), and resolving under `root`.
+    static func readablePath(_ rel: String, root: String) -> String? {
+        let path = root + "/" + rel
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              attrs[.type] as? FileAttributeType == .typeRegular else { return nil }
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        return relative(resolved, to: (root as NSString).resolvingSymlinksInPath) != nil ? path : nil
+    }
+
     /// A new file as a unified diff ("+" on every line), text files only.
     static func newFilePatch(path: String, root: String, maxBytes: Int) -> String {
-        guard let data = BoundedFileRead.read(root + "/" + path, maxBytes: max(0, maxBytes)),
+        guard let file = readablePath(path, root: root),
+              let data = BoundedFileRead.read(file, maxBytes: max(0, maxBytes)),
               !data.contains(0) else { return "" }
         let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
         let body = (lines.last?.isEmpty == true ? lines.dropLast() : lines[...]).map { "+" + $0 }
@@ -189,8 +200,9 @@ enum TurnSummary {
             + body.joined(separator: "\n") + "\n"
     }
 
-    private static func lineCount(_ path: String) -> Int? {
-        guard let data = BoundedFileRead.read(path, maxBytes: 4 << 20), !data.contains(0) else { return nil }
+    private static func lineCount(_ rel: String, root: String) -> Int? {
+        guard let path = readablePath(rel, root: root),
+              let data = BoundedFileRead.read(path, maxBytes: 4 << 20), !data.contains(0) else { return nil }
         return data.reduce(0) { $1 == 10 ? $0 + 1 : $0 } + (data.last.map { $0 == 10 ? 0 : 1 } ?? 0)
     }
 

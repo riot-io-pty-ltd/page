@@ -63,6 +63,9 @@ final class Coordinator {
         /// Local model servers, apps and terminal tools Page can see
         /// (power-only; empty when the option is off).
         var localModels: [LocalActivity] = []
+        /// Time to the low-battery cutoff at the current drain (on battery
+        /// only, once there's enough to go on).
+        var batteryForecast: BatteryForecast.Estimate? = nil
 
         var relayConnected: Bool { relayState == .connected }
         var boosting: Bool { awake.preventIdleSleep }
@@ -171,6 +174,11 @@ final class Coordinator {
     /// Low-battery pause state machine (tick queue only), persisted after
     /// every change so a crash or the Mac sleeping never loses it.
     private var battery = BatteryPolicy()
+    /// Drain rate → time to the cutoff (tick queue only).
+    private var forecast = BatteryForecast()
+    private var forecastEstimate: BatteryForecast.Estimate?
+    /// The open "cutoff soon" page, if any.
+    private var forecastPageId: String?
     private var savedBattery = BatteryPolicy()
     private let batteryStore = BatteryPauseStore()
     /// Pausing and resuming type into terminals and can block for seconds;
@@ -701,6 +709,12 @@ final class Coordinator {
             return
         }
         // Low-battery pages are the Coordinator's own, not a backend's.
+        // The forecast page is information only.
+        if BatteryForecast.isPageId(reply.interventionId) {
+            relay?.sendReplyInjected(interventionId: reply.interventionId, method: "none", success: false,
+                                     detail: "Nothing to answer — plug in to keep your agents going", output: "")
+            return
+        }
         if BatteryPolicy.isLowBatteryPageId(reply.interventionId) {
             tickQueue.async { [weak self] in self?.handleLowBatteryReply(reply) }
             return
@@ -743,7 +757,11 @@ final class Coordinator {
         lastHeartbeatAt = now
         let p = lastPower
         let live = backends.flatMap { $0.currentSnapshot.sessions }.filter { $0.state != .offline }.count
-        relay.sendHeartbeat(activeSessions: live, battery: p.hasBattery ? p.percent : -1, onAC: p.onAC)
+        let all = backends.flatMap { $0.currentSnapshot.sessions }
+        let working = all.filter { $0.state == .active }.count
+        let forecast = p.onAC ? nil : forecastEstimate?.heartbeatPayload
+        relay.sendHeartbeat(activeSessions: live, battery: p.hasBattery ? p.percent : -1, onAC: p.onAC,
+                            working: working, forecast: forecast, usage: usageHeartbeat())
     }
 
     private func maybeSync() {
@@ -764,6 +782,7 @@ final class Coordinator {
             // Low-battery pages belong to the Coordinator; without this the
             // Worker would close them as stale within a minute.
             ids.formUnion(battery.entries.filter { $0.pageOpen && $0.session.backend == backend.id }.map(\.pageId))
+            if backend.id == .claude, let id = forecastPageId { ids.insert(id) }
             relay.sendSync(backend: backend.id, openIds: ids.sorted())
         }
     }
@@ -853,15 +872,61 @@ final class Coordinator {
     private func evaluatePower(_ p: PowerSnapshot, cfg: Config) -> Bool {
         guard !isTerminating else { return false }
         let before = (battery, power.held, sleepGuard.isActive, sleepGuard.cleanupPending)
-        let effects = battery.observe(p, settings: BatteryPolicy.Settings(cfg), now: Date())
+        let now = Date()
+        forecast.observe(p, now: now)
+        let estimate = forecast.estimate(cutoff: cfg.lowBatteryCutoff, now: now)
+        let estimateChanged = estimate != forecastEstimate
+        forecastEstimate = estimate
+        let effects = battery.observe(p, settings: Self.batterySettings(cfg, power: p, estimate: estimate), now: now)
         handleBatteryEffects(effects, power: p, agentsWereKeptAwake: power.isBoosting)
         // An automatic resume held while the user was at the Mac runs once
         // they step away (checked every tick and every housekeeping pass).
         runOwedAutoResume(justRecovered: false)
         persistBattery()
         applyPower(p, snapshots: lastSnapshots)
+        updateForecastPage(estimate, power: p, cfg: cfg)
         return before.0 != battery || before.1 != power.held || before.2 != sleepGuard.isActive
-            || before.3 != sleepGuard.cleanupPending
+            || before.3 != sleepGuard.cleanupPending || estimateChanged
+    }
+
+    /// Claude usage for the heartbeat (`UsageForecast`), nil when unknown.
+    private func usageHeartbeat() -> [String: Any]? { nil }
+
+    /// The battery policy's settings for this reading. With the opt-in
+    /// early pause, the cutoff moves up to the current charge once the
+    /// forecast says the real cutoff is `earlyPauseWithin` minutes away, so
+    /// the usual pause runs while there's still time to write a summary.
+    /// Never at or above the recovery threshold (it would recover at once).
+    static func batterySettings(_ cfg: Config, power p: PowerSnapshot, estimate: BatteryForecast.Estimate?) -> BatteryPolicy.Settings {
+        var settings = BatteryPolicy.Settings(cfg)
+        if cfg.earlyBatteryPause, cfg.lowBatteryAction != .off, let e = estimate,
+           e.minutesToCutoff <= BatteryForecast.earlyPauseWithin,
+           p.percent > settings.cutoff, p.percent < cfg.recoveryThreshold {
+            settings.cutoff = p.percent
+        }
+        return settings
+    }
+
+    /// Opens or closes the "cutoff soon" page (Coordinator-owned, like the
+    /// low-battery pages: kind rate_limit so phones show it as information).
+    private func updateForecastPage(_ estimate: BatteryForecast.Estimate?, power p: PowerSnapshot, cfg: Config) {
+        let busy = lastSnapshots.filter { isEnabled($0.backendID) }.flatMap(\.sessions).filter { $0.state == .active }.count
+        let wants = cfg.batteryForecastPageEnabled && BatteryForecast.wantsPage(
+            estimate, open: forecastPageId != nil, busy: busy, onAC: p.onAC, tripped: battery.phase != .normal)
+        if wants, forecastPageId == nil, let e = estimate, let relay {
+            let now = Date()
+            let id = BatteryForecast.pageId(openedAt: now)
+            forecastPageId = id
+            Logger.shared.log("Battery forecast: cutoff in ~\(e.minutesToCutoff) min with \(busy) busy session(s) — paging")
+            relay.sendInterventionOpened(InterventionEvent(
+                id: id, sessionId: BatteryForecast.pageSessionId, cwd: "", projectName: "Battery",
+                kind: .rateLimit, openedAt: now,
+                context: BatteryForecast.pageContext(e, busy: busy, action: cfg.lowBatteryAction, earlyPause: cfg.earlyBatteryPause),
+                transcriptPath: "", backend: .claude, source: .terminal, subtype: "battery_forecast"))
+        } else if !wants, let id = forecastPageId {
+            forecastPageId = nil
+            relay?.sendInterventionClosed(id: id, reason: p.onAC ? "charging" : "resolved")
+        }
     }
 
     /// Some session is actually mid-turn. Not the same as wanting the
@@ -1270,7 +1335,8 @@ final class Coordinator {
             relayState: relayState,
             backends: infos,
             configProblem: configProblem,
-            localModels: lastLocalActivities
+            localModels: lastLocalActivities,
+            batteryForecast: lastPower.onAC ? nil : forecastEstimate
         )
         onStateChange?(snap)
     }

@@ -93,6 +93,18 @@ final class TurnSummaryTests: XCTestCase {
         XCTAssertFalse(p.text.contains("abcdefghijklmnop"), p.text)
     }
 
+    func testUntrackedSymlinksAreNeverRead() throws {
+        let dir = try makeRepo()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let secret = FileManager.default.temporaryDirectory.appendingPathComponent("secret-\(UUID().uuidString)")
+        try "TOP SECRET\n".write(to: secret, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: secret) }
+        try FileManager.default.createSymbolicLink(at: dir.appendingPathComponent("link.txt"), withDestinationURL: secret)
+        let all = try XCTUnwrap(TurnSummary.uncommitted(cwd: dir.path))
+        XCTAssertEqual(all.files.first { $0.path == "link.txt" }?.added, nil)
+        XCTAssertFalse(TurnSummary.patch(all).text.contains("TOP SECRET"))
+    }
+
     func testNotARepo() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("norepo-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
