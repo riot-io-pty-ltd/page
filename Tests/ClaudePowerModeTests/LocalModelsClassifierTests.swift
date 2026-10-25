@@ -38,6 +38,18 @@ final class LocalModelsClassifierTests: XCTestCase {
         XCTAssertEqual(old?.declaredPort, 60002)
     }
 
+    /// Exactly what Homebrew's Ollama 0.40.11 ran on a real Mac.
+    func testRealOllama040RunnerIsSeen() {
+        let serve = ProcessFacts(pid: 84609, ppid: 1, execPath: "/opt/homebrew/opt/ollama/bin/ollama", argv: ["/opt/homebrew/opt/ollama/bin/ollama", "serve"])
+        let runner = classify("/opt/homebrew/Cellar/ollama/0.40.11/libexec/lib/ollama/llama-server",
+                              ["/opt/homebrew/Cellar/ollama/0.40.11/libexec/lib/ollama/llama-server", "--model", "/Users/alex/.ollama/models/blobs/sha256-c539",
+                               "--port", "50025", "--host", "127.0.0.1", "--no-webui", "--offline", "-c", "32768", "-np", "1"],
+                              pid: 87007, ppid: 84609, parents: [serve])
+        XCTAssertEqual(runner?.kind, .ollamaRunner)
+        XCTAssertEqual(runner?.declaredPort, 50025)
+        XCTAssertTrue(runner.map(LocalProcessClassifier.shouldProbeSlots) ?? false)
+    }
+
     func testOllamaRunIsATerminalAgentOnlyWithTTY() {
         let run = classify("/opt/homebrew/bin/ollama", ["ollama", "run", "qwen3"], tty: "ttys004")
         XCTAssertEqual(run?.kind, .terminalAgent)

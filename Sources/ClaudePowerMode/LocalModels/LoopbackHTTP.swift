@@ -14,10 +14,10 @@ enum SlotsState: String, Equatable {
     case noObservation
 }
 
-/// Pure decoding of llama.cpp `GET /slots`. Unverified (from llama.cpp's
-/// server README, no server installed here): the endpoint returns an array
-/// of slot objects each with a boolean `is_processing`, and answers 503
-/// while a model is loading.
+/// Pure decoding of llama.cpp `GET /slots`: an array of slot objects each
+/// with a boolean `is_processing` (checked against the llama-server that
+/// Ollama 0.40 runs: true while generating, false once done with the model
+/// still loaded). 503 while a model is loading is from llama.cpp's README.
 ///
 /// Privacy: slot objects can carry prompt text. Only `is_processing` is
 /// decoded; nothing else is read into a value, stored or logged.

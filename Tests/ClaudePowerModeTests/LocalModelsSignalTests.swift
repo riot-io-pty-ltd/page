@@ -86,6 +86,13 @@ final class LocalModelsSignalTests: XCTestCase {
         XCTAssertNil(SlotsDecoder.anyProcessing(Data("[{\"is_processing\":\"yes\"}]".utf8)))
     }
 
+    /// The shape Ollama 0.40's llama-server returned (params trimmed).
+    func testRealOllama040Slots() {
+        let real = #"[{"id":0,"n_ctx":32768,"speculative":false,"is_processing":%@,"id_task":0,"n_prompt_tokens":418,"params":{"seed":4294967295,"temperature":0.800000011920929,"top_k":40}}]"#
+        XCTAssertEqual(SlotsDecoder.anyProcessing(Data(real.replacingOccurrences(of: "%@", with: "true").utf8)), true)
+        XCTAssertEqual(SlotsDecoder.anyProcessing(Data(real.replacingOccurrences(of: "%@", with: "false").utf8)), false)
+    }
+
     func testHTTPOutcomeMapping() {
         XCTAssertEqual(SlotsDecoder.state(status: 200, body: Data(busyFixture.utf8)), .busy)
         XCTAssertEqual(SlotsDecoder.state(status: 200, body: Data(idleFixture.utf8)), .idle)

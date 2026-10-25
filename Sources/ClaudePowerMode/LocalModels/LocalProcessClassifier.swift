@@ -239,9 +239,9 @@ enum LocalProcessClassifier {
 
     /// Whether Page may GET this llama-server's /slots: it must answer on
     /// loopback, need no key and have the endpoint on. Ollama runners are
-    /// always tried — unverified whether they expose /slots (the old
-    /// llama-server child did per its docs; the Go `ollama runner` may
-    /// not). A 404/501 there just falls back to the runner's GPU signal.
+    /// always tried: Ollama 0.40's llama-server child answers /slots (seen
+    /// on a real install); the Go `ollama runner` may not, and a 404/501
+    /// there just falls back to the runner's GPU signal.
     static func shouldProbeSlots(_ p: LocalProcess) -> Bool {
         switch p.kind {
         case .ollamaRunner: return true

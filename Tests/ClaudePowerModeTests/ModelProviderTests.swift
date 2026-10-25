@@ -138,6 +138,16 @@ final class ModelProviderTests: XCTestCase {
         XCTAssertEqual(C.codex(argv: ["codex", "--oss", "-c", "oss_provider=\"lmstudio\""], threadModelProvider: nil), .lmStudio)
     }
 
+    /// Exactly what `ollama launch codex` passed with Ollama 0.40.11.
+    func testRealOllama040LaunchCodexArgv() {
+        let argv = ["codex", "--profile", "ollama-launch", "-c", "model_provider=\"ollama-launch\"",
+                    "-c", "model_providers.ollama-launch.name=\"Ollama\"",
+                    "-c", "model_providers.ollama-launch.base_url=\"http://127.0.0.1:11434/v1/\"",
+                    "-c", "model_providers.ollama-launch.wire_api=\"responses\"",
+                    "-c", "model_catalog_json=\"/Users/alex/.codex/model.json\"", "-c", "service_tier=\"default\"", "-m", "qwen2.5:0.5b"]
+        XCTAssertEqual(C.codex(argv: argv, threadModelProvider: nil), .ollama)
+    }
+
     func testCodexOllamaLaunchProfile() {
         let argv = ["codex", "--profile", "ollama-launch", "-c",
                     "model_providers.ollama-launch.base_url=\"http://127.0.0.1:11434/v1/\"", "-m", "gpt-oss:20b"]

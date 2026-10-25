@@ -134,8 +134,8 @@ enum ModelProviderClassifier {
         if host == "api.anthropic.com" { return .anthropic }
         guard isLoopbackHost(host) else { return .cloudGateway }
         let token = env["ANTHROPIC_AUTH_TOKEN"]
-        // Ports and tokens are what `ollama launch claude` and LM Studio's
-        // Claude Code guide set (docs; unverified on a real install).
+        // Ports and tokens are what `ollama launch claude` sets (seen with
+        // Ollama 0.40) and what LM Studio's Claude Code guide sets (docs).
         if port == 11434 || token == "ollama" { return .ollama }
         if port == 1234 || token == "lmstudio" { return .lmStudio }
         return .otherLocal
