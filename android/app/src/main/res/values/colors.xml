@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="surface">#FAF8F4</color>
+    <color name="icon_background">#0E1014</color>
+    <color name="pulse_start">#5EEAD4</color>
+    <color name="pulse_end">#38BDF8</color>
+    <color name="notification_accent">#0F766E</color>
+</resources>
