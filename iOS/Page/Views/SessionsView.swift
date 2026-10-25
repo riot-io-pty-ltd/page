@@ -118,7 +118,7 @@ struct SessionsView: View {
         VStack(alignment: .leading, spacing: Theme.Space.xl) {
             ForEach(SessionGrouping.sections(sessions.sessions)) { section in
                 VStack(alignment: .leading, spacing: Theme.Space.m) {
-                    SectionTitle(section.group.title)
+                    SessionGroupHeader(group: section.group, count: section.sessions.count)
                     ForEach(section.sessions) { session in
                         SessionCard(session: session, now: now,
                                     onOpen: { router.openSession(session.id) },
@@ -146,6 +146,47 @@ struct SessionsView: View {
                 .padding(.horizontal, Theme.Space.l)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+// MARK: - Group header
+
+/// Separator above each group: the group's colour dot, its name and count,
+/// and a hairline across the rest of the row, so Needs you / Working / Idle
+/// read as distinct blocks at a glance.
+struct SessionGroupHeader: View {
+    let group: SessionGroup
+    let count: Int
+
+    private var color: Color {
+        switch group {
+        case .needsYou: return LiveSessionState.waitingOnApproval.color
+        case .working: return LiveSessionState.active.color
+        case .idle: return Theme.Colour.textMuted
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: Theme.Space.s) {
+            StatusDot(color: color)
+            Text(group.title)
+                .font(Theme.Font.chip11)
+                .tracking(0.8)
+                .foregroundStyle(group == .idle ? Theme.Colour.textMuted : color)
+            Text("\(count)")
+                .font(Theme.Font.chip11)
+                .foregroundStyle(Theme.Colour.textMuted)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(Theme.Colour.surfaceInset))
+            Rectangle()
+                .fill(Theme.Colour.hairline)
+                .frame(height: 1)
+        }
+        .padding(.top, Theme.Space.xs)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(group.title.capitalized), \(count)")
+        .accessibilityAddTraits(.isHeader)
     }
 }
 
