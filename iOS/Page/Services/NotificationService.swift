@@ -162,9 +162,13 @@ final class NotificationService: NSObject, ObservableObject {
     }
 
     /// Called on unpair with the credentials captured before deletion.
-    func unregister(using creds: RelayCredentials) async {
-        registeredPair = nil
-        push = .unknown
+    /// `forgetRegistration` false: a relay other than the active one (a Mac
+    /// switched away from), whose answer mustn't touch the active state.
+    func unregister(using creds: RelayCredentials, forgetRegistration: Bool = true) async {
+        if forgetRegistration {
+            registeredPair = nil
+            push = .unknown
+        }
         guard let device = deviceToken else { return }
         await APIClient.shared.unregisterDevice(apnsToken: device, using: creds)
     }

@@ -73,7 +73,18 @@ final class PairingStore: ObservableObject {
     }
 
     private func remember(_ mac: SavedMac) {
-        saveList(SavedMacs.upsert(savedMacs, mac))
+        let list = SavedMacs.upsert(savedMacs, mac)
+        // A pairing pushed off the end (more than `maxMacs`) stops pushing.
+        for evicted in savedMacs where !list.contains(where: { $0.token == evicted.token }) && evicted.token != mac.token {
+            unregisterPush(evicted)
+        }
+        saveList(list)
+    }
+
+    private func unregisterPush(_ mac: SavedMac) {
+        guard let url = URL(string: mac.relayURL) else { return }
+        let creds = RelayCredentials(baseURL: url, token: mac.token)
+        Task { await NotificationService.shared.unregister(using: creds, forgetRegistration: false) }
     }
 
     private func saveList(_ list: [SavedMac]) {
@@ -89,11 +100,18 @@ final class PairingStore: ObservableObject {
     /// Makes another saved Mac the active one: its credentials go into the
     /// active slots, everything tied to the old Mac is cleared, and the app
     /// connects to the new one.
+    ///
+    /// Only the live Mac pushes: the old one's relay forgets this phone and
+    /// its delivered notifications go, so a notification action (which
+    /// uses the active credentials) can never answer a page from another
+    /// Mac. The others are watched from inside the app (`refreshOthers`).
     func switchTo(_ id: String) {
         guard let mac = savedMacs.first(where: { $0.id == id }), id != activeMacId else { return }
         let paired = PairedMac(name: mac.name, pairedAt: mac.pairedAt)
         guard let macData = try? JSONEncoder().encode(paired),
               let macJSON = String(data: macData, encoding: .utf8) else { return }
+        if let old = savedMacs.first(where: { $0.id == activeMacId }) { unregisterPush(old) }
+        NotificationService.shared.clearAll()
         APIClient.shared.reset()
         AppRouter.shared.reset()
         guard KeychainStore.set(mac.relayURL, for: RelayCredentials.relayURLKey),
@@ -113,10 +131,7 @@ final class PairingStore: ObservableObject {
     func remove(_ id: String) {
         guard id != activeMacId, let mac = savedMacs.first(where: { $0.id == id }) else { return }
         saveList(SavedMacs.removing(id, from: savedMacs))
-        if let url = URL(string: mac.relayURL) {
-            let creds = RelayCredentials(baseURL: url, token: mac.token)
-            Task { await NotificationService.shared.unregister(using: creds) }
-        }
+        unregisterPush(mac)
     }
 
     /// Checks every other Mac's relay (`GET /status`) for the switcher and

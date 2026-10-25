@@ -248,7 +248,9 @@ at any time, not only when a page is open.
 - **Several Macs.** **Settings ▸ Add another Mac** pairs a second Mac
   without forgetting the first. One Mac is live at a time: switch from the
   Sessions header or Settings. The others are checked in the background, and
-  a banner tells you when one of them has pages waiting.
+  a banner tells you when one of them has pages waiting. Only the live Mac
+  sends push notifications, so a lock-screen reply always goes to the right
+  Mac.
 - **Which sessions can be typed into** follows the table above; the phone
   shows why when one can't. Turn the view off with
   **Preferences ▸ Phone ▸ Show my live sessions on my phone**
