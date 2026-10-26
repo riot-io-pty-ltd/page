@@ -29,15 +29,17 @@ enum SessionScreen {
         case cmux(CmuxBridge.Target)
         case wezterm(WezTermBridge.Target)
         case kitty(KittyBridge.Target)
+        case herdr(HerdrBridge.Target)
     }
 
     /// Where a Claude session's screen can be read, from its resolved host.
     static func source(for host: InjectionExecutor.TerminalHost) -> Source? {
         switch host {
-        case .tmux(let tmux, let pane, _): return .tmux(tmuxPath: tmux, pane: pane, serverArgs: [])
+        case .tmux(let tmux, let pane, _, _): return .tmux(tmuxPath: tmux, pane: pane, serverArgs: [])
         case .cmux(let target): return .cmux(target)
         case .wezterm(let target): return .wezterm(target)
         case .kitty(let target): return .kitty(target)
+        case .herdr(let target): return .herdr(target)
         case .terminalApp, .iTerm, .unreachable, .unsupported, .unknown: return nil
         }
     }
@@ -73,6 +75,8 @@ enum SessionScreen {
             return WezTermBridge.screen(target, styled: false)
         case .kitty(let target):
             return KittyBridge.screen(target, styled: false)
+        case .herdr(let target):
+            return HerdrBridge.screen(target, styled: false)
         }
     }
 

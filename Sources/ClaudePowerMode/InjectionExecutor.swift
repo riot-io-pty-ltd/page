@@ -13,6 +13,8 @@ enum InjectionMethod: String {
     case wezterm
     /// Typed through kitty's remote control (`kitten @ send-text`), by window id.
     case kitty
+    /// Typed through Herdr's socket API (`pane.send_text` / `pane.send_keys`), by pane id.
+    case herdr
     case headlessResume = "claude_resume_print"
     /// Nothing was typed (refused, or no target found).
     case none
@@ -458,7 +460,7 @@ enum InjectionExecutor {
         }
 
         switch host {
-        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty:
+        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty, .herdr:
             // Suspended with ^Z, or behind another job (a shell, an editor,
             // a second agent): the keys would go to that job instead.
             if ProcessRunner.isForeground(pid: session.pid) != true { return refused(notForegroundMessage) }
@@ -521,7 +523,7 @@ enum InjectionExecutor {
 
         var result: InjectionResult
         switch host {
-        case .tmux(let tmux, let pane, let inMode):
+        case .tmux(let tmux, let pane, let inMode, _):
             result = sendViaTmux(steps, tmuxPath: tmux, paneId: pane, inMode: inMode, awaitClosed: awaitGate, precheck: precheck)
         case .terminalApp(let tty):
             // Terminal's "1" carries a Return. With more tool calls queued,
@@ -542,6 +544,13 @@ enum InjectionExecutor {
         case .kitty(let target):
             result = sendViaControlCLI(steps, method: .kitty, label: target.label, awaitClosed: awaitGate, precheck: precheck) { key in
                 KittyBridge.sendArgs(target: target, key: key).map { KittyBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
+        case .herdr(let target):
+            // Pane ids are reused, so before every key Herdr must still say
+            // this pane holds the same terminal with the session in front.
+            result = sendViaControlCLI(steps, method: .herdr, label: target.label, awaitClosed: awaitGate,
+                                       precheck: { precheck($0) ?? HerdrBridge.recheck(target) }) { key in
+                HerdrBridge.send(target, key: key)
             }
         case .unreachable(let detail):
             return InjectionResult(method: .none, success: false, output: "host unreachable: \(detail)", detail: detail)
@@ -682,7 +691,7 @@ enum InjectionExecutor {
     /// Page reads it itself (cmux reports its own input state instead).
     static func screenReader(for host: TerminalHost) -> (() -> String?)? {
         switch host {
-        case .tmux(let tmux, let pane, _):
+        case .tmux(let tmux, let pane, _, _):
             return {
                 let r = ProcessRunner.run(tmux, ["capture-pane", "-p", "-t", pane], timeout: 3)
                 return r.succeeded ? r.stdout : nil
@@ -698,6 +707,8 @@ enum InjectionExecutor {
             return { WezTermBridge.screen(target, styled: false) }
         case .kitty(let target):
             return { KittyBridge.screen(target, styled: false) }
+        case .herdr(let target):
+            return { HerdrBridge.screen(target, styled: false) }
         case .cmux, .unreachable, .unsupported, .unknown:
             return nil
         }
@@ -713,7 +724,7 @@ enum InjectionExecutor {
     static func draftRefusal(host: TerminalHost, requireEmpty: Bool) -> String? {
         let row: ClaudeInputRow
         switch host {
-        case .tmux(let tmux, let pane, _):
+        case .tmux(let tmux, let pane, _, _):
             let r = ProcessRunner.run(tmux, ["capture-pane", "-p", "-e", "-t", pane], timeout: 3)
             row = r.succeeded ? claudeInputRow(screen: r.stdout, styled: true) : .unknown
         case .wezterm(let target):
@@ -721,6 +732,8 @@ enum InjectionExecutor {
             row = WezTermBridge.screen(target, styled: true).map { claudeInputRow(screen: $0, styled: true) } ?? .unknown
         case .kitty(let target):
             row = KittyBridge.screen(target, styled: true).map { claudeInputRow(screen: $0, styled: true) } ?? .unknown
+        case .herdr(let target):
+            row = HerdrBridge.screen(target, styled: true).map { claudeInputRow(screen: $0, styled: true) } ?? .unknown
         case .terminalApp, .iTerm:
             guard requireEmpty else { return nil }
             row = screenReader(for: host)?().map { claudeInputRow(screen: $0, styled: false) } ?? .unknown
@@ -857,12 +870,16 @@ enum InjectionExecutor {
     // MARK: host resolution
 
     enum TerminalHost: Equatable {
-        case tmux(tmuxPath: String, paneId: String, inMode: Bool)
+        /// `session`: the pane's tmux session name, when known (Claude
+        /// Squad's agents are recognised by it).
+        case tmux(tmuxPath: String, paneId: String, inMode: Bool, session: String? = nil)
         case terminalApp(tty: String)
         case iTerm(tty: String)
         case cmux(CmuxBridge.Target)
         case wezterm(WezTermBridge.Target)
         case kitty(KittyBridge.Target)
+        /// Herdr's pane, checked through its socket API.
+        case herdr(HerdrBridge.Target)
         /// The host app is known and supported, but the session's exact
         /// place in it couldn't be pinned down (phone-safe reason).
         case unreachable(String)
@@ -871,12 +888,13 @@ enum InjectionExecutor {
 
         var label: String {
             switch self {
-            case .tmux(_, let pane, _): return "tmux pane \(pane)"
+            case .tmux(_, let pane, _, _): return "tmux pane \(pane)"
             case .terminalApp(let tty): return "Terminal tab \(tty.replacingOccurrences(of: "/dev/", with: ""))"
             case .iTerm(let tty): return "iTerm2 session \(tty.replacingOccurrences(of: "/dev/", with: ""))"
             case .cmux(let target): return target.label
             case .wezterm(let target): return target.label
             case .kitty(let target): return target.label
+            case .herdr(let target): return target.label
             case .unreachable: return "unknown terminal"
             case .unsupported(let app): return app
             case .unknown: return "unknown terminal"
@@ -888,7 +906,7 @@ enum InjectionExecutor {
         /// can read as Meta-Return — so it can't.
         var canSendLoneEscape: Bool {
             switch self {
-            case .tmux, .iTerm, .cmux, .wezterm, .kitty: return true
+            case .tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr: return true
             case .terminalApp, .unreachable, .unsupported, .unknown: return false
             }
         }
@@ -896,21 +914,41 @@ enum InjectionExecutor {
 
     /// tmux pane with the session's tty first (claude inside tmux inside
     /// Terminal — or inside cmux — has the pane's pty, and typing into the
-    /// outer terminal would go to the tmux client), else the GUI app found
+    /// outer terminal would go to the tmux client), then Herdr (its server
+    /// is often a launchd job with no GUI app above it, and its panes
+    /// inherit the outer terminal's variables), else the GUI app found
     /// among the pid's ancestors.
     static func resolveHost(for session: ClaudeLiveSession, processTable: [ProcessRunner.ProcessInfoRow]) -> TerminalHost {
         guard let tty = session.devTTY else { return .unknown }
         if let tmux = ProcessRunner.findExecutable("tmux") {
-            let r = ProcessRunner.run(tmux, ["list-panes", "-a", "-F", "#{pane_id}\t#{pane_tty}\t#{pane_in_mode}"], timeout: 3)
+            let r = ProcessRunner.run(tmux, ["list-panes", "-a", "-F", tmuxPaneListFormat], timeout: 3)
             if r.succeeded, let pane = tmuxPane(forTTY: tty, listing: r.stdout) {
-                return .tmux(tmuxPath: tmux, paneId: pane.id, inMode: pane.inMode)
+                return .tmux(tmuxPath: tmux, paneId: pane.id, inMode: pane.inMode, session: pane.session)
+            }
+        }
+        // Herdr never falls through to the app around it: only its own
+        // socket can name the pane. (Another multiplexer started inside a
+        // Herdr pane is in front there, so the foreground check refuses.)
+        let herdrEnv = ProcArgs.read(pid: session.pid, envKeys: HerdrBridge.envKeys)?.env ?? [:]
+        switch HerdrBridge.plan(env: herdrEnv, ancestorCommands: ancestorCommands(of: session.pid, processTable: processTable)) {
+        case .notHerdr:
+            break
+        case .refuse(let why):
+            Logger.shared.log("Injection.claude Herdr pane not found: \(why)")
+            return .unreachable(why)
+        case .target(let socketPath, let paneId, let workspaceId):
+            switch HerdrBridge.locate(socketPath: socketPath, paneId: paneId, workspaceId: workspaceId, pid: session.pid) {
+            case .success(let target): return .herdr(target)
+            case .failure(let f):
+                Logger.shared.log("Injection.claude Herdr pane not usable: \(f.output)")
+                return .unreachable(f.detail)
             }
         }
         guard let appCommand = hostAppCommand(forPid: session.pid, processTable: processTable) else { return .unknown }
         // A multiplexer between the session and the GUI app: the agent
         // inherited the outer terminal's pane ids, but keys sent there
         // reach whichever inner pane has focus. Refuse.
-        let env = ProcArgs.read(pid: session.pid, envKeys: ["HERDR_ENV", "ZELLIJ", "STY"])?.env ?? [:]
+        let env = ProcArgs.read(pid: session.pid, envKeys: ["ZELLIJ", "STY"])?.env ?? [:]
         if let mux = nestedMultiplexer(env: env, ancestorCommands: ancestorCommands(of: session.pid, processTable: processTable)) {
             return .unsupported(mux)
         }
@@ -945,16 +983,15 @@ enum InjectionExecutor {
         }
     }
 
-    /// Pure. The multiplexer (other than tmux, matched by tty earlier) the
-    /// session runs inside, from its environment or its ancestors.
+    /// Pure. The multiplexer Page can't type into (zellij, screen; tmux is
+    /// matched by tty and Herdr by its socket, both earlier) the session
+    /// runs inside, from its environment or its ancestors.
     static func nestedMultiplexer(env: [String: String], ancestorCommands: [String]) -> String? {
-        if env["HERDR_ENV"] != nil { return "Herdr" }
         if env["ZELLIJ"] != nil { return "zellij" }
         if env["STY"] != nil { return "screen" }
         for command in ancestorCommands {
             let exe = (command.split(separator: " ").first.map(String.init) ?? command as String)
             switch (exe as NSString).lastPathComponent.lowercased() {
-            case "herdr": return "Herdr"
             case "zellij": return "zellij"
             case "screen": return "screen"
             default: continue
@@ -984,13 +1021,18 @@ enum InjectionExecutor {
         return String(command[..<r.lowerBound]) + ".app"
     }
 
-    /// Parses `list-panes -F "#{pane_id}\t#{pane_tty}\t#{pane_in_mode}"`.
-    static func tmuxPane(forTTY tty: String, listing: String) -> (id: String, inMode: Bool)? {
+    /// The `list-panes -F` format `tmuxPane(forTTY:listing:)` parses.
+    static let tmuxPaneListFormat = "#{pane_id}\t#{pane_tty}\t#{pane_in_mode}\t#{session_name}"
+
+    /// Pure. Parses `list-panes -F tmuxPaneListFormat`. The session name is
+    /// the fourth column; a listing without it (three columns) still parses.
+    static func tmuxPane(forTTY tty: String, listing: String) -> (id: String, inMode: Bool, session: String?)? {
         for line in listing.split(separator: "\n") {
             let cols = line.split(separator: "\t", omittingEmptySubsequences: false)
             guard cols.count >= 2, cols[1] == tty, cols[0].hasPrefix("%") else { continue }
             let inMode = cols.count >= 3 && (Int(cols[2]) ?? 0) > 0
-            return (String(cols[0]), inMode)
+            let session = cols.count >= 4 ? cols.dropFirst(3).joined(separator: "\t") : ""
+            return (String(cols[0]), inMode, session.isEmpty ? nil : session)
         }
         return nil
     }
@@ -1109,7 +1151,7 @@ enum InjectionExecutor {
     }
 
     /// One keystroke at a time through a terminal's own control CLI
-    /// (WezTerm, kitty), with the same rules as tmux: `precheck` before
+    /// (WezTerm, kitty, Herdr), with the same rules as tmux: `precheck` before
     /// every key, `.awaitPromptClosed` honoured, a partial send reported.
     static func sendViaControlCLI(_ steps: [Keystroke], method: InjectionMethod, label: String,
                                   awaitClosed: () -> Bool, precheck: (Keystroke) -> String? = { _ in nil },
@@ -1572,7 +1614,7 @@ enum InjectionExecutor {
     /// Esc would go to the shell.
     static func sendInterrupt(host: TerminalHost) -> InjectionResult {
         switch host {
-        case .tmux(let tmux, let pane, let inMode):
+        case .tmux(let tmux, let pane, let inMode, _):
             return sendViaTmux([.escape], tmuxPath: tmux, paneId: pane, inMode: inMode, awaitClosed: { true })
         case .iTerm(let tty):
             return sendViaITerm([.escape], tty: tty, awaitClosed: { true })
@@ -1583,6 +1625,11 @@ enum InjectionExecutor {
         case .kitty(let target):
             return sendViaControlCLI([.escape], method: .kitty, label: target.label, awaitClosed: { true }) { key in
                 KittyBridge.sendArgs(target: target, key: key).map { KittyBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
+        case .herdr(let target):
+            return sendViaControlCLI([.escape], method: .herdr, label: target.label, awaitClosed: { true },
+                                     precheck: { _ in HerdrBridge.recheck(target) }) { key in
+                HerdrBridge.send(target, key: key)
             }
         case .cmux(let target):
             let client: CmuxBridge.Client

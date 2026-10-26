@@ -10,8 +10,8 @@ protocol SessionsUpdateSink: AnyObject {
 
 /// Where a session runs, as the phone's list shows it.
 struct SessionHostInfo: Equatable {
-    /// Wire value: "cmux" | "tmux" | "Terminal" | "iTerm" | "Ghostty" |
-    /// "VS Code" | "desktop" | "unknown".
+    /// Wire value: "cmux" | "tmux" | "Claude Squad" | "Terminal" | "iTerm" |
+    /// "Ghostty" | "VS Code" | "desktop" | "unknown".
     var host: String
     var canType: Bool
     /// Why not, when `canType` is false (shown instead of the composer).
@@ -1174,7 +1174,9 @@ final class LiveSessionBackends: SessionRemoteBackends {
     static func claudeHost(candidates: [ClaudeLiveSession], table: [ProcessRunner.ProcessInfoRow],
                            resolveHost: (ClaudeLiveSession, [ProcessRunner.ProcessInfoRow]) -> InjectionExecutor.TerminalHost
                                = { InjectionExecutor.resolveHost(for: $0, processTable: $1) },
-                           cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil }) -> SessionHostInfo {
+                           cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil },
+                           squadPaused: (ClaudeLiveSession, InjectionExecutor.TerminalHost) -> Bool
+                               = { ClaudeSquad.isPausedLive(session: $0, host: $1) }) -> SessionHostInfo {
         guard !candidates.isEmpty else { return .blocked("unknown", "Page can't tell which Claude session this is") }
         switch InjectionExecutor.pickSession(candidates, pagePid: nil, pageStateStart: nil) {
         case .failure(let f):
@@ -1182,15 +1184,25 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .success(let s):
             // No terminal: a headless run (claude -p, an SDK script).
             guard s.tty != nil else { return .blocked("background", "A background run with no terminal — nothing to type into", provider: s.provider) }
-            return claudeHostInfo(resolveHost(s, table), provider: s.provider, cmuxBlocker: cmuxBlocker)
+            let host = resolveHost(s, table)
+            return claudeHostInfo(host, provider: s.provider, cmuxBlocker: cmuxBlocker, squadPaused: squadPaused(s, host))
         }
     }
 
     /// `cmuxBlocker`: why Page can't reach that cmux (nil: it can).
+    /// `squadPaused`: the session is a paused Claude Squad instance.
     static func claudeHostInfo(_ host: InjectionExecutor.TerminalHost, provider: ModelProvider,
-                               cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil }) -> SessionHostInfo {
+                               cmuxBlocker: (CmuxBridge.Target) -> String? = { _ in nil },
+                               squadPaused: Bool = false) -> SessionHostInfo {
         switch host {
-        case .tmux: return SessionHostInfo(host: "tmux", canType: true, canInterrupt: true, provider: provider)
+        case .tmux(_, _, _, let session):
+            // A Claude Squad agent is a tmux pane like any other; the phone
+            // just names it.
+            guard let session, ClaudeSquad.isSquadSession(session) else {
+                return SessionHostInfo(host: "tmux", canType: true, canInterrupt: true, provider: provider)
+            }
+            if squadPaused { return .blocked(ClaudeSquad.hostName, ClaudeSquad.pausedMessage, provider: provider) }
+            return SessionHostInfo(host: ClaudeSquad.hostName, canType: true, canInterrupt: true, provider: provider)
         case .terminalApp: return SessionHostInfo(host: "Terminal", canType: true, canInterrupt: false, provider: provider)
         case .iTerm: return SessionHostInfo(host: "iTerm", canType: true, canInterrupt: true, provider: provider)
         case .cmux(let target):
@@ -1198,10 +1210,11 @@ final class LiveSessionBackends: SessionRemoteBackends {
             return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
         case .wezterm: return SessionHostInfo(host: "WezTerm", canType: true, canInterrupt: true, provider: provider)
         case .kitty: return SessionHostInfo(host: "kitty", canType: true, canInterrupt: true, provider: provider)
+        case .herdr: return SessionHostInfo(host: "Herdr", canType: true, canInterrupt: true, provider: provider)
         case .unreachable(let why):
             // The host app is known but the exact pane isn't: name the app
-            // the reason mentions (cmux unless it's WezTerm or kitty).
-            let app = why.contains("kitty") ? "kitty" : why.contains("WezTerm") ? "WezTerm" : "cmux"
+            // the reason mentions (cmux unless it's WezTerm, kitty or Herdr).
+            let app = why.contains("kitty") ? "kitty" : why.contains("WezTerm") ? "WezTerm" : why.contains("Herdr") ? "Herdr" : "cmux"
             return .blocked(app, why, provider: provider)
         case .unsupported(let app): return .blocked(wireHost(app: app), "Page can't type into \(app) yet", provider: provider)
         case .unknown: return .blocked("unknown", "Couldn't find the session's terminal", provider: provider)

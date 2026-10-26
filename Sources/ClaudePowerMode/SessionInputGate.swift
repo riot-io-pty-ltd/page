@@ -110,7 +110,8 @@ enum SessionInputGate {
     /// Pure. `status` is the fresh sessions-file status (nil: unreadable);
     /// `interventionId` the session's open page, for a `waiting` refusal.
     static func claudePlan(target: ClaudeTargetState, status: ClaudeSessionStatus?, hasSessionFile: Bool,
-                           host: InjectionExecutor.TerminalHost?, text: String, interventionId: String?) -> ClaudeStep {
+                           host: InjectionExecutor.TerminalHost?, text: String, interventionId: String?,
+                           squadPaused: Bool = false) -> ClaudeStep {
         switch target {
         case .ended: return .refuse(.refused(.ended, endedMessage))
         case .failed(let why): return .refuse(.refused(.notTypable, why))
@@ -123,7 +124,7 @@ enum SessionInputGate {
             return .refuse(.refused(.waiting, waitingMessage, interventionId: interventionId))
         }
         switch host {
-        case .tmux?, .terminalApp?, .iTerm?, .cmux?, .wezterm?, .kitty?:
+        case .tmux?, .terminalApp?, .iTerm?, .cmux?, .wezterm?, .kitty?, .herdr?:
             break
         case .unsupported(let app)?:
             return .refuse(.refused(.notTypable, "Page can't type into \(app) yet"))
@@ -132,6 +133,7 @@ enum SessionInputGate {
         case .unknown?, nil:
             return .refuse(.refused(.notTypable, "Couldn't find the session's terminal"))
         }
+        if squadPaused { return .refuse(.refused(.notTypable, ClaudeSquad.pausedMessage)) }
         if status == .busy && startsWithDigit(text) {
             return .refuse(.refused(.digitWhileBusy, digitWhileBusyMessage))
         }
@@ -182,6 +184,8 @@ enum SessionInputGate {
         var deliver: (InjectionExecutor.ClaudeReplyRequest, ClaudeLiveSession, [ProcessRunner.ProcessInfoRow]) -> InjectionResult
         var isForeground: (Int32) -> Bool?
         var sendInterrupt: (InjectionExecutor.TerminalHost) -> InjectionResult
+        /// Whether the session is a paused Claude Squad instance (read fresh).
+        var squadPaused: (ClaudeLiveSession, InjectionExecutor.TerminalHost) -> Bool = { _, _ in false }
     }
 
     /// Fresh lookup → gate → `deliverToLiveSession`. Blocking.
@@ -208,8 +212,9 @@ enum SessionInputGate {
             guard state == .live, s.hasSessionFile, let status, status != .unknown, status != .waiting else { return nil }
             return io.resolveHost(s, table)
         }
+        let paused = session.flatMap { s in host.map { io.squadPaused(s, $0) } } ?? false
         let step = claudePlan(target: state, status: status, hasSessionFile: session?.hasSessionFile ?? false,
-                              host: host, text: text, interventionId: interventionId)
+                              host: host, text: text, interventionId: interventionId, squadPaused: paused)
         switch step {
         case .refuse(let r):
             return r
@@ -246,6 +251,7 @@ enum SessionInputGate {
             return .refused(.notTypable, InjectionExecutor.notForegroundMessage)
         }
         let host = io.resolveHost(session, table)
+        if io.squadPaused(session, host) { return .refused(.interruptUnsupported, ClaudeSquad.pausedMessage) }
         guard host.canSendLoneEscape else {
             return .refused(.interruptUnsupported, "Page can't press Esc in \(host.label)")
         }

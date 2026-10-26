@@ -200,8 +200,12 @@ final class ClaudeBackend: AgentBackend {
             if let url = registry.transcriptURL(forSessionId: s.sessionId, cwdHint: s.cwd) { transcripts[s.sessionId] = url }
         }
         let secondsSince = ActivityMonitor.secondsSinceLastWrite(of: Array(transcripts.values), now: now)
+        // Claude Squad: a paused instance's agent is still running, but in a
+        // deleted worktree, so it neither keeps the Mac awake nor gets paged.
+        let squad = ClaudeSquad.liveStandings(sessions: sessions, table: table)
+        let attended = Self.attendedSessions(sessions: sessions, standings: squad)
         let claudeActive = Self.isActive(
-            sessions: sessions,
+            sessions: attended,
             unidentifiedInteractive: unidentifiedInteractive,
             claudeRunning: claudeRunning,
             secondsSinceTranscript: secondsSince,
@@ -226,14 +230,15 @@ final class ClaudeBackend: AgentBackend {
             let settings = DetectorSettings(idleDelay: max(0, cfg.idlePageDelaySeconds))
             interventionDetector.turnHeadline = cfg.turnSummaryEnabled ? { TurnSummary.headline(transcript: $0, cwd: $1) } : nil
             let result = interventionDetector.scan(
-                sessions: sessions,
+                sessions: attended,
                 transcriptFor: { transcripts[$0.sessionId] },
                 settings: settings,
                 sourceFor: { InjectionExecutor.sessionSource(pid: $0.pid, processTable: table) },
+                autoApproves: { squad[$0.pid]?.autoApproves ?? false },
                 now: now
             )
             opened = result.opened
-            let livePids = Set(sessions.map(\.pid))
+            let livePids = Set(attended.map(\.pid))
             for e in result.resolved {
                 closePage(e.id, reason: (e.pid.map(livePids.contains) ?? false) ? "user_resolved_in_terminal" : "session_resolved")
             }
@@ -241,7 +246,7 @@ final class ClaudeBackend: AgentBackend {
             for e in interventionDetector.reset() { closePage(e.id, reason: "session_resolved") }
         }
         let pending = cfg.interventionDetectionEnabled ? Array(interventionDetector.currentlyPending.values) : []
-        opened += refreshStuckPages(sessions: sessions, transcripts: transcripts, pending: pending, now: now, cfg: cfg)
+        opened += refreshStuckPages(sessions: attended, transcripts: transcripts, pending: pending, now: now, cfg: cfg)
         let callback = onNewIntervention
         for e in opened { callback?(e) }
 
@@ -291,6 +296,13 @@ final class ClaudeBackend: AgentBackend {
     }
 
     // MARK: decision helpers (pure, unit-tested)
+
+    /// Pure. The sessions this tick looks after: everything except paused
+    /// Claude Squad instances (agent running in a deleted worktree), which
+    /// neither keep the Mac awake nor get paged. `standings`: by pid.
+    static func attendedSessions(sessions: [ClaudeLiveSession], standings: [Int32: ClaudeSquad.Standing]) -> [ClaudeLiveSession] {
+        sessions.filter { standings[$0.pid]?.paused != true }
+    }
 
     /// Whether Claude is doing work right now. Sessions with a status are
     /// exact (`busy`); status-less ones (older Claude Code) fall back to
@@ -823,7 +835,8 @@ final class ClaudeBackend: AgentBackend {
             resolveHost: { InjectionExecutor.resolveHost(for: $0, processTable: $1) },
             deliver: { InjectionExecutor.deliverToLiveSession($0, session: $1, processTable: $2, registry: registry) },
             isForeground: { ProcessRunner.isForeground(pid: $0) },
-            sendInterrupt: { InjectionExecutor.sendInterrupt(host: $0) }
+            sendInterrupt: { InjectionExecutor.sendInterrupt(host: $0) },
+            squadPaused: { ClaudeSquad.isPausedLive(session: $0, host: $1) }
         )
     }
 
@@ -1037,7 +1050,7 @@ extension ClaudeBackend: BatteryPausable {
         case .unsupported(let app): return .skip("Page can't type into \(app)")
         case .unreachable(let detail): return .skip(detail)
         case .unknown: return .skip("terminal not found")
-        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty: break
+        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty, .herdr: break
         }
         if isLocal {
             if mode == .afterTurn { return .skip("local model — Page doesn't queue a summary request on battery") }

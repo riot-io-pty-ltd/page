@@ -259,6 +259,9 @@ final class InterventionDetector {
     /// pids whose idle page was held back last scan because the session
     /// doesn't own its terminal (log once, not every tick).
     private var notForegroundPids = Set<Int32>()
+    /// Ids of approvals not paged because Claude Squad approves them (log
+    /// once per prompt, not every tick).
+    private var autoApprovedIds = Set<String>()
 
     struct ScanResult {
         var opened: [InterventionEvent] = []
@@ -286,6 +289,7 @@ final class InterventionDetector {
         promptStarts.removeAll()
         heldBackIds.removeAll()
         notForegroundPids.removeAll()
+        autoApprovedIds.removeAll()
         scanLock.unlock()
         lock.lock()
         defer { lock.unlock() }
@@ -301,6 +305,7 @@ final class InterventionDetector {
               transcriptFor: (ClaudeLiveSession) -> URL?,
               settings: DetectorSettings,
               sourceFor: (ClaudeLiveSession) -> AgentSessionSource = { _ in .terminal },
+              autoApproves: (ClaudeLiveSession) -> Bool = { _ in false },
               now: Date = Date()) -> ScanResult {
         scanLock.lock()
         defer { scanLock.unlock() }
@@ -318,6 +323,7 @@ final class InterventionDetector {
         }
         var heldBack = Set<String>()
         var notForeground = Set<Int32>()
+        var autoApproved = Set<String>()
 
         for session in sessions {
             livePids.insert(session.pid)
@@ -373,8 +379,21 @@ final class InterventionDetector {
                     if !notForegroundPids.contains(session.pid) {
                         Logger.shared.log("Idle page held back: session \(session.sessionId.prefix(8)) (pid \(session.pid)) is stopped or in the background")
                     }
+                } else if Self.isAutoApproved(kind: p.kind, subtype: p.subtype, sessionAutoApproves: autoApproves(session),
+                                              waitingFor: now.timeIntervalSince(start)) {
+                    // Claude Squad presses Enter on this prompt itself; a
+                    // page would only invite a second answer. Only for a
+                    // grace window: if it hasn't answered by then (its prompt
+                    // matching broke), the prompt is paged like any other.
+                    autoApproved.insert(event.id)
+                    if !autoApprovedIds.contains(event.id) {
+                        Logger.shared.log("Approval page skipped: Claude Squad auto-approves session \(session.sessionId.prefix(8)) (pid \(session.pid))")
+                    }
                 } else if Self.mayOpen(kind: p.kind, status: session.status,
                                        stateStart: p.stateStart, now: now, settings: settings) {
+                    if p.kind == .permission, p.subtype == nil, autoApproves(session) {
+                        Logger.shared.log("Claude Squad didn't answer the approval for session \(session.sessionId.prefix(8)) (pid \(session.pid)); paging")
+                    }
                     var event = event
                     event.source = sourceFor(session)
                     if event.kind == .idle, event.subtype == nil, let headline = turnHeadline?(url, session.cwd ?? tail?.cwd) {
@@ -387,6 +406,7 @@ final class InterventionDetector {
 
         heldBackIds = heldBack
         notForegroundPids = notForeground
+        autoApprovedIds = autoApproved
         for path in tailCache.keys where !seenPaths.contains(path) { tailCache.removeValue(forKey: path) }
         for pid in promptStarts.keys where !livePids.contains(pid) { promptStarts.removeValue(forKey: pid) }
 
@@ -463,6 +483,20 @@ final class InterventionDetector {
             return .open(.init(kind: .idle, subtype: nil, context: idleContext(tail),
                                stateStart: start, promptKey: nil))
         }
+    }
+
+    /// How long Claude Squad gets to answer an approval before Page pages
+    /// it anyway (several of its poll intervals).
+    static let autoApproveGrace: TimeInterval = 15
+
+    /// Pure. An ordinary approval prompt in a session something else
+    /// answers (Claude Squad's auto-yes) doesn't page, for `grace` seconds
+    /// from when it began waiting (`waitingFor`). After that it pages: the
+    /// answer isn't coming. Plan approvals (ExitPlanMode) and questions
+    /// always page: an Enter isn't an answer.
+    static func isAutoApproved(kind: InterventionKind, subtype: String?, sessionAutoApproves: Bool,
+                               waitingFor: TimeInterval, grace: TimeInterval = autoApproveGrace) -> Bool {
+        sessionAutoApproves && kind == .permission && subtype == nil && waitingFor < grace
     }
 
     /// Whether a page that isn't open yet may open. Approvals for a session

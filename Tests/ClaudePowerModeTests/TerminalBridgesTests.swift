@@ -65,7 +65,7 @@ final class TerminalBridgesTests: XCTestCase {
     }
 
     func testNestedMultiplexerIsRefused() {
-        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["HERDR_ENV": "1"], ancestorCommands: []), "Herdr")
+        XCTAssertNil(InjectionExecutor.nestedMultiplexer(env: ["HERDR_ENV": "1"], ancestorCommands: []), "Herdr is typed into through its socket, not refused here")
         XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["ZELLIJ": "0"], ancestorCommands: []), "zellij")
         XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["STY": "123.x"], ancestorCommands: []), "screen")
         let table = [ProcessRunner.ProcessInfoRow(pid: 610, ppid: 600, tty: "", command: "claude"),
@@ -74,7 +74,8 @@ final class TerminalBridgesTests: XCTestCase {
                      ProcessRunner.ProcessInfoRow(pid: 400, ppid: 1, tty: "", command: "/Applications/cmux.app/Contents/MacOS/cmux")]
         let ancestors = InjectionExecutor.ancestorCommands(of: 610, processTable: table)
         XCTAssertEqual(ancestors.count, 3)
-        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: [:], ancestorCommands: ancestors), "Herdr", "herdr server under cmux, env scrubbed")
+        XCTAssertNil(InjectionExecutor.nestedMultiplexer(env: [:], ancestorCommands: ancestors))
+        XCTAssertTrue(HerdrBridge.isHerdr(env: [:], ancestorCommands: ancestors), "herdr server under cmux, env scrubbed")
         XCTAssertNil(InjectionExecutor.nestedMultiplexer(env: [:], ancestorCommands: ["-zsh", "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui"]))
     }
 
