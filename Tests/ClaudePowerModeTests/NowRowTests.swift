@@ -8,17 +8,28 @@ final class NowRowTests: XCTestCase {
     private let now = NightWatchFixtures.boardNow()
 
     private func ev(_ id: String, kind: InterventionKind = .permission, context: String, subtype: String? = nil,
-                    backend: AgentBackendID = .claude, openedAgo: TimeInterval = 60) -> InterventionEvent {
+                    backend: AgentBackendID = .claude, openedAgo: TimeInterval = 60,
+                    reversibility: Reversibility.Verdict? = nil) -> InterventionEvent {
         InterventionEvent(id: id, sessionId: "sess-x", cwd: "/Users/roy/projects/x", projectName: "x", kind: kind,
                           openedAt: now.addingTimeInterval(-openedAgo), context: context, transcriptPath: "",
-                          backend: backend, source: .terminal, subtype: subtype)
+                          backend: backend, source: .terminal, subtype: subtype, reversibility: reversibility)
+    }
+
+    /// What the detector stores for a Bash call: the verdict of the structured
+    /// command, with the description kept out of it (the display context is
+    /// "[Bash] <command>\n<description>").
+    private func bash(_ command: String, _ description: String) -> Reversibility.Verdict {
+        Reversibility.classify(toolName: "Bash", input: ["command": command, "description": description],
+                               cwd: "/Users/roy/projects/x")
     }
 
     private func row(_ e: InterventionEvent, blocker: String? = nil) -> DecideRow {
         NowModel.row(for: e, macName: "Studio MBP", route: "cmux › x", blocker: blocker)!
     }
 
-    private var undoable: InterventionEvent { ev("u-1", context: "[Bash] swift test\nRun the tests") }
+    private var undoable: InterventionEvent {
+        ev("u-1", context: "[Bash] swift test\nRun the tests", reversibility: bash("swift test", "Run the tests"))
+    }
     private var irreversible: InterventionEvent { ev("i-1", context: "[Bash] rm -rf Builds/Dev/*.app\nDelete the dev builds") }
     private var considered: InterventionEvent { ev("c-1", context: "[Edit] Sources/Foo.swift\n- a\n+ b") }
     private var question: InterventionEvent { ev("q-1", kind: .question, context: "Which file should I change?") }
@@ -159,7 +170,7 @@ final class NowRowTests: XCTestCase {
         let b = ev("b-irr", context: "[Bash] rm -rf x\nDelete", openedAgo: 10)
         let c = ev("c-cons", context: "[Edit] Sources/Foo.swift\n- a\n+ b", openedAgo: 300)
         let q = ev("q-question", kind: .question, context: "Which?", openedAgo: 200)
-        let a = ev("a-undo", context: "[Bash] swift test\nRun", openedAgo: 100)
+        let a = ev("a-undo", context: "[Bash] swift test\nRun", openedAgo: 100, reversibility: bash("swift test", "Run"))
         let l = ev("l-look", kind: .idle, context: "No progress for 15 min — it may be hung.", subtype: "stuck", openedAgo: 900)
         let r = ev("r-review", kind: .idle, context: "Done", openedAgo: 1000)
         let rows = [r, l, a, q, c, b].compactMap { NowModel.row(for: $0, macName: "Mac", route: nil) }
@@ -167,9 +178,9 @@ final class NowRowTests: XCTestCase {
     }
 
     func testRankingTiesGoToTheLongestWaitThenTheId() {
-        let x = ev("zz", context: "[Bash] swift test\nRun", openedAgo: 50)
-        let y = ev("aa", context: "[Bash] swift test\nRun", openedAgo: 50)
-        let z = ev("mm", context: "[Bash] swift test\nRun", openedAgo: 500)
+        let x = ev("zz", context: "[Bash] swift test\nRun", openedAgo: 50, reversibility: bash("swift test", "Run"))
+        let y = ev("aa", context: "[Bash] swift test\nRun", openedAgo: 50, reversibility: bash("swift test", "Run"))
+        let z = ev("mm", context: "[Bash] swift test\nRun", openedAgo: 500, reversibility: bash("swift test", "Run"))
         let rows = [x, y, z].compactMap { NowModel.row(for: $0, macName: "Mac", route: nil) }
         XCTAssertEqual(NowModel.ranked(rows).map(\.id), ["mm", "aa", "zz"])
     }

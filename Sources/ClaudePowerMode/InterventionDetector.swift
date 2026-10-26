@@ -33,6 +33,13 @@ struct InterventionEvent: Equatable, Hashable, Codable {
     var stateStartedAt: Date?
     /// tool_use id of the prompt on screen when the page opened, if known.
     var promptKey: String?
+    /// How hard the pending tool call is to take back, classified at
+    /// detection time from the structured call (tool name and full input,
+    /// before the display text was redacted and clipped). Mac-local: never on
+    /// the wire. nil when it wasn't classified from a tool call (older
+    /// persisted events, hook or Codex pages); readers then fall back to
+    /// `Reversibility.classify(context:cwd:)`, which is conservative.
+    var reversibility: Reversibility.Verdict?
 }
 
 // MARK: - Secret redaction
@@ -105,6 +112,10 @@ struct PendingToolUse: Equatable {
     let name: String
     /// Human-readable description for the phone (command, path, question…).
     let summary: String
+    /// The input fields the reversibility check reads (`Reversibility
+    /// .classifierFields`): the full, unredacted command or path, kept apart
+    /// from `summary`, which is redacted and clipped. nil when not known.
+    var fields: [String: String]? = nil
 }
 
 /// What the end of a transcript says about the conversation.
@@ -519,6 +530,27 @@ final class InterventionDetector {
 
     static let contextLimit = 1500
 
+    /// Pure. How hard the pending tool calls are to take back, from their
+    /// structured input (never the display text); the worst of them when
+    /// several wait at once. `possibly` is a status-less guess that a prompt
+    /// is showing at all, so it is never better than Considered. nil when
+    /// there is no call, or one without its input.
+    static func reversibility(of tools: [PendingToolUse], cwd: String, possibly: Bool = false) -> Reversibility.Verdict? {
+        guard !tools.isEmpty else { return nil }
+        var calls: [(name: String, input: [String: Any])] = []
+        for t in tools {
+            guard let fields = t.fields else { return nil }
+            calls.append((t.name, fields))
+        }
+        guard var v = Reversibility.classify(calls: calls, cwd: cwd.isEmpty ? nil : cwd) else { return nil }
+        if possibly, v.level < .considered {
+            v = Reversibility.Verdict(level: .considered, tags: v.tags, reason: "may not be waiting for approval")
+        }
+        // The reason can quote the command; it is shown, so it is redacted.
+        v.reason = ContextRedactor.redact(v.reason)
+        return v
+    }
+
     /// With several tool calls in flight (parallel calls), some may already
     /// be running auto-approved, so we can't know which one the menu is
     /// for: list them all rather than present one as "the" prompt.
@@ -579,7 +611,8 @@ final class InterventionDetector {
                         let input = item["input"] as? [String: Any] ?? [:]
                         if pendingById[id] == nil { pendingOrder.append(id) }
                         pendingById[id] = PendingToolUse(id: id, name: name,
-                                                         summary: describeToolUse(name: name, input: input))
+                                                         summary: describeToolUse(name: name, input: input),
+                                                         fields: Reversibility.classifierFields(toolName: name, input: input))
                         // Text before a tool call is narration, not the answer.
                         textsSinceLastTool.removeAll()
                     default:
@@ -765,7 +798,11 @@ final class InterventionDetector {
             subtype: p.subtype,
             pid: session.pid,
             stateStartedAt: p.stateStart,
-            promptKey: p.promptKey
+            promptKey: p.promptKey,
+            // Only an approval raised for a tool call (it has a prompt key) is classified.
+            reversibility: (p.kind == .permission || p.kind == .plan) && p.promptKey != nil
+                ? Self.reversibility(of: tail?.pendingToolUses ?? [], cwd: cwd, possibly: session.status == .unknown)
+                : nil
         )
     }
 

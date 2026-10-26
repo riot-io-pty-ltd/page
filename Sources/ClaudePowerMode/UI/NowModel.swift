@@ -637,7 +637,9 @@ struct NowModel: Equatable {
                 tellPreview = nil
                 approve = "Answer in the terminal · Page can't approve \(AppDelegate.agentName(ev.backend)) prompts"
             } else {
-                let v = Reversibility.classify(context: ev.context, cwd: ev.cwd)
+                // The verdict from the structured call when the page has one; else the
+                // conservative read of its display text.
+                let v = ev.reversibility ?? Reversibility.classify(context: ev.context, cwd: ev.cwd)
                 verdict = v
                 chip = ChipKind(v.level)
                 approve = preview("Will type 1")

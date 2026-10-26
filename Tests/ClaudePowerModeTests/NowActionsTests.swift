@@ -8,10 +8,19 @@ final class NowActionsTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_761_300_000)
 
     private func ev(_ id: String, kind: InterventionKind = .permission, context: String, subtype: String? = nil,
-                    backend: AgentBackendID = .claude, openedAgo: TimeInterval = 60) -> InterventionEvent {
+                    backend: AgentBackendID = .claude, openedAgo: TimeInterval = 60,
+                    reversibility: Reversibility.Verdict? = nil) -> InterventionEvent {
         InterventionEvent(id: id, sessionId: "sess-x", cwd: "/Users/roy/projects/x", projectName: "x", kind: kind,
                           openedAt: now.addingTimeInterval(-openedAgo), context: context, transcriptPath: "",
-                          backend: backend, source: .terminal, subtype: subtype)
+                          backend: backend, source: .terminal, subtype: subtype, reversibility: reversibility)
+    }
+
+    /// What the detector stores for a Bash call: the verdict of the structured
+    /// command, with the description kept out of it (the display context is
+    /// "[Bash] <command>\n<description>").
+    private func bash(_ command: String, _ description: String) -> Reversibility.Verdict {
+        Reversibility.classify(toolName: "Bash", input: ["command": command, "description": description],
+                               cwd: "/Users/roy/projects/x")
     }
 
     private func row(_ e: InterventionEvent) -> DecideRow {
@@ -22,7 +31,7 @@ final class NowActionsTests: XCTestCase {
     private var rows: [DecideRow] {
         [
             row(ev("i-1", context: "[Bash] rm -rf Builds/Dev/*.app\nDelete the dev builds")),
-            row(ev("u-1", context: "[Bash] swift test\nRun the tests")),
+            row(ev("u-1", context: "[Bash] swift test\nRun the tests", reversibility: bash("swift test", "Run the tests"))),
             row(ev("c-1", context: "[Edit] Sources/Foo.swift\n- a\n+ b")),
             row(ev("q-1", kind: .question, context: "Which file?")),
             row(ev("l-1", kind: .idle, context: "Looks stuck in a loop: this has failed 6 times.\ncargo test", subtype: "looping")),

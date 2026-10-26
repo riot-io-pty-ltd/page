@@ -26,7 +26,17 @@ enum NightWatchFixtures {
             id: "sess-\(project)-\(subtype ?? kind.rawValue)-\(Int(openedAt.timeIntervalSince1970))",
             sessionId: "sess-\(project)", cwd: "/Users/roy/projects/\(project)", projectName: project,
             kind: kind, openedAt: openedAt, context: context, transcriptPath: "", backend: backend,
-            source: .terminal, subtype: subtype)
+            source: .terminal, subtype: subtype,
+            reversibility: storedVerdict(kind: kind, backend: backend, context: context))
+    }
+
+    /// What the detector would have stored for a Bash approval: the display
+    /// text is "[Bash] <command>\n<description>", and only the command is
+    /// classified. Other pages carry none and read as their text.
+    private static func storedVerdict(kind: InterventionKind, backend: AgentBackendID, context: String) -> Reversibility.Verdict? {
+        guard kind == .permission, backend == .claude, context.hasPrefix("[Bash] ") else { return nil }
+        let command = context.dropFirst("[Bash] ".count).components(separatedBy: "\n")[0]
+        return Reversibility.classify(toolName: "Bash", input: ["command": command], cwd: nil)
     }
 
     static func snapshot(

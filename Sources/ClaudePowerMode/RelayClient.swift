@@ -642,6 +642,13 @@ final class RelayClient: NSObject, RelaySink, SessionsUpdateSink, URLSessionWebS
     // MARK: outbound
 
     func sendInterventionOpened(_ event: InterventionEvent) {
+        send(type: "intervention.opened", key: event.id, payload: Self.interventionOpenedPayload(event))
+    }
+
+    /// The `intervention.opened` payload, built field by field: Mac-local
+    /// fields of the event (pid, prompt key, reversibility verdict, ...) are
+    /// not on the wire.
+    static func interventionOpenedPayload(_ event: InterventionEvent) -> [String: Any] {
         // Wire-level kind/subtype mapping. iOS canonicalises `permission` →
         // `approval`, but loses the plan-mode distinction unless we send it
         // as a subtype. Translate here so callers don't need to know.
@@ -666,7 +673,7 @@ final class RelayClient: NSObject, RelaySink, SessionsUpdateSink, URLSessionWebS
             "source": event.source.rawValue
         ]
         if let subtype = wireSubtype { payload["subtype"] = subtype }
-        send(type: "intervention.opened", key: event.id, payload: payload)
+        return payload
     }
 
     /// The context as sent: secrets redacted (every backend's text passes
