@@ -123,7 +123,7 @@ enum SessionInputGate {
             return .refuse(.refused(.waiting, waitingMessage, interventionId: interventionId))
         }
         switch host {
-        case .tmux?, .terminalApp?, .iTerm?, .cmux?:
+        case .tmux?, .terminalApp?, .iTerm?, .cmux?, .wezterm?, .kitty?:
             break
         case .unsupported(let app)?:
             return .refuse(.refused(.notTypable, "Page can't type into \(app) yet"))

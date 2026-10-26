@@ -201,8 +201,10 @@ Page delivers a reply only into the exact terminal that owns the session (see
 | **tmux** (in any terminal app) | ✓ Approve "1", Deny Esc, text with bracketed paste | ✓ Text after the turn ends | Refuses if the pane shows a half-typed draft |
 | **Terminal.app** | ✓ via AppleScript, matched by tty | ✓ Text after the turn ends; Return goes through System Events | Claude: Terminal can't send a lone Esc, so Deny types the menu's own "N. No" digit (read from the screen) and questions can't be cancelled. Approve is refused when several tool calls are pending. Codex needs Accessibility permission |
 | **iTerm2** | ✓ via AppleScript `write text`, matched by tty | ✗ | Multi-line text is joined into one line |
-| **cmux** | ✓ via cmux's own CLI: approvals through cmux's Feed while its hook holds the request, keys only into an open dialog, text only into an empty prompt | ✓ Text into an empty composer | Needs cmux in **Password mode**; see [cmux setup](#5-cmux-setup-optional) |
-| Anything else (Ghostty, VS Code's terminal, Warp, …) | ✗ "Page can't type into <App> yet — use tmux or Terminal.app" | ✗ | Run the agent inside tmux, or use the hooks |
+| **cmux** | ✓ via cmux's own CLI: approvals through cmux's Feed while its hook holds the request, keys only into an open dialog, text only into an empty prompt | ✓ Text into an empty composer | Needs cmux in **Automation mode** (one click in Page's cmux setup) or Password mode; see [cmux setup](#5-cmux-setup-optional) |
+| **WezTerm** | ✓ via `wezterm cli send-text`, by pane id (the session's `WEZTERM_PANE`, checked against its tty) | ✗ | Screen read with colours (`get-text --escapes`) to tell a draft from placeholder text |
+| **kitty** | ✓ via remote control (`kitten @ send-text` / `send-key`), by window id (the session's `KITTY_WINDOW_ID`, checked against the window's processes) | ✗ | Needs `allow_remote_control socket-only` and `listen_on unix:/tmp/kitty-{kitty_pid}` in kitty.conf. Local sockets only |
+| Anything else (Ghostty, VS Code's terminal, Warp, …) | ✗ "Page can't type into <App> yet — use tmux or Terminal.app" | ✗ | Run the agent inside tmux, or use the hooks (approvals then work in any terminal) |
 | **Session has exited** | Text replies run `claude --resume <id> --print` in the background (`headlessResumeFallbackEnabled`) | `codex exec resume` (the Codex Desktop / VS Code path) | Only when no live process owns the session. Output goes to a log, not a terminal. Approve/Deny are refused |
 
 ### Active sessions on your phone

@@ -1037,7 +1037,7 @@ extension ClaudeBackend: BatteryPausable {
         case .unsupported(let app): return .skip("Page can't type into \(app)")
         case .unreachable(let detail): return .skip(detail)
         case .unknown: return .skip("terminal not found")
-        case .tmux, .terminalApp, .iTerm, .cmux: break
+        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty: break
         }
         if isLocal {
             if mode == .afterTurn { return .skip("local model — Page doesn't queue a summary request on battery") }

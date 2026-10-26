@@ -27,6 +27,8 @@ enum SessionScreen {
         /// socket; normally empty).
         case tmux(tmuxPath: String, pane: String, serverArgs: [String])
         case cmux(CmuxBridge.Target)
+        case wezterm(WezTermBridge.Target)
+        case kitty(KittyBridge.Target)
     }
 
     /// Where a Claude session's screen can be read, from its resolved host.
@@ -34,6 +36,8 @@ enum SessionScreen {
         switch host {
         case .tmux(let tmux, let pane, _): return .tmux(tmuxPath: tmux, pane: pane, serverArgs: [])
         case .cmux(let target): return .cmux(target)
+        case .wezterm(let target): return .wezterm(target)
+        case .kitty(let target): return .kitty(target)
         case .terminalApp, .iTerm, .unreachable, .unsupported, .unknown: return nil
         }
     }
@@ -65,6 +69,10 @@ enum SessionScreen {
             if let ws = target.workspaceId { args += ["--workspace", ws] }
             guard case .success(let text) = client.run(args, timeout: 4, fallback: "cmux didn't return the screen") else { return nil }
             return text
+        case .wezterm(let target):
+            return WezTermBridge.screen(target, styled: false)
+        case .kitty(let target):
+            return KittyBridge.screen(target, styled: false)
         }
     }
 

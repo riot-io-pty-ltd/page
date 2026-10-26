@@ -1196,7 +1196,13 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .cmux(let target):
             if let why = cmuxBlocker(target) { return .blocked("cmux", why, provider: provider) }
             return SessionHostInfo(host: "cmux", canType: true, canInterrupt: true, provider: provider)
-        case .unreachable(let why): return .blocked("cmux", why, provider: provider)
+        case .wezterm: return SessionHostInfo(host: "WezTerm", canType: true, canInterrupt: true, provider: provider)
+        case .kitty: return SessionHostInfo(host: "kitty", canType: true, canInterrupt: true, provider: provider)
+        case .unreachable(let why):
+            // The host app is known but the exact pane isn't: name the app
+            // the reason mentions (cmux unless it's WezTerm or kitty).
+            let app = why.contains("kitty") ? "kitty" : why.contains("WezTerm") ? "WezTerm" : "cmux"
+            return .blocked(app, why, provider: provider)
         case .unsupported(let app): return .blocked(wireHost(app: app), "Page can't type into \(app) yet", provider: provider)
         case .unknown: return .blocked("unknown", "Couldn't find the session's terminal", provider: provider)
         }

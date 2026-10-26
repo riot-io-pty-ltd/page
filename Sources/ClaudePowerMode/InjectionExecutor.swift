@@ -9,6 +9,10 @@ enum InjectionMethod: String {
     case cmux
     /// Answered through cmux's Feed (the request its PermissionRequest hook holds).
     case cmuxFeed = "cmux_feed"
+    /// Typed through WezTerm's `wezterm cli send-text`, by pane id.
+    case wezterm
+    /// Typed through kitty's remote control (`kitten @ send-text`), by window id.
+    case kitty
     case headlessResume = "claude_resume_print"
     /// Nothing was typed (refused, or no target found).
     case none
@@ -454,7 +458,7 @@ enum InjectionExecutor {
         }
 
         switch host {
-        case .tmux, .terminalApp, .iTerm, .cmux:
+        case .tmux, .terminalApp, .iTerm, .cmux, .wezterm, .kitty:
             // Suspended with ^Z, or behind another job (a shell, an editor,
             // a second agent): the keys would go to that job instead.
             if ProcessRunner.isForeground(pid: session.pid) != true { return refused(notForegroundMessage) }
@@ -531,6 +535,14 @@ enum InjectionExecutor {
         case .cmux(let target):
             guard let client = cmuxClient else { return refused(CmuxBridge.blockedDetail) }
             result = sendViaCmux(steps, client: client, surface: target.surfaceId, awaitClosed: awaitGate, precheck: precheck)
+        case .wezterm(let target):
+            result = sendViaControlCLI(steps, method: .wezterm, label: target.label, awaitClosed: awaitGate, precheck: precheck) { key in
+                WezTermBridge.sendArgs(paneId: target.paneId, key: key).map { WezTermBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
+        case .kitty(let target):
+            result = sendViaControlCLI(steps, method: .kitty, label: target.label, awaitClosed: awaitGate, precheck: precheck) { key in
+                KittyBridge.sendArgs(target: target, key: key).map { KittyBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
         case .unreachable(let detail):
             return InjectionResult(method: .none, success: false, output: "host unreachable: \(detail)", detail: detail)
         case .unsupported(let app):
@@ -682,6 +694,10 @@ enum InjectionExecutor {
             }
         case .iTerm(let tty):
             return { iTermContents(tty: tty) }
+        case .wezterm(let target):
+            return { WezTermBridge.screen(target, styled: false) }
+        case .kitty(let target):
+            return { KittyBridge.screen(target, styled: false) }
         case .cmux, .unreachable, .unsupported, .unknown:
             return nil
         }
@@ -700,6 +716,11 @@ enum InjectionExecutor {
         case .tmux(let tmux, let pane, _):
             let r = ProcessRunner.run(tmux, ["capture-pane", "-p", "-e", "-t", pane], timeout: 3)
             row = r.succeeded ? claudeInputRow(screen: r.stdout, styled: true) : .unknown
+        case .wezterm(let target):
+            // Read with colours, like tmux, so placeholder text isn't a draft.
+            row = WezTermBridge.screen(target, styled: true).map { claudeInputRow(screen: $0, styled: true) } ?? .unknown
+        case .kitty(let target):
+            row = KittyBridge.screen(target, styled: true).map { claudeInputRow(screen: $0, styled: true) } ?? .unknown
         case .terminalApp, .iTerm:
             guard requireEmpty else { return nil }
             row = screenReader(for: host)?().map { claudeInputRow(screen: $0, styled: false) } ?? .unknown
@@ -840,6 +861,8 @@ enum InjectionExecutor {
         case terminalApp(tty: String)
         case iTerm(tty: String)
         case cmux(CmuxBridge.Target)
+        case wezterm(WezTermBridge.Target)
+        case kitty(KittyBridge.Target)
         /// The host app is known and supported, but the session's exact
         /// place in it couldn't be pinned down (phone-safe reason).
         case unreachable(String)
@@ -852,6 +875,8 @@ enum InjectionExecutor {
             case .terminalApp(let tty): return "Terminal tab \(tty.replacingOccurrences(of: "/dev/", with: ""))"
             case .iTerm(let tty): return "iTerm2 session \(tty.replacingOccurrences(of: "/dev/", with: ""))"
             case .cmux(let target): return target.label
+            case .wezterm(let target): return target.label
+            case .kitty(let target): return target.label
             case .unreachable: return "unknown terminal"
             case .unsupported(let app): return app
             case .unknown: return "unknown terminal"
@@ -863,7 +888,7 @@ enum InjectionExecutor {
         /// can read as Meta-Return — so it can't.
         var canSendLoneEscape: Bool {
             switch self {
-            case .tmux, .iTerm, .cmux: return true
+            case .tmux, .iTerm, .cmux, .wezterm, .kitty: return true
             case .terminalApp, .unreachable, .unsupported, .unknown: return false
             }
         }
@@ -890,12 +915,34 @@ enum InjectionExecutor {
                 return .unreachable(f.detail)
             }
         }
+        let bundle = bundlePath(fromAppCommand: appCommand)
         switch appName(forCommand: appCommand) {
+        case "WezTerm"?:
+            switch WezTermBridge.locate(tty: tty, pid: session.pid, bundlePath: bundle) {
+            case .success(let target): return .wezterm(target)
+            case .failure(let f):
+                Logger.shared.log("Injection.claude WezTerm pane not found: \(f.output)")
+                return .unreachable(f.detail)
+            }
+        case "kitty"?:
+            switch KittyBridge.locate(pid: session.pid, bundlePath: bundle, processTable: processTable) {
+            case .success(let target): return .kitty(target)
+            case .failure(let f):
+                Logger.shared.log("Injection.claude kitty window not found: \(f.output)")
+                return .unreachable(f.detail)
+            }
         case "Terminal"?: return .terminalApp(tty: tty)
         case "iTerm2"?: return .iTerm(tty: tty)
         case let app?: return .unsupported(app)
         case nil: return .unknown
         }
+    }
+
+    /// Pure. "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui …" →
+    /// "/Applications/WezTerm.app".
+    static func bundlePath(fromAppCommand command: String) -> String? {
+        guard let r = command.range(of: ".app/Contents/MacOS/") else { return nil }
+        return String(command[..<r.lowerBound]) + ".app"
     }
 
     /// Parses `list-panes -F "#{pane_id}\t#{pane_tty}\t#{pane_in_mode}"`.
@@ -1020,6 +1067,37 @@ enum InjectionExecutor {
             sentSomething = true
         }
         return InjectionResult(method: .tmux, success: true, output: "ok \(paneId)")
+    }
+
+    /// One keystroke at a time through a terminal's own control CLI
+    /// (WezTerm, kitty), with the same rules as tmux: `precheck` before
+    /// every key, `.awaitPromptClosed` honoured, a partial send reported.
+    static func sendViaControlCLI(_ steps: [Keystroke], method: InjectionMethod, label: String,
+                                  awaitClosed: () -> Bool, precheck: (Keystroke) -> String? = { _ in nil },
+                                  send: (Keystroke) -> ProcessRunner.Result?) -> InjectionResult {
+        func fail(_ output: String, _ detail: String) -> InjectionResult {
+            InjectionResult(method: method, success: false, output: output, detail: detail)
+        }
+        var sentSomething = false
+        for step in steps {
+            switch step {
+            case .pause(let t):
+                usleep(useconds_t(t * 1_000_000))
+                continue
+            case .awaitPromptClosed:
+                if !awaitClosed() {
+                    return fail("prompt still open after Esc", "Denied, but the prompt didn't close — your message wasn't sent")
+                }
+                continue
+            case .text, .enter, .escape:
+                if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
+            }
+            guard let r = send(step), r.succeeded else {
+                return fail("\(method.rawValue) send failed", partialDetail(sentSomething, "Couldn't type into \(label)"))
+            }
+            sentSomething = true
+        }
+        return InjectionResult(method: method, success: true, output: "ok \(label)")
     }
 
     /// Pure. Phone text starting with a digit, about to be typed while
@@ -1459,6 +1537,14 @@ enum InjectionExecutor {
             return sendViaTmux([.escape], tmuxPath: tmux, paneId: pane, inMode: inMode, awaitClosed: { true })
         case .iTerm(let tty):
             return sendViaITerm([.escape], tty: tty, awaitClosed: { true })
+        case .wezterm(let target):
+            return sendViaControlCLI([.escape], method: .wezterm, label: target.label, awaitClosed: { true }) { key in
+                WezTermBridge.sendArgs(paneId: target.paneId, key: key).map { WezTermBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
+        case .kitty(let target):
+            return sendViaControlCLI([.escape], method: .kitty, label: target.label, awaitClosed: { true }) { key in
+                KittyBridge.sendArgs(target: target, key: key).map { KittyBridge.run(target, $0.args, stdin: $0.stdin) }
+            }
         case .cmux(let target):
             let client: CmuxBridge.Client
             switch CmuxBridge.connect(cliPath: target.cliPath) {
