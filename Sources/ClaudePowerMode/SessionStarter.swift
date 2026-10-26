@@ -28,7 +28,7 @@ enum SessionStarter {
     static let maxFolders = 40
     static let maxAge: TimeInterval = 30 * 24 * 3600
     static let maxPromptLength = 4000
-    static let disabledMessage = "Starting sessions from the phone is off — turn it on in Page on your Mac (Preferences → Phone)"
+    static let disabledMessage = "Starting sessions from the phone is off — turn it on in Page on your Mac (Preferences → Macs & phones)"
     static let unknownFolderMessage = "Page only starts sessions in folders Claude has already worked in"
 
     // MARK: pure

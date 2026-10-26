@@ -75,6 +75,10 @@ struct SessionCommand: Equatable {
     var agentId: String? = nil
     /// `start` only: the folder to start in (checked against the list).
     var folder: String? = nil
+    /// Typed or clicked at this Mac (`SessionRemote.performLocal`), never
+    /// parsed from the wire: `parse` cannot set it, so a phone command can
+    /// never claim to be local.
+    var local: Bool = false
 
     static let maxIdLength = 128
 
@@ -369,6 +373,8 @@ final class SessionRemote {
     private var timer: DispatchSourceTimer?
     private var macName: String?
     private var stopped = false
+    /// Where the result of a `performLocal` command goes (confined to `queue`).
+    private var localResponders: [String: (SessionCommandResult) -> Void] = [:]
 
     struct FileStamp: Equatable {
         let size: UInt64
@@ -456,6 +462,25 @@ final class SessionRemote {
 
     func handleCommand(_ envelope: SessionEnvelope) {
         queue.async { self.handleCommandLocked(envelope) }
+    }
+
+    /// A command from this Mac's own UI (the menu-bar panel): the same
+    /// `perform` the phone's sealed commands reach, so it goes through the
+    /// same gates and the same backend calls. There is no envelope to check
+    /// (nothing crossed the relay), and the result comes back to `completion`
+    /// instead of being sealed for a phone. Only ops that answer with a
+    /// result ("input", "interrupt", "interruptAll", "start") belong here.
+    func performLocal(_ cmd: SessionCommand, completion: @escaping (SessionCommandResult) -> Void) {
+        queue.async {
+            guard !self.stopped else {
+                completion(.refused(.error, "Page is shutting down"))
+                return
+            }
+            var local = cmd
+            local.local = true
+            self.localResponders[local.clientId] = completion
+            self.perform(local, at: self.now())
+        }
     }
 
     func stop() {
@@ -928,6 +953,10 @@ final class SessionRemote {
     }
 
     private func sendResult(_ clientId: String, _ result: SessionCommandResult) {
+        if let respond = localResponders.removeValue(forKey: clientId) {
+            respond(result)
+            return
+        }
         var obj = header("result", at: now())
         obj.merge(result.fields(clientId: clientId)) { $1 }
         guard let data = try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]) else { return }
@@ -1046,7 +1075,9 @@ final class SessionRemote {
                                                                 reason: stopped > 0 ? nil : .interruptUnsupported, detail: detail))
             }
         case "start":
-            guard startEnabled else {
+            // "Let my phone start sessions" gates the phone; someone at this
+            // Mac dispatching from its own panel is not the phone.
+            guard startEnabled || cmd.local else {
                 Logger.shared.log("Sessions: start → refused/disabled")
                 return sendResult(cmd.clientId, .refused(.disabled, SessionStarter.disabledMessage))
             }

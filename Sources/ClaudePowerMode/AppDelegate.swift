@@ -1,4 +1,6 @@
 import AppKit
+import LocalAuthentication
+import SystemConfiguration
 import UserNotifications
 
 /// Round-trips a RateLimitEvent through a notification's userInfo, so the
@@ -46,10 +48,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private var statusItem: NSStatusItem!
-    /// One persistent menu, filled in `menuNeedsUpdate`. Replacing
-    /// `statusItem.menu` on every tick (the old approach) closed or froze a
-    /// menu the user had open.
+    /// The classic menu, filled in `menuNeedsUpdate`: shown on a right-click
+    /// of the status item and from the panel's "…" button, so every item
+    /// stays reachable. Replacing `statusItem.menu` on every tick (the old
+    /// approach) closed or froze a menu the user had open.
     private let menu = NSMenu()
+
+    // The Night Watch surfaces. The panel replaces the status item's menu as
+    // the left-click; none of them hold a Coordinator reference themselves.
+    private var nowStore: NowStore!
+    private var nowPanel: NowPanelController!
+    private var dispatchStore: DispatchStore!
+    private var dispatchPanel: DispatchPanelController!
+    private let welcomeBack = WelcomeBackController()
+    private var hotKey: GlobalHotKey?
+    private let glyph = GlyphAnimator()
+    private var presenceTimer: Timer?
+    private var presence = PresenceTracker(awayAfter: 120)
+    private var awayLedger: AwayLedger?
+    private var dayLedger = DayLedger(now: Date())
+    /// What Page has delivered (or failed to) from the panel, newest last.
+    private var receipts: [DeliveryReceipt] = []
+    /// Where each pending page's session runs, probed off main.
+    private struct RouteInfo { let label: String?; let blocker: String?; let at: Date }
+    private var routes: [String: RouteInfo] = [:]
+    private var probingRoutes = false
+    /// Paused sessions whose transcript shows the summary Page asked for.
+    private var summarised: Set<String> = []
+    private var summaryCheckedAt: Date = .distantPast
+    private let probeQueue = DispatchQueue(label: "ClaudePowerMode.panel.probe", qos: .utility)
+    /// "Studio MBP": every action names the Mac it acts on.
+    private lazy var macName: String = {
+        (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "this Mac"
+    }()
     private let coordinator = Coordinator()
     private var lastSnapshot: Coordinator.Snapshot?
     private var prefsController: PreferencesWindowController?
@@ -72,15 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "bolt.fill", accessibilityDescription: "Page")
-            button.image?.isTemplate = true
-            button.imagePosition = .imageLeft
-            button.title = ""
-        }
         menu.delegate = self
         menu.autoenablesItems = false
-        statusItem.menu = menu
+        setUpNowSurfaces()
 
         coordinator.onStateChange = { [weak self] snap in
             DispatchQueue.main.async { self?.render(snap) }
@@ -308,11 +333,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
             }
         case "intervention":
-            // Clicking a page banner just shows the menu with the waiting
+            // Clicking a page banner just shows the panel with the waiting
             // pages. It deliberately doesn't type anything or focus a
             // terminal: replying is an explicit action.
             if action == UNNotificationDefaultActionIdentifier {
-                statusItem.button?.performClick(nil)
+                nowPanel.show()
             }
         default:
             break
@@ -323,43 +348,393 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func render(_ snap: Coordinator.Snapshot) {
         lastSnapshot = snap
-        guard let button = statusItem.button else { return }
-
-        let p = snap.power
-        let symbolName: String
-        if !snap.pendingInterventions.isEmpty {
-            symbolName = "person.wave.2.fill"
-        } else if snap.tripped {
-            symbolName = "exclamationmark.triangle.fill"
-        } else if snap.activeRateLimit != nil {
-            symbolName = "hourglass"
-        } else if snap.boosting {
-            symbolName = "bolt.fill"
-        } else if !p.hasBattery || p.onAC {
-            symbolName = "powerplug.fill"
-        } else if p.percent <= 20 {
-            symbolName = "battery.25"
-        } else if p.percent <= 60 {
-            symbolName = "battery.50"
-        } else {
-            symbolName = "battery.100"
-        }
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Page — \(snap.statusLine)")
-        image?.isTemplate = true
-        button.image = image
-        button.imagePosition = .imageLeft
-        if !snap.pendingInterventions.isEmpty {
-            button.title = " \(snap.pendingInterventions.count)"
-        } else if p.hasBattery {
-            button.title = " \(p.percent)%"
-        } else {
-            button.title = ""
-        }
-        button.toolTip = "Page — \(snap.statusLine)"
+        let now = Date()
+        let pending = snap.pendingInterventions
+        let working = snap.sessions.filter { $0.state == .active }.count + snap.localModels.filter(\.busy).count
+        dayLedger.observe(pending: pending, working: working, now: now)
+        awayLedger?.observe(pending: pending)
+        rebuildModel()
+        refreshRoutes(snap)
+        refreshSummaryEvidence(snap)
         updatePairingStatus()
     }
 
+    /// Builds the model from the latest snapshot and what Page has delivered,
+    /// and hands it to the panel and the status glyph. Called on every
+    /// snapshot and after a delivery; the panel updates in place.
+    private func rebuildModel() {
+        guard let snap = lastSnapshot else { return }
+        let cfg = coordinator.config
+        let now = Date()
+        var inputs = NowInputs(snapshot: snap, now: now, macName: macName)
+        inputs.cutoff = cfg.lowBatteryCutoff
+        inputs.recoveryThreshold = cfg.recoveryThreshold
+        inputs.idleSeconds = UserPresence.secondsSinceLastInput()
+        inputs.awayAfter = cfg.idlePageOnlyWhenAwaySeconds
+        inputs.usage = snap.usage
+        inputs.usageHitAt = snap.usageHitAt
+        inputs.receipts = receipts
+        inputs.day = dayLedger.stats
+        inputs.summarised = summarised
+        let routes = self.routes
+        inputs.route = { routes[$0.sessionId]?.label }
+        inputs.blocker = { routes[$0.sessionId]?.blocker }
+        let model = NowModel.build(inputs)
+        nowStore.update(model)
+        // The Tower's sidebar card, badge and Power page follow the same model while it is open.
+        if prefsController?.window?.isVisible == true { prefsController?.store.update(snapshot: snap, model: model) }
+        glyph.longestWait = model.rows.map { now.timeIntervalSince($0.waitingSince) }.max() ?? 0
+        glyph.state = model.glyph
+        if let button = statusItem.button {
+            glyph.appearance = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+            // Battery percent stays beside the glyph while on battery.
+            let p = snap.power
+            button.title = p.hasBattery && !p.onAC ? " \(p.percent)%" : ""
+            // The glyph's arc and the count say what matters at a glance; on AC the
+            // charge is in the tooltip rather than beside the glyph.
+            button.toolTip = "Page — \(snap.statusLine)" + (p.hasBattery && p.onAC ? " · battery \(p.percent)%" : "")
+            button.setAccessibilityLabel(model.accessibilityLabel)
+        }
+    }
+
+    // MARK: the Now panel
+
+    private func setUpNowSurfaces() {
+        nowStore = NowStore(model: NowModel.starting(macName: macName))
+        nowStore.perform = { [weak self] effect in self?.perform(effect) }
+        nowStore.command = { [weak self] command in self?.run(command) }
+        nowPanel = NowPanelController(store: nowStore)
+        nowPanel.anchorFrame = { [weak self] in
+            guard let b = self?.statusItem.button, let w = b.window else { return nil }
+            return w.convertToScreen(b.convert(b.bounds, to: nil))
+        }
+        nowPanel.onVisibilityChange = { [weak self] shown in
+            guard shown else { return }
+            if let snap = self?.lastSnapshot {
+                self?.refreshRoutes(snap, force: true)
+                self?.refreshSummaryEvidence(snap, force: true)
+            }
+            self?.rebuildModel()
+        }
+
+        dispatchStore = DispatchStore()
+        dispatchPanel = DispatchPanelController(store: dispatchStore)
+        dispatchPanel.loadFolders = { [weak self] done in
+            let sessions = self?.lastSnapshot?.sessions ?? []
+            self?.probeQueue.async {
+                let folders = self?.coordinator.knownFolders(sessions: sessions) ?? []
+                DispatchQueue.main.async { done(folders) }
+            }
+        }
+        dispatchStore.send = { [weak self] path, prompt in self?.dispatch(folder: path, prompt: prompt) }
+
+        glyph.onImage = { [weak self] image in
+            guard let button = self?.statusItem.button else { return }
+            button.image = image
+            button.imagePosition = .imageLeft
+        }
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.setAccessibilityLabel("Page — starting")
+        }
+        glyph.start()
+
+        // Option-Command-P, from anywhere (no Accessibility permission).
+        let key = GlobalHotKey.optionCommandP
+        hotKey = GlobalHotKey(keyCode: key.keyCode, modifiers: key.modifiers) { [weak self] in self?.nowPanel.toggle() }
+        if hotKey == nil { Logger.shared.log("Option-Command-P is taken by another app — the panel opens from the menu bar only") }
+
+        presenceTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.pollPresence() }
+    }
+
+    @objc private func statusItemClicked(_ sender: Any?) {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp || event?.modifierFlags.contains(.control) == true {
+            showClassicMenu()
+        } else {
+            nowPanel.toggle()
+        }
+    }
+
+    /// The classic menu under the status item (right-click).
+    private func showClassicMenu() {
+        nowPanel.close(restoreFocus: false)
+        statusItem.menu = menu
+        statusItem.button?.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    private func run(_ command: NowCommand) {
+        switch command {
+        case .resumePaused:
+            coordinator.resumePausedSessionsNow()
+        case .newSession:
+            showDispatch()
+        case .preferences:
+            nowPanel.close(restoreFocus: false)
+            openPreferences()
+        case .openConfig:
+            openConfig()
+        case .more:
+            // The whole classic menu: nothing in it is lost.
+            let anchor = nowPanel.moreMenuAnchor()
+            menu.popUp(positioning: nil, at: anchor.point, in: anchor.view)
+        }
+    }
+
+    // MARK: actions from the panel
+
+    /// Keys and clicks reach here as effects. Replies go through the same
+    /// reply path the phone's do (`Coordinator.replyFromMac`); nothing here
+    /// types anything itself.
+    private func perform(_ effect: NowEffect) {
+        switch effect {
+        case .none:
+            break
+        case .close:
+            nowPanel.close(restoreFocus: true)
+        case .approve(let id):
+            reply(rowId: id, action: "approve", text: "")
+        case .deny(let id):
+            reply(rowId: id, action: "deny", text: "")
+        case .send(let id, let text):
+            reply(rowId: id, action: "custom", text: text)
+        case .approveAfterAuth(let id):
+            approveIrreversible(rowId: id)
+        case .openTerminal(let id):
+            openTerminal(rowId: id)
+        case .newSession:
+            showDispatch()
+        case .preferences:
+            run(.preferences)
+        case .more:
+            run(.more)
+        case .stopAll:
+            stopAllAgents()
+        }
+    }
+
+    private func page(forRowId id: String) -> (row: DecideRow, event: InterventionEvent)? {
+        guard let row = nowStore.model.rows.first(where: { $0.id == id }),
+              let event = lastSnapshot?.pendingInterventions.first(where: { $0.id == id }) else { return nil }
+        return (row, event)
+    }
+
+    private func reply(rowId: String, action: String, text: String) {
+        guard let (row, event) = page(forRowId: rowId) else {
+            nowStore.finishSending(rowId: rowId)
+            nowStore.notice = NowStore.Notice(text: "That page is gone · Review again", failed: true)
+            return
+        }
+        let route = routes[event.sessionId]?.label
+        // The result that arrives after the 25 s wait (a background resume that
+        // was queued behind another): it replaces "Didn't confirm in time".
+        let late: (ReplyFinished) -> Void = { [weak self] finished in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.receipts.append(ReceiptFactory.receipt(action: action, row: row, route: route, finished: finished, at: Date()))
+                self.rebuildModel()
+            }
+        }
+        coordinator.replyFromMac(event: event, action: action, text: text, lateResult: late) { [weak self] finished in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let receipt = ReceiptFactory.receipt(action: action, row: row, route: route, finished: finished, at: Date())
+                self.receipts.append(receipt)
+                if self.receipts.count > 20 { self.receipts.removeFirst(self.receipts.count - 20) }
+                self.nowStore.finishSending(rowId: rowId)
+                self.nowStore.notice = nil
+                self.rebuildModel()
+            }
+        }
+    }
+
+    /// An Irreversible approval, after the hold: Touch ID (or the login
+    /// password where there is none) must pass before option 1 is typed.
+    private func approveIrreversible(rowId: String) {
+        guard let (row, _) = page(forRowId: rowId) else {
+            nowStore.finishSending(rowId: rowId)
+            nowStore.notice = NowStore.Notice(text: "That page is gone · Review again", failed: true)
+            return
+        }
+        authenticate(reason: "Approve “\(ReceiptFactory.subject(for: row))” in \(row.projectName)") { [weak self] ok, why in
+            guard let self else { return }
+            guard ok else {
+                self.nowStore.finishSending(rowId: rowId)
+                self.nowStore.notice = NowStore.Notice(text: why ?? "Not approved", failed: true)
+                return
+            }
+            self.reply(rowId: rowId, action: "approve", text: "")
+        }
+    }
+
+    /// Never approves without a passing check: if neither Touch ID nor the
+    /// login password can be asked for, the answer is no.
+    private func authenticate(reason: String, completion: @escaping (Bool, String?) -> Void) {
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            completion(false, "Can't ask for Touch ID or your password · Open on Mac (O)")
+            return
+        }
+        nowPanel.isAuthenticating = true
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { [weak self] ok, _ in
+            DispatchQueue.main.async {
+                self?.nowPanel.isAuthenticating = false
+                completion(ok, ok ? nil : "Not approved · cancelled")
+            }
+        }
+    }
+
+    private func openTerminal(rowId: String) {
+        // A page row names its session through the event; a rate-limit row has
+        // no page, so it goes by the session on the row itself.
+        let target: (sessionId: String, backend: AgentBackendID)
+        if let (_, event) = page(forRowId: rowId) {
+            target = (event.sessionId, event.backend)
+        } else if let row = nowStore.model.rows.first(where: { $0.id == rowId }), row.chip == .rateLimited {
+            target = (row.sessionId, row.backend)
+        } else {
+            nowStore.notice = NowStore.Notice(text: "That page is gone · Review again", failed: true)
+            return
+        }
+        nowStore.notice = NowStore.Notice(text: "Finding the terminal…", failed: false)
+        probeQueue.async { [weak self] in
+            guard let self else { return }
+            let outcome = self.coordinator.focusTerminal(sessionId: target.sessionId, backend: target.backend)
+            DispatchQueue.main.async {
+                self.nowStore.notice = NowStore.Notice(text: outcome.detail, failed: !outcome.ok)
+                if outcome.ok { self.nowPanel.close(restoreFocus: false) }
+            }
+        }
+    }
+
+    private func stopAllAgents() {
+        nowStore.notice = NowStore.Notice(text: StopScope.describe(working: nowStore.model.stoppableCount) + "…", failed: false)
+        coordinator.stopAllAgents { [weak self] result in
+            DispatchQueue.main.async {
+                let ok = result.code == .delivered || result.code == .queued
+                self?.nowStore.notice = NowStore.Notice(text: StopScope.resultLine(detail: result.detail, success: ok), failed: !ok)
+            }
+        }
+    }
+
+    private func toggleNow() { nowPanel.toggle() }
+
+    // MARK: dispatch
+
+    @objc private func showDispatch() {
+        nowPanel.close(restoreFocus: false)
+        dispatchPanel.show()
+    }
+
+    private func dispatch(folder: String, prompt: String) {
+        coordinator.dispatchSession(folder: folder, prompt: prompt) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.dispatchStore.finish(result)
+                if result.code == .delivered || result.code == .queued {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { self.dispatchPanel.close(restoreFocus: false) }
+                }
+            }
+        }
+    }
+
+    // MARK: presence
+
+    /// Welcome back: when you return after being away past the threshold, the
+    /// handover drops for a few seconds (amber first when something needs you).
+    private func pollPresence() {
+        let cfg = coordinator.config
+        presence.awayAfter = cfg.idlePageOnlyWhenAwaySeconds > 0 ? cfg.idlePageOnlyWhenAwaySeconds : 120
+        let now = Date()
+        switch presence.observe(idle: UserPresence.secondsSinceLastInput(), now: now) {
+        case .none:
+            break
+        case .wentAway:
+            awayLedger = AwayLedger(phoneRepliesAtStart: coordinator.phoneReplyCount)
+            if let snap = lastSnapshot { awayLedger?.observe(pending: snap.pendingInterventions) }
+        case .returned(let away):
+            defer { awayLedger = nil }
+            guard WelcomeBack.isWorthShowing(away: away), let ledger = awayLedger, let snap = lastSnapshot else { return }
+            let needYou = snap.pendingInterventions.filter { NowModel.section(of: $0) == .decide }.count
+            let model = ledger.welcome(away: away, needYou: needYou, phoneRepliesNow: coordinator.phoneReplyCount,
+                                       rings: dayLedger.stats.rings)
+            let anchor = nowPanel.anchorFrame()
+            welcomeBack.show(model, near: anchor)
+        }
+    }
+
+    // MARK: probes (off main)
+
+    /// Where each pending page's session runs, so the panel can name the pane
+    /// ("cmux › page") and say when Page can't type there. Cached per session
+    /// for half a minute; ps, tmux and the cmux socket never run on main.
+    private func refreshRoutes(_ snap: Coordinator.Snapshot, force: Bool = false) {
+        // Only while the panel is up: nothing here is needed otherwise.
+        guard force || nowPanel.isShown else { return }
+        let now = Date()
+        let wanted = Set(snap.pendingInterventions.map(\.sessionId))
+        routes = routes.filter { wanted.contains($0.key) }
+        let stale = wanted.filter { id in force || routes[id].map { now.timeIntervalSince($0.at) > 30 } ?? true }
+        guard !stale.isEmpty, !probingRoutes else { return }
+        let sessions = snap.sessions.filter { stale.contains($0.sessionId) }
+        let projects = Dictionary(snap.pendingInterventions.map { ($0.sessionId, $0.projectName) }, uniquingKeysWith: { a, _ in a })
+        guard !sessions.isEmpty else { return }
+        probingRoutes = true
+        probeQueue.async { [weak self] in
+            let hosts = self?.coordinator.probeHosts(sessions) ?? [:]
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.probingRoutes = false
+                let at = Date()
+                for s in sessions {
+                    // Unknown stays unknown for a while (no probe on every tick).
+                    guard let info = hosts[s.sessionId] else {
+                        self.routes[s.sessionId] = RouteInfo(label: nil, blocker: nil, at: at)
+                        continue
+                    }
+                    self.routes[s.sessionId] = RouteInfo(
+                        label: info.canType ? TerminalFocus.routeLabel(host: info.host, project: projects[s.sessionId] ?? "") : nil,
+                        blocker: info.canType ? nil : info.typeBlocker, at: at)
+                }
+                self.rebuildModel()
+            }
+        }
+    }
+
+    /// "summary ✓" at dusk only when a paused session's transcript has an
+    /// assistant message written after Page paused it.
+    private func refreshSummaryEvidence(_ snap: Coordinator.Snapshot, force: Bool = false) {
+        let paused = snap.battery.paused
+        guard !paused.isEmpty else {
+            if !summarised.isEmpty { summarised = [] }
+            return
+        }
+        guard force || nowPanel.isShown else { return }
+        let now = Date()
+        guard force || now.timeIntervalSince(summaryCheckedAt) > 20 else { return }
+        summaryCheckedAt = now
+        probeQueue.async { [weak self] in
+            let written = self?.coordinator.summariesWritten(for: paused) ?? []
+            DispatchQueue.main.async {
+                guard let self, written != self.summarised else { return }
+                self.summarised = written
+                self.rebuildModel()
+            }
+        }
+    }
+
     // MARK: NSMenuDelegate
+
+    /// Whatever a menu item opens (a window, an alert) must not sit under the
+    /// panel: it closes as the menu does.
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu, nowPanel.isShown else { return }
+        nowPanel.close(restoreFocus: false)
+    }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
@@ -416,9 +791,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             case .connecting:
                 addInfo(menu, "Phone relay: connecting…")
             case .off:
-                addAction(menu, "Phone relay: off — set up…", #selector(openPreferences), key: "")
+                addAction(menu, "Phone relay: off — set up…", #selector(openPreferencesPhone), key: "")
             case .misconfigured(let why):
-                let item = addAction(menu, "Phone relay: not set up — fix in Preferences…", #selector(openPreferences), key: "")
+                let item = addAction(menu, "Phone relay: not set up — fix in Preferences…", #selector(openPreferencesPhone), key: "")
                 item.toolTip = why
             }
 
@@ -456,6 +831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             addInfo(menu, "Starting…")
             menu.addItem(.separator())
         }
+        addAction(menu, "New Session…", #selector(showDispatch), key: "n")
         addAction(menu, "Pair phone…", #selector(showPairingQR), key: "p")
         let integrations = NSMenuItem(title: "Integrations", action: nil, keyEquivalent: "")
         let integrationsMenu = NSMenu()
@@ -657,10 +1033,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // MARK: windows
 
     @objc private func openPreferences() {
+        showTower(section: nil)
+    }
+
+    /// The relay and phone settings: where "Phone relay: off — set up…" and
+    /// the pairing window's "Open Preferences…" land.
+    @objc private func openPreferencesPhone() {
+        showTower(section: .macsPhones)
+    }
+
+    private func showTower(section: TowerSection?) {
         if prefsController == nil {
-            prefsController = PreferencesWindowController(coordinator: coordinator)
+            prefsController = PreferencesWindowController(
+                coordinator: coordinator, macName: macName,
+                pairPhone: { [weak self] in self?.showPairingQR() },
+                copyDiagnostics: { [weak self] in self?.copyLocalModelDiagnostics() })
         }
-        prefsController?.showAndFocus()
+        prefsController?.store.update(snapshot: lastSnapshot, model: nowStore.model)
+        prefsController?.showAndFocus(section: section)
     }
 
     private var pairingWindow: NSWindow?
@@ -737,10 +1127,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         let reason: String
         if !cfg.relayEnabled {
-            reason = "Phone paging is turned off. In Preferences → Phone, turn on “Send pages to my phone” and enter your relay’s URL."
+            reason = "Phone paging is turned off. In Preferences → Macs & phones, turn on “Send pages to my phone” and enter your relay’s URL."
         } else {
             reason = (cfg.relayURLProblem?.message ?? "The relay URL isn’t valid.")
-                + " Enter your Worker’s URL in Preferences → Phone."
+                + " Enter your Worker’s URL in Preferences → Macs & phones."
         }
         let detail = wrappingLabel(reason, size: 12, color: .labelColor)
         let hint = wrappingLabel("The relay is a small Cloudflare Worker you deploy once (see Cloudflare/README.md in the Page repository). Pairing needs it so your phone and this Mac can reach each other.")
@@ -852,7 +1242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func openPreferencesFromPairing() {
         pairingWindow?.close()
-        openPreferences()
+        openPreferencesPhone()
     }
 
     @objc private func copyPairingJSON() {

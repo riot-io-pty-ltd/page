@@ -69,6 +69,10 @@ final class Coordinator {
         /// "Claude usage: 5-hour 62% (resets 5:00 pm) · 7-day 30%" and the
         /// forecast line (empty without usage capture).
         var usageLines: [String] = []
+        /// Claude's 5-hour / 7-day usage as last captured, and when the
+        /// 5-hour window runs out at the current pace (for the runway).
+        var usage: UsageSnapshot? = nil
+        var usageHitAt: Date? = nil
 
         var relayConnected: Bool { relayState == .connected }
         var boosting: Bool { awake.preventIdleSleep }
@@ -214,6 +218,22 @@ final class Coordinator {
     /// The phone's live-sessions view (SESSIONS-PROTOCOL.md). Has its own
     /// queues; the tick only hands it a copy of the sessions.
     private let sessionRemote: SessionRemote
+    /// The same backends, as the phone's sessions view reaches them: the Mac
+    /// panel asks them where a session runs (for its delivery preview).
+    private let liveBackends: LiveSessionBackends
+    /// Pages the phone answered since launch (the Welcome back handover): the
+    /// distinct pages whose reply a backend reported delivered. A reply that
+    /// arrives twice, or fails, is not counted.
+    private let phoneReplyLock = NSLock()
+    private var phoneReplyIdsArrived: Set<String> = []
+    private var phoneReplyIdsDelivered: Set<String> = []
+    /// Replies typed from the Mac panel, waiting for their delivery result.
+    private let macReplyLock = NSLock()
+    private var macReplyWaiters: [String: (ReplyFinished) -> Void] = [:]
+    /// Replies that timed out here but may still land (a background
+    /// `claude --resume` can wait behind another resume): told the real
+    /// result if it arrives within `macReplyLateWindow`.
+    private var macReplyLate: [String: (ReplyFinished) -> Void] = [:]
 
     private var relay: RelayClient?
     private var relayIdentity: RelayIdentity?
@@ -296,8 +316,12 @@ final class Coordinator {
             queues[b.id] = DispatchQueue(label: "ClaudePowerMode.reply.\(b.id.rawValue)", qos: .userInitiated)
         }
         replyQueues = queues
-        sessionRemote = SessionRemote(backends: LiveSessionBackends(claude: claudeBackend, codex: codexBackend),
-                                      replayStore: PairingTokenManager.sessionReplayFileURL)
+        liveBackends = LiveSessionBackends(claude: claudeBackend, codex: codexBackend)
+        sessionRemote = SessionRemote(backends: liveBackends, replayStore: PairingTokenManager.sessionReplayFileURL)
+        // Delivery results reach the Mac panel whether or not a relay is up.
+        for b in backends {
+            b.onReplyFinished = { [weak self] finished in self?.finishMacReply(finished) }
+        }
     }
 
     // MARK: lifecycle
@@ -727,6 +751,17 @@ final class Coordinator {
             tickQueue.async { [weak self] in self?.handleLowBatteryReply(reply) }
             return
         }
+        phoneReplyLock.lock()
+        if phoneReplyIdsArrived.count > 500 { phoneReplyIdsArrived.removeAll() }
+        phoneReplyIdsArrived.insert(reply.interventionId)
+        phoneReplyLock.unlock()
+        deliver(reply)
+    }
+
+    /// Hands a reply to the backend that owns its page, in order with the
+    /// other replies for that agent. The one place a reply — from the phone
+    /// or from the Mac panel — reaches a backend.
+    private func deliver(_ reply: RelayReply) {
         let repliedId = reply.interventionId
         tickQueue.async { [weak self] in
             guard let self else { return }
@@ -1374,7 +1409,9 @@ final class Coordinator {
             configProblem: configProblem,
             localModels: lastLocalActivities,
             batteryForecast: lastPower.onAC ? nil : forecastEstimate,
-            usageLines: usage.menuLines(now: Date())
+            usageLines: usage.menuLines(now: Date()),
+            usage: usage.latest,
+            usageHitAt: usage.hitAt(now: Date())
         )
         onStateChange?(snap)
     }
@@ -1462,5 +1499,150 @@ final class Coordinator {
             Logger.shared.log("Cancelled scheduled resume for \(scheduled.projectName) at \(scheduled.resetTime)")
             self.tick()
         }
+    }
+
+    // MARK: the Mac's own panel
+
+    /// Pages answered from the phone since launch.
+    var phoneReplyCount: Int {
+        phoneReplyLock.lock(); defer { phoneReplyLock.unlock() }
+        return phoneReplyIdsDelivered.count
+    }
+
+    /// How long a reply typed at the Mac waits for its delivery result.
+    static let macReplyTimeout: TimeInterval = 25
+    /// How long after the timeout a late delivery result is still passed on.
+    static let macReplyLateWindow: TimeInterval = 20 * 60
+
+    /// Answers a page from this Mac's panel. This is the phone's reply path,
+    /// not a second one: it builds the reply the backend's `handleReply`
+    /// expects (marked `source: "mac"`) and hands it over on the same
+    /// per-backend queue, so every gate, stale check and keystroke plan
+    /// applies unchanged. `action` is "approve" (types option 1), "deny"
+    /// (Esc) or "custom" (Esc, then `text`, then Return, as the planner
+    /// decides). Page never sends "2" and never answers "don't ask again".
+    /// `completion` gets the delivery result — or a timeout — on any queue.
+    /// After a timeout, `lateResult` gets the real result if one still comes
+    /// in (it is never called when `completion` already had the real result).
+    func replyFromMac(event: InterventionEvent, action: String, text: String,
+                      lateResult: ((ReplyFinished) -> Void)? = nil,
+                      completion: @escaping (ReplyFinished) -> Void) {
+        func refuse(_ why: String) {
+            completion(ReplyFinished(interventionId: event.id, success: false, method: "none", detail: why))
+        }
+        if let why = MacReplyGate.refusal(forPageId: event.id, action: action) { return refuse(why) }
+        macReplyLock.lock()
+        if macReplyWaiters[event.id] != nil {
+            macReplyLock.unlock()
+            return refuse("Already sending a reply for this page")
+        }
+        macReplyWaiters[event.id] = completion
+        macReplyLate[event.id] = nil
+        macReplyLock.unlock()
+        // Duplicates and refusals inside a backend report nothing; the wait
+        // ends with a timeout, never an assumed success.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.macReplyTimeout) { [weak self] in
+            self?.expireMacReply(event.id, lateResult: lateResult)
+        }
+        let reply = RelayReply(interventionId: event.id, text: text, action: action, sessionId: event.sessionId,
+                               cwd: nil, kind: event.kind.rawValue, backend: event.backend.rawValue, source: "mac",
+                               promptKey: event.promptKey)
+        Logger.shared.log("Mac reply for \(event.id.prefix(48)) (action=\(action), \(text.count) chars)")
+        deliver(reply)
+    }
+
+    private func finishMacReply(_ finished: ReplyFinished) {
+        macReplyLock.lock()
+        let waiter = macReplyWaiters.removeValue(forKey: finished.interventionId)
+        let late = waiter == nil ? macReplyLate.removeValue(forKey: finished.interventionId) : nil
+        macReplyLock.unlock()
+        if let late { late(finished); return }
+        // Not a Mac reply, and it landed: the phone answered this page.
+        if waiter == nil, finished.success {
+            phoneReplyLock.lock()
+            if phoneReplyIdsArrived.contains(finished.interventionId) { phoneReplyIdsDelivered.insert(finished.interventionId) }
+            phoneReplyLock.unlock()
+        }
+        waiter?(finished)
+    }
+
+    private func expireMacReply(_ id: String, lateResult: ((ReplyFinished) -> Void)?) {
+        macReplyLock.lock()
+        let waiter = macReplyWaiters.removeValue(forKey: id)
+        if waiter != nil, let lateResult {
+            macReplyLate[id] = lateResult
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + Self.macReplyLateWindow) { [weak self] in
+                guard let self else { return }
+                self.macReplyLock.lock(); self.macReplyLate[id] = nil; self.macReplyLock.unlock()
+            }
+        }
+        macReplyLock.unlock()
+        waiter?(ReplyFinished(interventionId: id, success: false, method: "timeout", detail: ReplyFinished.timeoutDetail))
+    }
+
+    /// "Stop my agents": Esc in every working session, through the phone's
+    /// `interruptAll` (each session behind the same gate as its own Stop
+    /// button). The result says how many were stopped.
+    func stopAllAgents(completion: @escaping (SessionCommandResult) -> Void) {
+        sessionRemote.performLocal(
+            SessionCommand(op: "interruptAll", clientId: "mac-\(UUID().uuidString)",
+                           ts: Date().timeIntervalSince1970 * 1000, viewer: nil, sessionId: nil, text: nil),
+            completion: completion)
+    }
+
+    /// Starts a new Claude session from the Mac's Dispatch panel, through
+    /// the phone's `start` command (same prompt clean-up, same folder
+    /// allowlist, same cmux-only launch).
+    func dispatchSession(folder: String, prompt: String, completion: @escaping (SessionCommandResult) -> Void) {
+        var cmd = SessionCommand(op: "start", clientId: "mac-\(UUID().uuidString)",
+                                 ts: Date().timeIntervalSince1970 * 1000, viewer: nil, sessionId: nil, text: prompt)
+        cmd.folder = folder
+        sessionRemote.performLocal(cmd, completion: completion)
+    }
+
+    /// Folders a session may be started in (where Claude has already worked),
+    /// newest first. Reads transcripts: never call on main.
+    func knownFolders(sessions: [AgentSession]) -> [SessionStarter.Folder] {
+        liveBackends.knownFolders(live: sessions)
+    }
+
+    /// Where each session runs, as the phone's list would show it. Blocking
+    /// (ps, tmux, the cmux socket): never call on main.
+    func probeHosts(_ sessions: [AgentSession]) -> [String: SessionHostInfo] {
+        liveBackends.probeHosts(sessions)
+    }
+
+    /// Brings the session's exact terminal pane to the front; never types.
+    /// Blocking: never call on main.
+    func focusTerminal(for event: InterventionEvent) -> TerminalFocus.Outcome {
+        focusTerminal(sessionId: event.sessionId, backend: event.backend)
+    }
+
+    /// The same, by session: rows that are not pages (a rate limit) have no event.
+    func focusTerminal(sessionId: String, backend: AgentBackendID) -> TerminalFocus.Outcome {
+        switch backend {
+        case .claude:
+            let candidates = claudeBackend.remoteLiveSessions.filter { $0.sessionId == sessionId }
+            return TerminalFocus.focus(candidates: candidates, table: ProcessRunner.processTable())
+        case .codex:
+            return TerminalFocus.activateAnyTerminal()
+        }
+    }
+
+    /// Paused sessions whose transcript has an assistant message written after
+    /// Page paused them: the summary it asked for. Reads files: never on main.
+    func summariesWritten(for paused: [PausedSession]) -> Set<String> {
+        var out = Set<String>()
+        let known = Dictionary(backends.flatMap { $0.currentSnapshot.sessions }.map { ($0.sessionId, $0) },
+                               uniquingKeysWith: { a, _ in a })
+        for p in paused where p.backend == .claude {
+            guard let session = known[p.sessionId],
+                  let file = liveBackends.transcriptFile(for: session), file.format == .claude,
+                  let tail = BoundedFileRead.tail(file.path, maxBytes: 128 * 1024) else { continue }
+            if PauseEvidence.hasSummary(transcriptTail: String(decoding: tail.data, as: UTF8.self), after: p.pausedAt) {
+                out.insert(p.sessionId)
+            }
+        }
+        return out
     }
 }

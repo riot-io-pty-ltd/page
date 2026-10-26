@@ -83,6 +83,21 @@ struct RelayReply: Codable, Equatable {
     }
 }
 
+/// How one reply delivery ended, as the backend reports it to the Coordinator
+/// (whether or not a relay is connected): the Mac panel's receipts come from
+/// this, not from the phone's channel.
+struct ReplyFinished: Equatable {
+    let interventionId: String
+    let success: Bool
+    /// `InjectionMethod` raw value, or Codex's method name.
+    let method: String
+    /// The short, human outcome (also what the phone is shown).
+    let detail: String
+
+    /// What a reply that never reported back is told.
+    static let timeoutDetail = "Didn't confirm in time"
+}
+
 /// Outbound channel to the relay. There is exactly one shared connection,
 /// owned by the Coordinator; backends never create their own RelayClient.
 /// All methods are thread-safe and never block.
@@ -105,6 +120,9 @@ protocol AgentBackend: AnyObject {
     var relay: RelaySink? { get set }
     var onNewIntervention: ((InterventionEvent) -> Void)? { get set }
     var onNewRateLimit: ((RateLimitEvent) -> Void)? { get set }
+    /// Called when a reply delivery ends, on whatever queue finished it and
+    /// never while a lock is held. Independent of the relay.
+    var onReplyFinished: ((ReplyFinished) -> Void)? { get set }
 
     func start()
     func refresh()

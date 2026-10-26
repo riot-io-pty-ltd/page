@@ -42,6 +42,12 @@ final class ClaudeBackend: AgentBackend {
 
     private var _onNewRateLimit: ((RateLimitEvent) -> Void)?
     private var _onNewIntervention: ((InterventionEvent) -> Void)?
+    private var _onReplyFinished: ((ReplyFinished) -> Void)?
+    /// Called when a reply delivery ends, never while a lock is held.
+    var onReplyFinished: ((ReplyFinished) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return _onReplyFinished }
+        set { lock.lock(); _onReplyFinished = newValue; lock.unlock() }
+    }
     /// Called on the tick queue, never while a lock is held.
     var onNewRateLimit: ((RateLimitEvent) -> Void)? {
         get { lock.lock(); defer { lock.unlock() }; return _onNewRateLimit }
@@ -103,6 +109,10 @@ final class ClaudeBackend: AgentBackend {
     /// Reply ids currently being injected (a lock-screen action and an
     /// in-app reply can both arrive for one page).
     private var inFlightReplies = Set<String>()
+    /// Replies typed at this Mac's panel (`RelayReply.source == "mac"`): the
+    /// phone never made them, so it is told the page was resolved on the Mac
+    /// instead of being sent a reply result.
+    private var macOriginReplies = Set<String>()
     /// Reply ids already delivered, oldest first (bounded). A replayed reply
     /// must never be typed a second time — by then the session has moved
     /// on and "approve" would become a typed "yes, proceed".
@@ -625,7 +635,13 @@ final class ClaudeBackend: AgentBackend {
 
         lock.lock()
         let duplicate = inFlightReplies.contains(id) || deliveredReplies.contains(id)
-        if !duplicate { inFlightReplies.insert(id) }
+        if !duplicate {
+            inFlightReplies.insert(id)
+            if reply.source == "mac" {
+                if macOriginReplies.count > 200 { macOriginReplies.removeAll() }
+                macOriginReplies.insert(id)
+            }
+        }
         let page = rateLimitPages[id]
         let stuck = stuckPages[id]
         let cfg = _config
@@ -787,8 +803,17 @@ final class ClaudeBackend: AgentBackend {
             if deliveredOrder.count > 1000 { deliveredReplies.remove(deliveredOrder.removeFirst()) }
         }
         let relay = _relay
+        let finished = _onReplyFinished
+        let viaMac = macOriginReplies.remove(id) != nil
         lock.unlock()
 
+        finished?(ReplyFinished(interventionId: id, success: result.success, method: result.method.rawValue,
+                                detail: result.detail.isEmpty ? (result.success ? "Delivered" : "Couldn't deliver the reply") : result.detail))
+        if viaMac {
+            // "Resolved on your Mac" on the phone; no reply result for a reply it never sent.
+            if result.success { relay?.sendInterventionClosed(id: id, reason: "session_resolved") }
+            return
+        }
         relay?.sendReplyInjected(
             interventionId: id,
             method: result.method.rawValue,

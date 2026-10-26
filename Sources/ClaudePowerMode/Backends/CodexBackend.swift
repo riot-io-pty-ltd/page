@@ -54,6 +54,10 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         get { locked { _onNewRateLimit } }
         set { locked { _onNewRateLimit = newValue } }
     }
+    var onReplyFinished: ((ReplyFinished) -> Void)? {
+        get { locked { _onReplyFinished } }
+        set { locked { _onReplyFinished = newValue } }
+    }
 
     // MARK: Tunables
 
@@ -85,6 +89,10 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
     private let lock = NSLock()
     private var _config: Config
     private var _relay: RelaySink?
+    private var _onReplyFinished: ((ReplyFinished) -> Void)?
+    /// Replies typed at this Mac's panel: told to the phone as "resolved on
+    /// your Mac", not as a reply result it never asked for.
+    private var macOriginReplies = Set<String>()
     private var _onNewIntervention: ((InterventionEvent) -> Void)?
     private var _onNewRateLimit: ((RateLimitEvent) -> Void)?
 
@@ -937,6 +945,12 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         let id = reply.interventionId
         // Blocking-hook replies are answered by the hook itself.
         guard !id.hasPrefix("hookpre-") else { return }
+        if reply.source == "mac" {
+            locked {
+                if macOriginReplies.count > 200 { macOriginReplies.removeAll() }
+                macOriginReplies.insert(id)
+            }
+        }
         // A repeat of a reply whose background resume is still running:
         // its result is reported when that run finishes.
         guard !execGate.isReplyInFlight(id) else {
@@ -1001,10 +1015,15 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
     private func finishReply(_ id: String, outcome: CodexDeliveryOutcome) {
         Logger.shared.log("CodexBackend: reply \(id.prefix(48)) → method=\(outcome.method) success=\(outcome.success) — \(outcome.detail)")
         let relay = self.relay
-        relay?.sendReplyInjected(interventionId: id, method: outcome.method, success: outcome.success,
-                                 detail: outcome.detail, output: outcome.output)
+        onReplyFinished?(ReplyFinished(interventionId: id, success: outcome.success, method: outcome.method,
+                                       detail: outcome.detail))
+        let viaMac = locked { macOriginReplies.remove(id) != nil }
+        if !viaMac {
+            relay?.sendReplyInjected(interventionId: id, method: outcome.method, success: outcome.success,
+                                     detail: outcome.detail, output: outcome.output)
+        }
         guard outcome.success else { return }
-        relay?.sendInterventionClosed(id: id, reason: "replied")
+        relay?.sendInterventionClosed(id: id, reason: viaMac ? "session_resolved" : "replied")
         locked {
             pendingInterventions[id] = nil
             serverRequests[id] = nil
