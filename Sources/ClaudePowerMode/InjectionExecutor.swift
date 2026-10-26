@@ -907,6 +907,13 @@ enum InjectionExecutor {
             }
         }
         guard let appCommand = hostAppCommand(forPid: session.pid, processTable: processTable) else { return .unknown }
+        // A multiplexer between the session and the GUI app: the agent
+        // inherited the outer terminal's pane ids, but keys sent there
+        // reach whichever inner pane has focus. Refuse.
+        let env = ProcArgs.read(pid: session.pid, envKeys: ["HERDR_ENV", "ZELLIJ", "STY"])?.env ?? [:]
+        if let mux = nestedMultiplexer(env: env, ancestorCommands: ancestorCommands(of: session.pid, processTable: processTable)) {
+            return .unsupported(mux)
+        }
         if let bundle = CmuxBridge.bundlePath(fromAppCommand: appCommand) {
             switch CmuxBridge.locateSurface(pid: session.pid, sessionId: session.sessionId, agent: .claude, bundlePath: bundle) {
             case .success(let target): return .cmux(target)
@@ -925,7 +932,7 @@ enum InjectionExecutor {
                 return .unreachable(f.detail)
             }
         case "kitty"?:
-            switch KittyBridge.locate(pid: session.pid, bundlePath: bundle, processTable: processTable) {
+            switch KittyBridge.locate(pid: session.pid, bundlePath: bundle) {
             case .success(let target): return .kitty(target)
             case .failure(let f):
                 Logger.shared.log("Injection.claude kitty window not found: \(f.output)")
@@ -936,6 +943,38 @@ enum InjectionExecutor {
         case let app?: return .unsupported(app)
         case nil: return .unknown
         }
+    }
+
+    /// Pure. The multiplexer (other than tmux, matched by tty earlier) the
+    /// session runs inside, from its environment or its ancestors.
+    static func nestedMultiplexer(env: [String: String], ancestorCommands: [String]) -> String? {
+        if env["HERDR_ENV"] != nil { return "Herdr" }
+        if env["ZELLIJ"] != nil { return "zellij" }
+        if env["STY"] != nil { return "screen" }
+        for command in ancestorCommands {
+            let exe = (command.split(separator: " ").first.map(String.init) ?? command as String)
+            switch (exe as NSString).lastPathComponent.lowercased() {
+            case "herdr": return "Herdr"
+            case "zellij": return "zellij"
+            case "screen": return "screen"
+            default: continue
+            }
+        }
+        return nil
+    }
+
+    static func ancestorCommands(of pid: Int32, processTable: [ProcessRunner.ProcessInfoRow]) -> [String] {
+        var byPid: [Int32: ProcessRunner.ProcessInfoRow] = [:]
+        for row in processTable { byPid[row.pid] = row }
+        var out: [String] = []
+        var current = byPid[pid]?.ppid
+        var hops = 0
+        while let p = current, p > 1, hops < 32, let row = byPid[p] {
+            out.append(row.command)
+            current = row.ppid
+            hops += 1
+        }
+        return out
     }
 
     /// Pure. "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui …" →

@@ -5,7 +5,7 @@ import Foundation
 /// same way: the agent process's own environment names its pane/window
 /// (`WEZTERM_PANE`, `KITTY_WINDOW_ID`), and the terminal's own listing must
 /// agree before anything is typed (WezTerm: the pane's tty is the
-/// session's; kitty: the window's shell is an ancestor of the session).
+/// session's; kitty: the session is in the window's foreground).
 /// Exact or nothing, as everywhere else.
 
 // MARK: - WezTerm
@@ -157,30 +157,15 @@ enum KittyBridge {
     }
 
     /// Pure. The window the session's environment names, and only if kitty
-    /// says the session runs in it: the session is one of its foreground
-    /// processes, or its shell is one of the session's ancestors.
-    static func window(id: String, sessionPid: Int32, ancestors: Set<Int32>, in windows: [Window]) -> Window? {
-        guard let w = windows.first(where: { $0.id == id }) else { return nil }
-        if w.foregroundPids.contains(sessionPid) { return w }
-        if let pid = w.pid, ancestors.contains(pid) { return w }
-        return nil
+    /// lists the session among that window's foreground processes. (Its
+    /// shell being an ancestor isn't enough: a multiplexer started from it
+    /// would be in front, and the keys would go to that.)
+    static func window(id: String, sessionPid: Int32, in windows: [Window]) -> Window? {
+        guard let w = windows.first(where: { $0.id == id }), w.foregroundPids.contains(sessionPid) else { return nil }
+        return w
     }
 
-    static func ancestors(of pid: Int32, processTable: [ProcessRunner.ProcessInfoRow]) -> Set<Int32> {
-        var byPid: [Int32: Int32] = [:]
-        for row in processTable { byPid[row.pid] = row.ppid }
-        var out = Set<Int32>()
-        var current = byPid[pid]
-        var hops = 0
-        while let p = current, p > 1, hops < 32 {
-            out.insert(p)
-            current = byPid[p]
-            hops += 1
-        }
-        return out
-    }
-
-    static func locate(pid: Int32, bundlePath: String?, processTable: [ProcessRunner.ProcessInfoRow]) -> Result<Target, CmuxBridge.Failure> {
+    static func locate(pid: Int32, bundlePath: String?) -> Result<Target, CmuxBridge.Failure> {
         guard let kitten = kittenPath(forBundlePath: bundlePath) else {
             return .failure(.init("Couldn't find kitty's kitten tool", output: "no kitten"))
         }
@@ -195,8 +180,7 @@ enum KittyBridge {
         guard r.succeeded else {
             return .failure(.init(remoteControlHint, output: "kitten @ ls: \(r.stderr.prefix(200))"))
         }
-        guard window(id: windowId, sessionPid: pid, ancestors: ancestors(of: pid, processTable: processTable),
-                     in: parseLs(r.stdout)) != nil else {
+        guard window(id: windowId, sessionPid: pid, in: parseLs(r.stdout)) != nil else {
             return .failure(.init("Couldn't confirm the session's kitty window", output: "window \(windowId) doesn't own pid \(pid)"))
         }
         return .success(Target(kittenPath: kitten, socket: socket, windowId: windowId))

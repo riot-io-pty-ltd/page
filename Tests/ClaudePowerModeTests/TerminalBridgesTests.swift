@@ -58,17 +58,24 @@ final class TerminalBridgesTests: XCTestCase {
 
     func testKittyWindowMustOwnTheSession() {
         let w = KittyBridge.parseLs(kittyLs)
-        XCTAssertEqual(KittyBridge.window(id: "4", sessionPid: 610, ancestors: [], in: w)?.id, "4", "foreground process")
-        XCTAssertEqual(KittyBridge.window(id: "4", sessionPid: 777, ancestors: [600, 1], in: w)?.id, "4", "its shell is an ancestor")
-        XCTAssertNil(KittyBridge.window(id: "1", sessionPid: 610, ancestors: [600], in: w), "env says window 1, but the session lives in 4")
-        XCTAssertNil(KittyBridge.window(id: "9", sessionPid: 610, ancestors: [], in: w))
+        XCTAssertEqual(KittyBridge.window(id: "4", sessionPid: 610, in: w)?.id, "4", "foreground process")
+        XCTAssertNil(KittyBridge.window(id: "4", sessionPid: 777, in: w), "behind something else in the window (a multiplexer): refuse")
+        XCTAssertNil(KittyBridge.window(id: "1", sessionPid: 610, in: w), "env says window 1, but the session lives in 4")
+        XCTAssertNil(KittyBridge.window(id: "9", sessionPid: 610, in: w))
     }
 
-    func testKittyAncestors() {
+    func testNestedMultiplexerIsRefused() {
+        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["HERDR_ENV": "1"], ancestorCommands: []), "Herdr")
+        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["ZELLIJ": "0"], ancestorCommands: []), "zellij")
+        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: ["STY": "123.x"], ancestorCommands: []), "screen")
         let table = [ProcessRunner.ProcessInfoRow(pid: 610, ppid: 600, tty: "", command: "claude"),
-                     ProcessRunner.ProcessInfoRow(pid: 600, ppid: 400, tty: "", command: "zsh"),
-                     ProcessRunner.ProcessInfoRow(pid: 400, ppid: 1, tty: "", command: "kitty")]
-        XCTAssertEqual(KittyBridge.ancestors(of: 610, processTable: table), [600, 400])
+                     ProcessRunner.ProcessInfoRow(pid: 600, ppid: 500, tty: "", command: "/opt/homebrew/bin/herdr server"),
+                     ProcessRunner.ProcessInfoRow(pid: 500, ppid: 400, tty: "", command: "-zsh"),
+                     ProcessRunner.ProcessInfoRow(pid: 400, ppid: 1, tty: "", command: "/Applications/cmux.app/Contents/MacOS/cmux")]
+        let ancestors = InjectionExecutor.ancestorCommands(of: 610, processTable: table)
+        XCTAssertEqual(ancestors.count, 3)
+        XCTAssertEqual(InjectionExecutor.nestedMultiplexer(env: [:], ancestorCommands: ancestors), "Herdr", "herdr server under cmux, env scrubbed")
+        XCTAssertNil(InjectionExecutor.nestedMultiplexer(env: [:], ancestorCommands: ["-zsh", "/Applications/WezTerm.app/Contents/MacOS/wezterm-gui"]))
     }
 
     func testKittyOnlyLocalSockets() {
