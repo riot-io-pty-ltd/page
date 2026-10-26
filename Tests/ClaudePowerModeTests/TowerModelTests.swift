@@ -437,7 +437,7 @@ final class TowerModelTests: XCTestCase {
 
     func testEveryPreferencesFieldAppearsOnceInTheMap() {
         let mirrored = Mirror(reflecting: PreferencesForm(Config())).children.compactMap { $0.label }
-        XCTAssertEqual(mirrored.count, 34)
+        XCTAssertEqual(mirrored.count, 35)
         XCTAssertEqual(TowerControlMap.fieldNames.count, mirrored.count)
         XCTAssertEqual(Set(TowerControlMap.fieldNames), Set(mirrored))
         XCTAssertEqual(Set(TowerControlMap.fieldNames).count, TowerControlMap.fieldNames.count, "no field twice")

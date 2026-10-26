@@ -1,91 +1,79 @@
 import Foundation
+import SwiftUI
 
-/// App-wide navigation state, so a notification tap or a `page://` link can
-/// open a specific intervention whether the app was running, suspended or
-/// cold-launched. On a cold launch the notification delegate fires before
-/// any view exists; the request simply sits in `presented` until
-/// MainTabView appears and presents it.
+/// App-wide navigation state, so a notification tap, a widget tap or a
+/// `page://` link can open a specific card whether the app was running,
+/// suspended or cold-launched. On a cold launch the notification delegate
+/// fires before any view exists; the request simply sits here until the root
+/// view appears and presents it.
 ///
-/// A page's reply screen and a session's detail screen are both sheets on
-/// MainTabView, and only one sheet can be up at a time. Opening one while
-/// the other is showing dismisses it first and presents the new one from
-/// `sheetDismissed()`.
+/// There are exactly two destinations (Now and Sky). Everything else is a sheet
+/// or a room, and only one sheet can be up at a time: asking for another while
+/// one is showing closes the first, and the new one comes up from
+/// `sheetDismissed()` (`SheetQueue`). A deep link always lands on Now with the
+/// card's Decision sheet over it, never on a tab.
 @MainActor
 final class AppRouter: ObservableObject {
     static let shared = AppRouter()
 
+    /// Kept for the session room, which presents a page's Decision sheet over itself.
     struct PresentedIntervention: Identifiable, Equatable {
         let id: String
     }
 
-    struct PresentedSession: Identifiable, Equatable {
-        let id: String
-    }
-
-    @Published var tab: AppTab = .sessions
-    @Published var presented: PresentedIntervention?
-    @Published var presentedSession: PresentedSession?
-
-    private var pendingIntervention: String?
-    private var pendingSession: String?
+    @Published var destination: NWDestination = .now
+    @Published private(set) var sheets = SheetQueue()
+    /// The unpair confirmation, asked for by Now, Sky and the Tower alike.
+    @Published var confirmingUnpair = false
+    /// The Paired screen is up after a first pairing. While it is, nothing else
+    /// asks iOS for notification permission: that choice is made on that screen.
+    @Published var pairedWelcome = false
 
     private init() {}
 
-    /// Opens a page's reply screen. `switchTab: false` keeps the current
-    /// tab (the Sessions list's "Open page").
+    /// What `.sheet(item:)` binds to.
+    var sheetBinding: Binding<NWSheet?> {
+        Binding(get: { self.sheets.current }, set: { self.sheets.set($0) })
+    }
+
+    /// Opens a page's Decision sheet over Now.
     func open(interventionId: String, switchTab: Bool = true) {
-        if switchTab { tab = .inbox }
-        if presentedSession != nil {
-            pendingIntervention = interventionId
-            pendingSession = nil
-            presentedSession = nil
-            return
-        }
-        presented = PresentedIntervention(id: interventionId)
+        if switchTab { destination = .now }
+        sheets.request(.decision(interventionId))
     }
 
-    /// Opens a live session's detail screen (the reply screen's "Open
-    /// session", or a tap in the Sessions list).
+    /// Opens a live session's room.
     func openSession(_ sessionId: String) {
-        tab = .sessions
-        if presented != nil {
-            pendingSession = sessionId
-            pendingIntervention = nil
-            presented = nil
-            return
-        }
-        presentedSession = PresentedSession(id: sessionId)
+        sheets.request(.session(sessionId))
     }
 
-    /// Either sheet finished dismissing: present whatever was waiting.
-    func sheetDismissed() {
-        if let id = pendingIntervention {
-            pendingIntervention = nil
-            presented = PresentedIntervention(id: id)
-        } else if let id = pendingSession {
-            pendingSession = nil
-            presentedSession = PresentedSession(id: id)
-        }
-    }
+    /// Opens the Tower, optionally scrolled to a section.
+    func openTower(_ section: TowerSection? = nil) { sheets.request(.tower(section)) }
+    func openDispatch() { sheets.request(.dispatch) }
+    func openHistory() { sheets.request(.history) }
+    func requestUnpair() { confirmingUnpair = true }
 
-    /// Handles `page://intervention/<id>` and `page://sessions` (the
-    /// widget). Returns false for anything else.
+    /// A sheet finished dismissing: present whatever was waiting.
+    func sheetDismissed() { sheets.dismissed() }
+
+    /// Handles `page://intervention/<id>`, `page://sessions` (the widget),
+    /// `page://now`, `page://sky` and `page://tower`. Returns false for
+    /// anything else.
     @discardableResult
     func handle(url: URL) -> Bool {
-        if url.scheme == "page", url.host == "sessions" {
-            tab = .sessions
-            return true
+        guard let link = NWDeepLink.parse(url) else { return false }
+        switch link {
+        case .now: destination = .now
+        case .sky: destination = .sky
+        case .tower: openTower()
+        case .decision(let id): open(interventionId: id)
         }
-        guard let id = DeepLink.interventionId(from: url) else { return false }
-        open(interventionId: id)
         return true
     }
 
     func reset() {
-        tab = .sessions
-        presented = nil
-        presentedSession = nil
-        pendingIntervention = nil
-        pendingSession = nil
+        destination = .now
+        sheets.close()
+        confirmingUnpair = false
     }
 }

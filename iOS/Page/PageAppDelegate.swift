@@ -8,6 +8,10 @@ import UserNotifications
 final class PageAppDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
+        #if DEBUG
+        // The render harness (-NWRender) never touches notifications or push.
+        if RenderArguments.parse(ProcessInfo.processInfo.arguments) != nil { return true }
+        #endif
         // Must happen before launch finishes: a Deny/Reply tapped on the lock
         // screen can launch the app in the background with no scene at all,
         // and iOS drops the response if no delegate is set by then.

@@ -509,7 +509,15 @@ enum NotificationDecision: Equatable {
     /// old Workers). Approve/Deny are only honoured for approval kinds, so a
     /// legacy "PAGE" category showing Approve on an idle page can't type
     /// "yes, proceed" into a session that never asked.
-    static func decide(_ response: NotificationResponseKind, userText: String?, kind rawKind: String?) -> NotificationDecision {
+    ///
+    /// `approveLevel` is how reversible the page's action is, as the phone
+    /// classifies it, or nil when the page is not in the inbox (a cold launch,
+    /// another Mac). Approve is sent from a banner only for `.undoable`:
+    /// a Considered action is a tap and an Irreversible one is a hold plus
+    /// Face ID, neither of which a banner can offer, so those open the app on
+    /// the Decision sheet instead. Deny and replies are safe from a banner.
+    static func decide(_ response: NotificationResponseKind, userText: String?, kind rawKind: String?,
+                       approveLevel: Reversibility?) -> NotificationDecision {
         let kind: InterventionKind? = rawKind.map { InterventionKind(wire: $0) }
         switch response {
         case .open:
@@ -522,6 +530,7 @@ enum NotificationDecision: Equatable {
                 if let kind, kind != .approval {
                     return .refuse("Approve and Deny only apply to approval requests. Open Page to answer this one.")
                 }
+                if id == NotificationActionID.approve, approveLevel != .undoable { return .open }
                 return .send(text: "", action: id == NotificationActionID.approve ? .approve : .deny)
             case NotificationActionID.carryOn:
                 if kind == .approval {

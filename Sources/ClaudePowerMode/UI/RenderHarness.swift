@@ -15,6 +15,14 @@ enum RenderHarness {
         return arguments[i + 1]
     }
 
+    /// The Card glow level after `--card-glow` (off, subtle, full); off without it.
+    /// Pure.
+    static func cardGlow(arguments: [String]) -> CardGlow {
+        guard let i = arguments.firstIndex(of: "--card-glow"), arguments.indices.contains(i + 1),
+              let level = CardGlow(rawValue: arguments[i + 1]) else { return .off }
+        return level
+    }
+
     /// Renders a SwiftUI view to `<dir>/<name>.png` at `scale`x. Returns the path.
     @discardableResult
     @MainActor
@@ -64,12 +72,15 @@ enum RenderHarness {
         let dir = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var failures = 0
+        let glow = cardGlow(arguments: CommandLine.arguments)
+        TowerFixtures.cardGlow = glow
         for surface in RenderSurfaces.all() {
             // One still frame per surface: pinned phase, so renders are deterministic
             // and double as the Reduce Motion fallback.
             let view = surface.view
                 .environment(\.nwFixedPhase, surface.phase)
                 .environment(\.nwReduceMotion, true)
+                .environment(\.nwCardGlow, glow)
             let url: URL?
             if let height = surface.height {
                 url = render(view, size: CGSize(width: surface.width, height: height), name: surface.name, to: dir)

@@ -164,7 +164,7 @@ struct NWPowerHeroCard: View {
         .padding(.top, 20)
         .padding(.bottom, 18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NWGlassBackground(radius: 20, fill: RGBAHex.card, glow: P.glass.opacity(0.28), glowHeight: 14))
+        .background(NWGlassBackground(radius: 20, fill: RGBAHex.card, glowHeight: 14))
         .accessibilityElement(children: .combine)
     }
 
@@ -635,6 +635,11 @@ struct NWAboutPage: View {
                 NWRow(title: "Page", detail: version) {
                     Image(systemName: "dot.radiowaves.left.and.right").font(Font.system(size: 20)).foregroundColor(P.teal.color)
                 }
+            }
+            NWCard(title: "APPEARANCE") {
+                NWSegmentedRow(title: "Card glow", detail: TowerOptions.cardGlowDetail(store.form.cardGlow),
+                               options: CardGlow.allCases.map { ($0, $0.label) },
+                               selection: store.bind(\.cardGlow))
             }
             NWCard(title: "FILES") {
                 NWRow(title: "Config file", detail: "config.json: every setting here, and a few more") {

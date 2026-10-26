@@ -98,16 +98,21 @@ check(ReplyOutcome.validate(text: "  ", action: .custom) != nil, "empty custom r
 check(ReplyOutcome.validate(text: "", action: .approve) == nil, "approve empty ok")
 
 // Notification decisions
-check(NotificationDecision.decide(.open, userText: nil, kind: "permission") == .open, "tap opens")
-check(NotificationDecision.decide(.dismiss, userText: nil, kind: "permission") == .ignore, "dismiss")
-check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission") == .send(text: "", action: .approve), "approve")
-check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: nil) == .send(text: "", action: .approve), "approve unknown kind (legacy)")
-if case .refuse = NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "idle") {} else { check(false, "approve idle refused") }
-if case .refuse = NotificationDecision.decide(.action("CARRY_ON"), userText: nil, kind: "plan") {} else { check(false, "carry on approval refused") }
-check(NotificationDecision.decide(.action("CARRY_ON"), userText: nil, kind: "idle") == .send(text: "", action: .carryOn), "carry on")
-check(NotificationDecision.decide(.action("REPLY"), userText: "   ", kind: "question") == .ignore, "empty reply ignored")
-check(NotificationDecision.decide(.action("REPLY"), userText: " use v2 ", kind: "question") == .send(text: "use v2", action: .custom), "reply")
-check(NotificationDecision.decide(.action("SOMETHING"), userText: nil, kind: "question") == .ignore, "unknown action")
+check(NotificationDecision.decide(.open, userText: nil, kind: "permission", approveLevel: nil) == .open, "tap opens")
+check(NotificationDecision.decide(.dismiss, userText: nil, kind: "permission", approveLevel: nil) == .ignore, "dismiss")
+check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission", approveLevel: .undoable) == .send(text: "", action: .approve), "approve")
+check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: nil, approveLevel: .undoable) == .send(text: "", action: .approve), "approve unknown kind (legacy)")
+// Trust model: a banner approves only an Undoable action; anything else opens the Decision sheet.
+check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission", approveLevel: .considered) == .open, "considered approve opens the app")
+check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission", approveLevel: .irreversible) == .open, "irreversible approve opens the app")
+check(NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission", approveLevel: nil) == .open, "approve of an unknown page opens the app")
+check(NotificationDecision.decide(.action("DENY"), userText: nil, kind: "permission", approveLevel: .irreversible) == .send(text: "", action: .deny), "deny is always allowed from a banner")
+if case .refuse = NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "idle", approveLevel: .undoable) {} else { check(false, "approve idle refused") }
+if case .refuse = NotificationDecision.decide(.action("CARRY_ON"), userText: nil, kind: "plan", approveLevel: nil) {} else { check(false, "carry on approval refused") }
+check(NotificationDecision.decide(.action("CARRY_ON"), userText: nil, kind: "idle", approveLevel: nil) == .send(text: "", action: .carryOn), "carry on")
+check(NotificationDecision.decide(.action("REPLY"), userText: "   ", kind: "question", approveLevel: nil) == .ignore, "empty reply ignored")
+check(NotificationDecision.decide(.action("REPLY"), userText: " use v2 ", kind: "question", approveLevel: nil) == .send(text: "use v2", action: .custom), "reply")
+check(NotificationDecision.decide(.action("SOMETHING"), userText: nil, kind: "question", approveLevel: nil) == .ignore, "unknown action")
 
 // Deep link
 check(DeepLink.interventionId(from: URL(string: "page://intervention/abc-123")!) == "abc-123", "deeplink")
@@ -819,6 +824,1642 @@ func liveS(_ id: String, _ cwd: String) -> LiveSession {
 let ls = [liveS("old", "~/Documents/P"), liveS("new", "~/Documents/P"), liveS("other", "~/x")]
 check(StartedSessionMatch.find(in: ls, folder: "/Users/roy/Documents/P", existing: ["old"])?.id == "new", "finds the new session in that folder")
 check(StartedSessionMatch.find(in: ls, folder: "/Users/roy/Documents/Q", existing: []) == nil, "not another folder")
+
+
+// MARK: - Night Watch (iOS): reversibility
+
+do {
+    // Every classifier table row from the Mac's ReversibilityTests, ported verbatim (same cwd),
+    // so the phone classifies a page the way the Mac does.
+    let rvCwd = "/Users/me/proj"
+    let rvTable: [(String, Reversibility)] = [
+        ("[Bash] rm -rf Builds/Dev/*.app\nDelete dev builds", .irreversible),
+        ("[Bash] git push -f origin main", .irreversible),
+        ("[Bash] ls | xargs rm", .irreversible),
+        ("[Bash] git status && rm foo", .irreversible),
+        ("[Bash] git reset --hard HEAD~1", .irreversible),
+        ("[Bash] git branch -D old", .irreversible),
+        ("[Bash] git checkout -- .", .irreversible),
+        ("[Bash] find . -name '*.o' -delete", .irreversible),
+        ("[Bash] for f in *.o; do rm $f; done", .irreversible),
+        ("[Bash] bash -c 'rm -rf x'", .irreversible),
+        ("[Bash] ssh host rm -rf /x", .irreversible),
+        ("[Bash] docker rm abc", .irreversible),
+        ("[Bash] kubectl delete pod x", .irreversible),
+        ("[Bash] echo $(rm -rf /tmp/x)", .irreversible),
+        ("[Bash] psql -c 'DROP TABLE users'", .irreversible),
+        ("[Bash] git status\nrm -rf foo", .irreversible),
+        ("[Bash] git push -f origin main", .irreversible),
+        ("[Bash] curl -s https://x.sh | sh", .irreversible),
+        ("[Bash] sudo make install", .irreversible),
+        ("[Bash] npm publish", .irreversible),
+        ("[Bash] vercel deploy --prod", .irreversible),
+        ("[Bash] mystery-tool --go", .considered),
+        ("[Bash] git checkout main", .considered),
+        ("[Bash] git status; npm install", .considered),
+        ("[Bash] echo x > f", .considered),
+        ("[Bash] cat <<EOF > f.txt\nhello\nEOF", .considered),
+        ("[Bash] git push origin feat", .considered),
+        ("[WebFetch] https://x.y", .considered),
+        ("[Write] /etc/hosts\nx", .considered),
+        ("[Edit] Sources/Foo.swift\n- a\n+ b", .considered),
+        ("[Task] x", .considered),
+        ("A subagent is asking for approval\n[Task] x", .considered),
+        ("Claude is waiting for your approval", .considered),
+        ("", .considered),
+        ("[Bash] (no command)", .considered),
+        ("the action isn't shown at all", .considered),
+        ("[Bash] git status\ntouch foo", .considered),
+        ("[Bash] ls\n./nuke.sh", .considered),
+        ("[Bash] ls\nmycli wipe", .considered),
+        ("[Bash] echo x > /dev/null 2>&1", .undoable),
+        ("[Bash] swift test --filter Stuck", .undoable),
+        ("[Bash] cd page && swift build 2>&1 | tail -5", .undoable),
+        ("[Bash] cargo test -- --nocapture", .undoable),
+        ("[Bash] npm test", .undoable),
+        ("[Bash] npm run build", .undoable),
+        ("[Bash] git log --oneline -5", .undoable),
+        ("[Bash] git branch", .undoable),
+        ("[Bash] find . -name '*.swift'", .undoable),
+        ("[Bash] kubectl get pods", .undoable),
+        ("[Bash] LANG=C cargo test", .undoable),
+        ("[Bash] grep -rn \"rm -rf\" .", .undoable),
+        ("[Bash] docker ps", .undoable),
+        ("[Bash] python3 -m pytest tests", .undoable),
+        ("[Bash] xcodebuild -scheme Page test", .undoable),
+        ("[Bash] ls &>/dev/null", .undoable),
+        ("[Bash] ls &>>/dev/null", .undoable),
+        ("[Read] Sources/Foo.swift", .undoable),
+        ("[Glob] **/*.swift", .undoable),
+        ("[Grep] TODO", .undoable),
+        ("[Bash] make -p deploy", .considered),
+        ("[Bash] make --print-data-base deploy", .considered),
+        ("[Bash] make -n deploy", .considered),
+        ("[Bash] make --dry-run deploy", .considered),
+        ("[Bash] make --just-print deploy", .considered),
+        ("[Bash] make --recon deploy", .considered),
+        ("[Bash] make -q deploy", .considered),
+        ("[Bash] make --question deploy", .considered),
+        ("[Bash] make test", .undoable),
+        ("[Bash] make -j4 test", .undoable),
+        ("[Bash] make -j 4 test", .undoable),
+        ("[Bash] make --file=/tmp/x.mk test", .considered),
+        ("[Bash] make -f/tmp/x.mk test", .considered),
+        ("[Bash] make -f /tmp/x.mk test", .considered),
+        ("[Bash] make -n -f /tmp/x.mk test", .considered),
+        ("[Bash] make -nf/tmp/x.mk test", .considered),
+        ("[Bash] make -C/tmp test", .considered),
+        ("[Bash] make -C /tmp test", .considered),
+        ("[Bash] make --directory=/tmp test", .considered),
+        ("[Bash] make --directory /tmp test", .considered),
+        ("[Bash] make --makefile=x test", .considered),
+        ("[Bash] make --fil=/tmp/x.mk test", .considered),
+        ("[Bash] make -Idir test", .considered),
+        ("[Bash] make -I dir test", .considered),
+        ("[Bash] make --include-dir=dir test", .considered),
+        ("[Bash] make --eval=x test", .considered),
+        ("[Bash] make -E x test", .considered),
+        ("[Bash] make -Ex test", .considered),
+        ("[Bash] make -t test", .considered),
+        ("[Bash] make --bogus test", .considered),
+        ("[Bash] make test SHELL=/tmp/x", .considered),
+        ("[Bash] make CC=/tmp/x test", .considered),
+        ("[Bash] gmake -C/tmp test", .considered),
+        ("[Bash] ninja -f/tmp/x test", .considered),
+        ("[Bash] ninja -C /tmp test", .considered),
+        ("[Bash] just --justfile=/tmp/j test", .considered),
+        ("[Bash] just test X=1", .considered),
+        ("[Bash] task --taskfile=/tmp/t test", .considered),
+        ("[Bash] just test", .undoable),
+        ("[Bash] ls\nMycli wipe", .considered),
+        ("[Bash] ls\nList the files", .considered),
+        ("[Bash] swift test\nRun the Stuck tests", .considered),
+        ("[Bash] swift test\nDon't run the slow ones", .considered),
+        ("[Bash] ls\nFind . -delete", .irreversible),
+        ("[Bash] ls\nRm -rf x", .irreversible),
+        ("[Bash] ls\nmycli wipe", .considered),
+        ("[Bash] ls\n./nuke.sh", .considered),
+        ("[Bash] git status\nrm -rf foo", .irreversible),
+        ("[Bash] swift test --filter Stuck", .undoable),
+        ("[Bash] tree -L 2", .undoable),
+        ("[Bash] tree -L 2 -I node_modules", .undoable),
+        ("[Bash] tree -R", .considered),
+        ("[Bash] tree -H . -R", .considered),
+        ("[Bash] tree -H http://x", .considered),
+        ("[Bash] tree -RH .", .considered),
+        ("[Bash] tree --fromfile list.txt", .considered),
+        ("[Bash] tree --fromtabfile list.txt", .considered),
+        ("[Bash] tree -o out", .considered),
+        ("[Bash] tree --output out", .considered),
+        ("[Bash] ls &>/dev/null", .undoable),
+        ("[Bash] ls &> /dev/null", .undoable),
+        ("[Bash] ls &>>/dev/null", .undoable),
+        ("[Bash] echo hi &> f", .considered),
+        ("[Bash] echo hi &>>f", .considered),
+        ("[Bash] echo hi &>/dev/tty", .considered),
+        ("[Bash] python3 --version", .undoable),
+        ("[Bash] node --version", .undoable),
+        ("[Bash] python3 -m pytest tests", .undoable),
+        ("[Bash] python3 -u -m pytest -q tests", .undoable),
+        ("[Bash] python3 /tmp/x.py -m pytest", .considered),
+        ("[Bash] python3 -c 'import os' -m pytest", .considered),
+        ("[Bash] node /tmp/x.js --version", .considered),
+        ("[Bash] python3 -c 'import os' -V", .considered),
+        ("[Bash] python3 -m pytest -p evil tests", .considered),
+        ("[Bash] python3 -m pytest -p no:cacheprovider tests", .undoable),
+        ("[Bash] python3 -m pytest --basetemp=out", .considered),
+        ("[Bash] npm config set script-shell /tmp/x", .considered),
+        ("[Bash] npm config get registry", .undoable),
+        ("[Bash] npm version major", .considered),
+        ("[Bash] yarn version --patch", .considered),
+        ("[Bash] npm version", .undoable),
+        ("[Bash] npm test", .undoable),
+        ("[Bash] npm run build", .undoable),
+        ("[Bash] npm test --script-shell=/tmp/x", .considered),
+        ("[Bash] npm test --prefix /tmp/x", .considered),
+        ("[Bash] bun build ./a.ts --outfile=b.js", .considered),
+        ("[Bash] go test ./...", .undoable),
+        ("[Bash] go vet ./...", .undoable),
+        ("[Bash] go test -exec /tmp/x ./...", .considered),
+        ("[Bash] go test -toolexec=/tmp/x ./...", .considered),
+        ("[Bash] go vet -vettool=/tmp/x ./...", .considered),
+        ("[Bash] go build -o ~/bin/x", .considered),
+        ("[Bash] go test -coverprofile=c.out ./...", .considered),
+        ("[Bash] go env -w GOFLAGS=x", .considered),
+        ("[Bash] cargo test -- --nocapture", .undoable),
+        ("[Bash] cargo test --release", .undoable),
+        ("[Bash] LANG=C cargo test", .undoable),
+        ("[Bash] cargo test --manifest-path /tmp/x/Cargo.toml", .considered),
+        ("[Bash] cargo clippy --fix", .considered),
+        ("[Bash] cargo doc --open", .considered),
+        ("[Bash] cargo fmt --check", .undoable),
+        ("[Bash] cargo fmt --check -- --emit files", .considered),
+        ("[Bash] swift build -c release", .undoable),
+        ("[Bash] swift build -Xswiftc -foo", .considered),
+        ("[Bash] swift test --package-path /tmp/x", .considered),
+        ("[Bash] swift test --disable-sandbox", .considered),
+        ("[Bash] xcodebuild -scheme Page test", .undoable),
+        ("[Bash] xcodebuild -scheme Page build CC=/tmp/x", .considered),
+        ("[Bash] xcodebuild -scheme Page build -xcconfig /tmp/x", .considered),
+        ("[Bash] xcodebuild -scheme Page test -resultBundlePath /tmp/r", .considered),
+        ("[Bash] xcodebuild -scheme Page test -destination 'platform=iOS Simulator,name=iPhone 15'", .undoable),
+        ("[Bash] ./gradlew test", .undoable),
+        ("[Bash] ./gradlew test --init-script=/tmp/i.gradle", .considered),
+        ("[Bash] ./gradlew test -I /tmp/i.gradle", .considered),
+        ("[Bash] ./gradlew test -Porg.x=1", .considered),
+        ("[Bash] mvn test", .undoable),
+        ("[Bash] mvn --file=/tmp/pom.xml test", .considered),
+        ("[Bash] mvn exec:exec", .considered),
+        ("[Bash] dotnet test", .undoable),
+        ("[Bash] dotnet build -c Release --no-restore", .undoable),
+        ("[Bash] dotnet build -p:PostBuildEvent=id", .considered),
+        ("[Bash] dotnet build -t:Clean", .considered),
+        ("[Bash] dotnet test --logger trx", .considered),
+        ("[Bash] rake test", .undoable),
+        ("[Bash] rake test deploy", .considered),
+        ("[Bash] pytest -q tests", .undoable),
+        ("[Bash] pytest --junitxml=/tmp/o.xml", .considered),
+        ("[Bash] pytest -c /tmp/pytest.ini", .considered),
+        ("[Bash] jest --coverage", .undoable),
+        ("[Bash] jest --config=/tmp/j.js", .considered),
+        ("[Bash] jest -u", .considered),
+        ("[Bash] mocha --require /tmp/x.js", .considered),
+        ("[Bash] mypy --python-executable /tmp/x .", .considered),
+        ("[Bash] tsc --noEmit", .undoable),
+        ("[Bash] tsc", .considered),
+        ("[Bash] swiftlint lint", .undoable),
+        ("[Bash] swiftlint --fix", .considered),
+        ("[Bash] swiftlint autocorrect", .considered),
+        ("[Bash] ctest -S /tmp/x.cmake", .considered),
+        ("[Bash] gofmt -l .", .undoable),
+        ("[Bash] gofmt -l -w .", .considered),
+        ("[Bash] prettier --check .", .undoable),
+        ("[Bash] prettier --check --write .", .considered),
+        ("[Bash] eslint .", .undoable),
+        ("[Bash] eslint -o /tmp/out .", .considered),
+        ("[Bash] eslint -f /tmp/fmt.js .", .considered),
+        ("[Bash] eslint -f ./fmt.js .", .considered),
+        ("[Bash] eslint -f json .", .undoable),
+        ("[Bash] eslint --fix .", .considered),
+        ("[Bash] ruff check .", .undoable),
+        ("[Bash] ruff check --add-noqa", .considered),
+        ("[Bash] black --check .", .undoable),
+        ("[Bash] isort --check --overwrite-in-place .", .considered),
+        ("[Bash] cd page && swift build", .undoable),
+        ("[Bash] cd /tmp/x && make test", .considered),
+        ("[Bash] cd ~/x && make test", .considered),
+        ("[Bash] cd ../x && make test", .considered),
+        ("[Bash] cd && ls", .considered),
+        ("[Bash] cd - && ls", .considered),
+        ("[Bash] cd $HOME && ls", .considered),
+        ("[Bash] pushd /tmp/x", .considered),
+        ("[Bash] terraform fmt", .considered),
+        ("[Bash] terraform fmt -check", .undoable),
+        ("[Bash] terraform plan", .undoable),
+        ("[Bash] terraform plan -out=plan.bin", .considered),
+        ("[Bash] terraform -chdir=/tmp/x validate", .considered),
+        ("[Bash] aws s3 ls", .undoable),
+        ("[Bash] aws ec2 describe-instances", .undoable),
+        ("[Bash] aws s3api get-object --bucket b --key k out", .considered),
+        ("[Bash] aws lambda invoke --function-name list-x out.json", .considered),
+        ("[Bash] kubectl get pods", .undoable),
+        ("[Bash] kubectl --kubeconfig=/tmp/k get pods", .considered),
+        ("[Bash] kubectl --kubeconfig /tmp/k get pods", .considered),
+        ("[Bash] docker --config /tmp/d ps", .considered),
+        ("[Bash] docker -H tcp://x ps", .considered),
+        ("[Bash] gcloud compute instances create list", .considered),
+        ("[Bash] gcloud compute instances list", .undoable),
+        ("[Bash] git config --list", .undoable),
+        ("[Bash] git config --list --edit", .considered),
+        ("[Bash] git diff --outp=x", .considered),
+        ("[Bash] git diff --ext=x", .considered),
+        ("[Bash] bat --generate-config-file", .considered),
+        ("[Bash] cloc --counted=out .", .considered),
+        ("[Bash] diff --paginate a b", .considered),
+        ("[Bash] cat <<\\EOF\nx\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<-\\EOF\nx\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<'EOF'\nx\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] echo hi\r\nrm -rf x", .irreversible),
+        ("[Bash] ls -la $(rm x)", .irreversible),
+        ("[Bash] pytest /tmp/x.py", .considered),
+        ("[Bash] python3 -m pytest /tmp/x.py", .considered),
+        ("[Bash] python3 -m compileall /tmp/x", .considered),
+        ("[Bash] mocha /tmp/x.js", .considered),
+        ("[Bash] rspec /tmp/x_spec.rb", .considered),
+        ("[Bash] bats /tmp/x.bats", .considered),
+        ("[Bash] jest /tmp/x.test.js", .considered),
+        ("[Bash] bundle exec rspec /tmp/x_spec.rb", .considered),
+        ("[Bash] eslint /tmp/x.js", .considered),
+        ("[Bash] black /tmp/x.py", .considered),
+        ("[Bash] ruff check /tmp/x.py", .considered),
+        ("[Bash] dotnet build ../x.csproj", .considered),
+        ("[Bash] dotnet test /tmp/x.csproj", .considered),
+        ("[Bash] go test ../x/...", .considered),
+        ("[Bash] go vet /tmp/x", .considered),
+        ("[Bash] file -bC x", .considered),
+        ("[Bash] xcodebuild -project /tmp/x.xcodeproj -scheme S build", .considered),
+        ("[Bash] xcodebuild -workspace ~/x.xcworkspace -scheme S build", .considered),
+        ("[Bash] xcodebuild -scheme S build -derivedDataPath /tmp/dd", .considered),
+        ("[Bash] pylint --output-format=json:/tmp/r.json x.py", .considered),
+        ("[Bash] rspec --format html:/tmp/x.html", .considered),
+        ("[Bash] rspec -f html:/tmp/x.html", .considered),
+        ("[Bash] bats -F /tmp/x x", .considered),
+        ("[Bash] go test ./... -test.cpuprofile=/tmp/p", .considered),
+        ("[Bash] go test ./... -test.cpuprofile p", .considered),
+        ("[Bash] go test ./... -args -test.testlogfile=/tmp/x", .considered),
+        ("[Bash] phpunit --printer Foo x", .considered),
+        ("[Bash] phpunit --log-tap /tmp/x x", .considered),
+        ("[Bash] ctest --test-dir /tmp/x", .considered),
+        ("[Bash] terraform plan -generate-config-out=x.tf", .considered),
+        ("[Bash] npm test -- --outputFile=/tmp/x", .considered),
+        ("[Bash] npm run build -- --outDir /tmp/x", .considered),
+        ("[Bash] npm test -w /tmp/x", .considered),
+        ("[Bash] cloc --write-lang-def=/tmp/x.def .", .considered),
+        ("[Bash] cloc --strip-comments=bak .", .considered),
+        ("[Bash] cloc --vcs=git .", .considered),
+        ("[Bash] git help -w log", .considered),
+        ("[Bash] git remote show origin", .considered),
+        ("[Bash] git cat-file --filters HEAD:x", .considered),
+        ("[Bash] git verify-commit HEAD", .considered),
+        ("[Bash] git log --show-signature", .considered),
+    ]
+    for (ctx, want) in rvTable {
+        let got = Reversibility.classify(context: ctx, cwd: rvCwd).level
+        check(got == want, "ported Mac row: \(ctx.replacingOccurrences(of: "\n", with: " / ")) wanted \(want), got \(got)")
+    }
+}
+
+// MARK: - Night Watch (iOS): shared fixtures
+
+/// Fixed clock for the Night Watch checks: 2027-01-15 08:00:00 UTC.
+let nwT0: TimeInterval = 1_800_000_000
+let nwNow = Date(timeIntervalSince1970: nwT0)
+let nwUTC = TimeZone(identifier: "UTC")!
+let nwCal: Calendar = {
+    var c = Calendar(identifier: .gregorian)
+    c.timeZone = TimeZone(identifier: "UTC")!
+    return c
+}()
+
+func nwNear(_ a: Double, _ b: Double, _ eps: Double = 1e-6) -> Bool { abs(a - b) < eps }
+
+func nwISO(_ t: TimeInterval) -> String { ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: t)) }
+
+/// A page built in code (memberwise), with the fields the phone reads set afterwards.
+func nwIv(_ id: String, _ kind: InterventionKind, _ context: String = "", at: TimeInterval = nwT0,
+          session: String? = nil, cwd: String = "/Users/me/proj", project: String = "page",
+          subtype: String? = nil, backend: InterventionBackend? = .claude) -> Intervention {
+    var x = Intervention(id: id, sessionId: session ?? "s-\(id)", cwd: cwd, projectName: project, kind: kind,
+                         openedAt: Date(timeIntervalSince1970: at), context: context)
+    x.subtype = subtype
+    x.backend = backend
+    return x
+}
+
+/// A live session as the Mac sends it (decoded, so its own defaults apply).
+func nwSession(_ id: String, title: String = "bottle-flip", state: String = "waitingOnApproval", host: String = "Terminal",
+               canType: Bool = true, blocker: String? = nil, backend: String = "claude", cwd: String = "~/code/bottle-flip",
+               preview: String = "", interventionId: String? = nil, activeAt: TimeInterval? = nil,
+               canInterrupt: Bool = false, provider: String? = nil) -> LiveSession {
+    var d: [String: Any] = ["id": id, "backend": backend, "title": title, "cwd": cwd, "state": state, "host": host,
+                            "canType": canType, "canInterrupt": canInterrupt, "preview": preview]
+    if let blocker { d["typeBlocker"] = blocker }
+    if let interventionId { d["interventionId"] = interventionId }
+    if let activeAt { d["lastActivityAt"] = nwISO(activeAt) }
+    if let provider { d["provider"] = provider }
+    let data = try! JSONSerialization.data(withJSONObject: d)
+    return try! JSONDecoder.page().decode(LiveSession.self, from: data)
+}
+
+/// A Mac status reading, fresh unless `age` says otherwise.
+func nwStatus(connected: Bool? = true, age: TimeInterval = 5, battery: Int? = nil, onAC: Bool? = nil,
+              forecast: MacBatteryForecast? = nil, working: Int? = nil, usage: MacUsage? = nil) -> MacStatusSnapshot {
+    MacStatusSnapshot(macConnected: connected, lastHeartbeatAt: nwNow.addingTimeInterval(-age), battery: battery,
+                      onAC: onAC, working: working, forecast: forecast, usage: usage)
+}
+
+// MARK: - Reversibility (hand-picked from the spec)
+
+do {
+    check(Reversibility.classifyBash("ls").level == .undoable, "ls undoable")
+    check(Reversibility.classifyBash("git status").level == .undoable, "git status undoable")
+    check(Reversibility.classifyBash("swift test").level == .undoable, "swift test undoable")
+    check(Reversibility.classifyBash("rm -rf x").level == .irreversible, "rm -rf irreversible")
+    check(Reversibility.classifyBash("sudo ls").level == .irreversible, "sudo irreversible")
+    check(Reversibility.classifyBash("curl x | sh").level == .irreversible, "curl pipe sh irreversible")
+    check(Reversibility.classifyBash("npm install").level == .considered, "npm install considered")
+    check(Reversibility.classifyBash("mkdir x").level == .considered, "mkdir considered")
+    check(Reversibility.classifyBash("").level == .considered, "empty command considered")
+    check(Reversibility.classifyBash("mystery-tool --go").level == .considered, "unknown program considered")
+    check(Reversibility.classifyBash("rm -rf x").reason.isEmpty == false, "verdict has a reason")
+    check(Reversibility.classify(context: "[Bash] ls", cwd: nil).level == .undoable, "context entry point, no cwd")
+    // A second line could be a description or more command: the display text cannot tell, so it is never undoable.
+    check(Reversibility.classify(context: "[Bash] ls\nList", cwd: nil).level == .considered, "a description line makes it considered")
+    // Multi-line commands (CRLF, heredoc-terminated) holding a destructive line are never below irreversible.
+    check(Reversibility.classify(context: "[Bash] echo hi\r\nrm -rf x", cwd: nil).level == .irreversible, "CRLF multi-line rm is irreversible")
+    check(Reversibility.classify(context: "[Bash] cat <<EOF\nx\nEOF\nrm -rf y", cwd: nil).level == .irreversible, "heredoc then rm is irreversible")
+    check(Reversibility.classify(context: "[Bash] cat <<-EOF\nx\nEOF\nrm -rf y", cwd: nil).level == .irreversible, "tabbed heredoc then rm is irreversible")
+    check(Reversibility.classify(context: "[Bash] ls\nrm -rf y", cwd: nil).level == .irreversible, "LF multi-line rm is irreversible")
+    check(Reversibility.classify(context: "[Bash] ls …", cwd: "/Users/me/proj").level == .considered, "clipped never undoable")
+    check(Reversibility.classify(context: "[Bash] ls …", cwd: "/Users/me/proj").reason == "the command was cut short", "clipped reason")
+    check(Reversibility.classify(context: "Plan ready for review", cwd: nil).level == .considered, "plan is considered")
+    check(Reversibility.classify(context: "A subagent is asking for approval\n[Task] x", cwd: nil).level == .considered, "subagent considered")
+    check(Reversibility.classifyBash("sudo ls").tags.contains(.destructive) || Reversibility.classifyBash("sudo ls").level == .irreversible,
+          "sudo is never undoable")
+    check(Reversibility.Verdict.combine(
+            Reversibility.Verdict(level: .undoable, tags: [.readOnly], reason: "a"),
+            Reversibility.Verdict(level: .irreversible, tags: [.destructive], reason: "b")).level == .irreversible, "combine takes the worse")
+    check(Reversibility.Verdict.combine(
+            Reversibility.Verdict(level: .undoable, tags: [.readOnly], reason: "a"),
+            Reversibility.Verdict(level: .irreversible, tags: [.destructive], reason: "b")).reason == "b", "combine keeps the worse reason")
+    check(Reversibility.classify(context: "One of these is waiting for approval:\n• [Bash] ls\n• [Bash] rm -rf x", cwd: nil).level == .irreversible,
+          "multi-tool page takes the worst call")
+}
+
+// MARK: - Phone reversibility (what a row may say)
+
+do {
+    let cwd = "/Users/you/projects/x"
+    func verdict(_ iv: Intervention) -> Reversibility? { PhoneReversibility.verdict(for: iv)?.level }
+    check(verdict(nwIv("a", .approval, "[Bash] ls -la", cwd: cwd)) == .undoable, "ls -la is undoable")
+    check(verdict(nwIv("a2", .approval, "[Bash] ls -la\nList files", cwd: cwd)) == .considered, "ls -la with a description line is considered")
+    check(verdict(nwIv("b", .approval, "[Bash] swift test", cwd: cwd)) == .undoable, "swift test is undoable")
+    check(verdict(nwIv("c", .approval, "[Bash] rm -rf Builds/Dev/*.app\nDelete", cwd: cwd)) == .irreversible, "rm -rf is irreversible")
+    check(verdict(nwIv("d", .approval, "[Bash] git push --force", cwd: cwd)) == .irreversible, "force push is irreversible")
+    check(verdict(nwIv("e", .approval, "[Edit] /Users/you/projects/x/a.swift", cwd: cwd)) == .considered, "in-repo edit is considered")
+    check(verdict(nwIv("f", .approval, "Claude is waiting for your approval", cwd: cwd)) == .considered, "bare hook text is considered")
+    var plan = nwIv("g", .approval, "Plan: do the thing", cwd: cwd); plan.subtype = "plan"
+    check(verdict(plan) == .considered, "plan approval is considered")
+    check(verdict(nwIv("h", .approval, "[Bash] ls", cwd: cwd, backend: .codex)) == .considered, "codex approval is considered")
+    check(verdict(nwIv("i", .userInput, "[Bash] ls", cwd: cwd)) == nil, "question has no class")
+    check(verdict(nwIv("j", .idle, "done", cwd: cwd)) == nil, "idle has no class")
+    check(verdict(nwIv("k", .rateLimit, "limit", cwd: cwd)) == nil, "rate limit has no class")
+    check(verdict(nwIv("l", .approval, "[Bash] ls …", cwd: cwd)) != .undoable, "clipped command never undoable")
+    var unknown = nwIv("m", .approval, "[Bash] ls -la", cwd: cwd, backend: nil)
+    unknown.backendRaw = "gemini"
+    check(verdict(unknown) == .considered, "unknown agent is considered")
+}
+
+// MARK: - Night Watch (iOS): row actions, previews, sections, ranking, copy
+
+do {
+    let mac = "Studio MBP"
+    let term = nwSession("s1", title: "bottle-flip", host: "Terminal", canType: true)
+    let cmux = nwSession("s2", title: "page", host: "cmux", canType: true)
+    let ap = nwIv("a1", .approval, "[Bash] npm test", session: "s1")
+
+    // Claude terminal approval: approve types 1, deny is Esc, a written reply is Esc, text, Return.
+    let row = NowRowBuilder.row(for: ap, session: term, macName: mac)
+    check(row.action(.approve)?.preview == "Will type 1 · Terminal › bottle-flip · Studio MBP", "approve previews typing 1")
+    check(row.action(.deny)?.preview == "Will press Esc · Terminal › bottle-flip · Studio MBP", "deny previews Esc")
+    check(row.action(.tellInstead)?.preview == "Esc, then your message · Terminal › bottle-flip · Studio MBP", "tell previews Esc then text")
+    check(NowRowBuilder.row(for: ap, session: cmux, macName: mac).action(.approve)?.preview == "Will type 1 · cmux › page · Studio MBP", "cmux › page route")
+    check(row.section == .decide && row.chip == .undoable && row.commit == .swipe, "npm test row is undoable, swipe")
+
+    // A pane that cannot be typed into offers only "Open on Mac".
+    let ghost = nwSession("s3", title: "api", host: "Ghostty", canType: false, blocker: "Page can't type into Ghostty yet")
+    let blocked = NowRowBuilder.row(for: ap, session: ghost, macName: mac)
+    check(blocked.actions.map(\.kind) == [.openOnMac], "blocked session offers one action")
+    check(blocked.action(.openOnMac)?.preview == "Can't type here · Page can't type into Ghostty yet · Studio MBP", "blocked preview names the blocker and Mac")
+    check(blocked.commit == nil, "blocked row has no commit gesture")
+
+    // Hook-owned pages: nothing is typed, the hook receives the answer.
+    let hook = nwIv("hookpre-1", .approval, "[Bash] ls", session: "s1")
+    let hr = NowRowBuilder.row(for: hook, session: term, macName: mac)
+    check(hr.action(.approve)?.preview == "Will allow it through Claude's permission hook · Studio MBP", "hookpre allow preview")
+    check(hr.action(.deny)?.preview == "Will deny it through Claude's permission hook · Studio MBP", "hookpre deny preview")
+    check(hr.actions.allSatisfy { !($0.preview ?? "").contains("Will type") }, "hook never types 1")
+    var hb = nwIv("hook-9", .approval, "[Bash] ls", session: "s1"); hb.hookBlocking = true
+    let hbr = NowRowBuilder.row(for: hb, session: term, macName: mac)
+    check(hbr.action(.tellInstead) == nil, "decisions-only hook has no written reply")
+    check(hbr.action(.approve) != nil && hbr.action(.deny) != nil, "decisions-only hook keeps approve and deny")
+
+    // Blank Mac name is never omitted.
+    let blank = NowRowBuilder.row(for: ap, session: term, macName: "  ")
+    check(blank.action(.approve)?.preview == "Will type 1 · Terminal › bottle-flip · your Mac", "blank Mac reads your Mac")
+
+    // Every preview names the Mac; nothing ever types 2.
+    var pages: [Intervention] = [ap, hook, hb, nwIv("u", .userInput, "Which file?", session: "s1"),
+                                 nwIv("l", .idle, "Looks stuck in a loop: this has failed 6 times.\ncargo test", session: "s1", subtype: "looping"),
+                                 nwIv("r", .idle, "Changed 2 files · tests passed", session: "s1"),
+                                 nwIv("rl", .rateLimit, "Limit", subtype: "usage_forecast"),
+                                 nwIv("c", .approval, "[Bash] ls", session: "s1", backend: .codex)]
+    pages.append(nwIv("p", .approval, "[Bash] ls", session: "s2"))
+    for p in pages {
+        for session in [term, ghost, nil] {
+            let r = NowRowBuilder.row(for: p, session: session, macName: mac)
+            for a in r.actions {
+                if let text = a.preview {
+                    check(text.contains(mac), "preview names the Mac: \(text)")
+                    check(!text.contains("Will type 2"), "never types 2: \(text)")
+                }
+            }
+        }
+    }
+
+    // Codex: its own adapter, never typing 1.
+    let codex = NowRowBuilder.row(for: nwIv("c2", .approval, "[Bash] ls", session: "s1", backend: .codex), session: term, macName: mac)
+    check(codex.action(.approve)?.preview == "Asks Codex to accept · Studio MBP", "codex approve preview")
+    check(codex.action(.deny)?.preview == "Asks Codex to decline · Studio MBP", "codex deny preview")
+    check(codex.action(.tellInstead) == nil, "codex offers no written reply here")
+
+    // Sections and chips.
+    check(NowRowBuilder.section(of: nwIv("q", .userInput, "x")) == .decide, "question is decide")
+    check(NowRowBuilder.section(of: nwIv("a", .approval, "x")) == .decide, "approval is decide")
+    for sub in ["looping", "stuck", "workflow_stalled", "low_battery"] {
+        check(NowRowBuilder.section(of: nwIv("i", .idle, "x", subtype: sub)) == .look, "idle \(sub) is look")
+    }
+    check(NowRowBuilder.section(of: nwIv("i", .idle, "x")) == .review, "idle otherwise is review")
+    check(NowRowBuilder.section(of: nwIv("rl", .rateLimit, "x")) == .look, "rate limit is look")
+    check(NowRowBuilder.row(for: nwIv("q", .userInput, "Which?"), session: nil, macName: mac).chip == .question, "question chip")
+    check(NowRowBuilder.row(for: nwIv("bf", .rateLimit, "x", subtype: "battery_forecast"), session: nil, macName: mac).chip == .forecast, "battery forecast chip")
+    check(NowRowBuilder.row(for: nwIv("uf", .rateLimit, "x", subtype: "usage_forecast"), session: nil, macName: mac).chip == .forecast, "usage forecast chip")
+    check(NowRowBuilder.row(for: nwIv("rl", .rateLimit, "x"), session: nil, macName: mac).chip == .rateLimited, "plain rate limit chip")
+    let looping = NowRowBuilder.row(for: nwIv("l", .idle, "Looks stuck", subtype: "looping"), session: nil, macName: mac)
+    check(looping.chip == .looksStuck && looping.action(.stop) != nil, "looping offers Stop")
+    check(NowRowBuilder.row(for: nwIv("w", .idle, "x", subtype: "workflow_stalled"), session: nil, macName: mac).action(.stop) == nil, "stalled workflow has no Stop")
+    check(NowRowBuilder.row(for: nwIv("s", .idle, "x", subtype: "stuck"), session: nil, macName: mac).action(.stop) != nil, "stuck offers Stop")
+    check(NowRowBuilder.row(for: nwIv("i", .idle, "Done"), session: nil, macName: mac).chip == .review, "finished turn is review")
+
+    // Ranking: decide first (Irreversible, then Considered or question, then Undoable), then longest wait.
+    let rIrr = NowRowBuilder.row(for: nwIv("A", .approval, "[Bash] rm -rf x\nDelete it", at: 300, session: "s1"), session: term, macName: mac)
+    let rQ = NowRowBuilder.row(for: nwIv("C", .userInput, "Which?", at: 50, session: "s1"), session: term, macName: mac)
+    let rCons = NowRowBuilder.row(for: nwIv("B", .approval, "Claude is waiting for your approval", at: 100, session: "s1"), session: term, macName: mac)
+    let rUndo = NowRowBuilder.row(for: nwIv("D", .approval, "[Bash] ls", at: 10, session: "s1"), session: term, macName: mac)
+    let rLook = NowRowBuilder.row(for: nwIv("E", .idle, "Looks stuck", at: 5, session: "s1", subtype: "looping"), session: term, macName: mac)
+    let rReview = NowRowBuilder.row(for: nwIv("F", .idle, "Done", at: 1, session: "s1"), session: term, macName: mac)
+    check(NowRowBuilder.ranked([rReview, rLook, rUndo, rCons, rQ, rIrr]).map(\.id) == ["A", "C", "B", "D", "E", "F"], "ranking order")
+    check(NowRowBuilder.ranked([rUndo, rIrr]).map(\.id) == ["A", "D"], "irreversible before undoable")
+
+    // Headlines and one-line summaries.
+    check(NowRowBuilder.summaryLine(for: nwIv("s1", .approval, "[Bash] rm -rf x\nDelete it")) == "rm -rf x", "bash summary")
+    check(NowRowBuilder.headline(for: nwIv("h1", .approval, "[Bash] rm -rf x\nDelete it")) == "Delete it?", "bash headline from description")
+    check(NowRowBuilder.summaryLine(for: nwIv("s2", .approval, "[Edit] a.swift")) == "edit a.swift", "edit summary")
+    check(NowRowBuilder.summaryLine(for: nwIv("s3", .idle, "Looks stuck in a loop: this has failed 6 times.\ncargo test", subtype: "looping")) == "cargo test failed 6×", "loop summary")
+    check(NowRowBuilder.headline(for: nwIv("h2", .idle, "Looks stuck in a loop", subtype: "looping")) == "Claude looks stuck", "loop headline")
+    check(NowRowBuilder.summaryLine(for: nwIv("s4", .idle, "No progress for 15 min — the last step returned nothing", subtype: "stuck")) == "no progress for 15 min", "stuck summary")
+    check(NowRowBuilder.summaryLine(for: nwIv("s5", .approval, "One of these is waiting for approval:\n• [Bash] ls\n• [Edit] a.swift")) == "2 tool calls waiting", "multi-tool summary")
+    check(NowRowBuilder.headline(for: nwIv("h3", .idle, "Paused", subtype: "low_battery")) == "Paused for battery", "low battery headline")
+    check(NowRowBuilder.headline(for: nwIv("h4", .idle, "Changed 1 file · tests passed")) == "Claude finished a turn", "finished turn headline")
+    check(NowRowBuilder.headline(for: nwIv("h5", .idle, "Looks stuck", subtype: "looping")) == "Claude looks stuck", "looping keeps stuck headline")
+    check(NowRowBuilder.headline(for: nwIv("h6", .idle, "x", subtype: "low_battery")) == "Paused for battery", "low battery keeps battery headline")
+    // Copy inconsistency: an older Mac's page with no backend is read as Claude everywhere else.
+    check(NowRowBuilder.headline(for: nwIv("h7", .idle, "Done", backend: nil)) == "Claude finished a turn", "nil-backend finished turn reads as Claude")
+    let long = NowRowBuilder.summaryLine(for: nwIv("long", .idle, String(repeating: "x", count: 200)))
+    check(long.count == 96 && long.hasSuffix("…"), "summary clipped to 96 with an ellipsis (\(long.count))")
+    check(NowRowBuilder.summaryLine(for: nwIv("cl", .approval, "[Bash] ls …")) == "ls …", "clipped summary kept as shown")
+
+    // Intervention decoding for agents Page has no adapter for.
+    let gem = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"g1","sessionId":"s9","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] ls","backend":"gemini"}"#.utf8))
+    check(gem.backend == nil && gem.backendRaw == "gemini" && gem.hasUnknownBackend, "gemini decodes as unknown agent")
+    let gemRow = NowRowBuilder.row(for: gem, session: nil, macName: mac)
+    check(gemRow.actions.map(\.kind) == [.openOnMac] && gemRow.action(.openOnMac)?.preview == "Couldn't tell what's on screen · Studio MBP", "unknown agent offers Open on Mac")
+    check(gemRow.commit == nil && gemRow.reversibility == .considered, "unknown agent is considered with no commit")
+    let plain = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"n1","sessionId":"s1","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] ls"}"#.utf8))
+    check(plain.backend == nil && !plain.hasUnknownBackend, "missing backend is an older Claude page, not unknown")
+    let cdx = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"c1","sessionId":"s1","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] ls","backend":"codex"}"#.utf8))
+    check(cdx.backend == .codex && cdx.agentName == "Codex", "codex decodes")
+}
+
+// MARK: - Delivery previews and prompt options
+
+do {
+    check(DeliveryPreview.route(host: "cmux", project: "page") == "cmux › page", "route")
+    check(DeliveryPreview.route(host: "unknown", project: "page") == "page", "unknown host drops out of route")
+    check(DeliveryPreview.route(host: "  ", project: "") == nil, "blank route is nil")
+    check(DeliveryPreview.typeOne(route: "cmux › page", mac: "Studio MBP") == "Will type 1 · cmux › page · Studio MBP", "type one line")
+    check(DeliveryPreview.macLabel("  ") == "your Mac", "blank Mac label")
+    check(DeliveryPreview.openInTerminal == "Open in terminal to choose this", "open in terminal copy")
+    check(DeliveryPreview.isStandingPermissionOption("Yes, and don't ask again for npm"), "standing: don't ask again")
+    check(DeliveryPreview.isStandingPermissionOption("Yes, allow all edits during this session"), "standing: this session")
+    check(DeliveryPreview.isStandingPermissionOption("Always allow"), "standing: always allow")
+    check(!DeliveryPreview.isStandingPermissionOption("Yes"), "plain yes is not standing")
+    check(!DeliveryPreview.isStandingPermissionOption("No, and tell Claude what to do differently"), "tell-claude is not standing")
+    check(DeliveryPreview.hookAllow(mac: "M") == "Will allow it through Claude's permission hook · M", "hook allow line")
+
+    let opts = PromptOption.parse("1. Yes\n2. Yes, and don't ask again for npm\n3. No")
+    check(opts.count == 3, "three options")
+    check(opts[1].isStanding && opts[1].instead == DeliveryPreview.openInTerminal, "option 2 is standing, shown not offered")
+    check(!opts[0].isStanding && !opts[2].isStanding && opts[0].instead == nil, "options 1 and 3 are offered")
+    check(PromptOption.parse("1. Yes\n3. No").isEmpty, "non-consecutive numbering is not a prompt")
+    check(PromptOption.parse("❯ 1. Yes\n  2. No").map(\.number) == [1, 2], "cursor line is read")
+    check(PromptOption.parse("1) Yes\n2) No").count == 2, "paren numbering is read")
+}
+
+// MARK: - Night Watch (iOS): card glow, render arguments, turn chips
+
+do {
+    let suite = "page.logic.glow.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    check(CardGlow.default == .off, "glow defaults to Off")
+    check(CardGlow.defaultsKey == "page.cardGlow", "glow key")
+    check(CardGlow(stored: nil) == .off && CardGlow(stored: "") == .off && CardGlow(stored: "bogus") == .off, "missing or unknown stored glow is Off")
+    check(CardGlow(stored: "subtle") == .subtle && CardGlow(stored: "full") == .full && CardGlow(stored: "off") == .off, "stored values load as themselves")
+    check(CardGlow.off.strength == 0 && CardGlow.subtle.strength == 0.5 && CardGlow.full.strength == 1, "strengths 0, 0.5, 1")
+    check(!CardGlow.off.isOn && CardGlow.subtle.isOn && CardGlow.full.isOn, "isOn")
+    check(CardGlow(argument: "FULL") == .full, "argument is case-insensitive")
+    check(CardGlow(argument: "x") == nil && CardGlow(argument: nil) == nil, "bad or missing argument is nil")
+    CardGlow.full.save(to: defaults)
+    check(CardGlow.load(from: defaults) == .full, "glow round-trips through defaults")
+    CardGlow.load(from: UserDefaults(suiteName: suite + ".empty")!).save(to: defaults)
+    check(CardGlow.load(from: defaults) == .off, "saved Off loads as Off")
+    defaults.set("nonsense", forKey: CardGlow.defaultsKey)
+    check(CardGlow.load(from: defaults) == .off, "nonsense on disk loads as Off")
+
+    for g in [CardGlow.subtle, .full] {
+        check(g.rimAlpha(at: 0) == 0 && g.rimAlpha(at: 0.5) == 0, "\(g) rim is zero over the top half")
+        check(nwNear(g.rimAlpha(at: 1), 0.42 * g.strength), "\(g) rim reaches 0.42 * strength")
+        var prev = -1.0
+        var monotonic = true
+        for k in 0...100 {
+            let v = g.rimAlpha(at: Double(k) / 100)
+            if v + 1e-12 < prev { monotonic = false }
+            prev = v
+        }
+        check(monotonic, "\(g) rim rises monotonically")
+        check(g.rimAlpha(at: 0.5 + 1e-4) < 1e-4, "\(g) rim has no jump at the midpoint")
+        check(nwNear(g.lightAlpha(at: 0), 0), "\(g) light starts at zero")
+        check(nwNear(g.lightAlpha(at: 1), g.bottomAlpha), "\(g) light ends at bottomAlpha")
+        check(g.lightAlpha(at: -3) == 0 && nwNear(g.lightAlpha(at: 9), g.bottomAlpha), "\(g) light is clamped outside 0...1")
+    }
+    check(nwNear(CardGlow.subtle.bottomAlpha, 0.17) && nwNear(CardGlow.full.bottomAlpha, 0.34), "bottom alphas 0.17 and 0.34")
+    check(CardGlow.off.rimAlpha(at: 0.9) == 0 && CardGlow.off.lightAlpha(at: 1) == 0 && CardGlow.off.bottomAlpha == 0, "Off draws nothing")
+    var fullAbove = true
+    for k in 1...100 {
+        let t = Double(k) / 100
+        if !(CardGlow.full.lightAlpha(at: t) > CardGlow.subtle.lightAlpha(at: t)) { fullAbove = false }
+    }
+    check(fullAbove, "full light is above subtle at every t in (0,1]")
+    check(CardGlow.full.rimAlpha(at: 0.75) > CardGlow.subtle.rimAlpha(at: 0.75), "full rim is above subtle in the lower half")
+}
+
+do {
+    let a = RenderArguments.parse(["-NWRender", "now", "-NWGlow", "full"])
+    check(a == RenderArguments(screen: "now", glow: .full), "render screen and glow")
+    check(RenderArguments.parse(["-NWRender", "sky"])?.glow == nil, "no glow flag gives nil glow")
+    check(RenderArguments.parse(["-NWGlow", "full"]) == nil, "glow alone is not a render")
+    check(RenderArguments.parse(["-NWRender"]) == nil, "missing screen is nil")
+    check(RenderArguments.parse(["-NWRender", "-NWGlow", "full"]) == nil, "dash-prefixed screen is nil")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWGlow", "neon"])?.glow == nil, "unknown glow is nil, screen kept")
+}
+
+do {
+    let s = TurnSummaryChips.parse("Changed 3 files (+120 −14) · tests passed")
+    check(s.map(\.text) == ["3 files", "+120", "−14", "tests ✓"], "turn chips text \(s.map(\.text))")
+    check(s.map(\.tone) == [.neutral, .added, .removed, .pass], "turn chip tones")
+    check(TurnSummaryChips.parse("Changed 1 file").map(\.text) == ["1 file"], "singular file chip")
+    check(TurnSummaryChips.parse("tests failed") == [TurnChip(text: "tests ✗", tone: .fail)], "tests failed chip")
+    check(TurnSummaryChips.parse(nil).isEmpty && TurnSummaryChips.parse("").isEmpty, "nil and empty give no chips")
+}
+
+// MARK: - Hold ring
+
+do {
+    let stop = HoldRingSpec.stopAll
+    check(stop.progress(elapsed: 0.3) == 0 && !stop.isVisible(elapsed: 0.3), "pulse ring hidden at 300 ms")
+    check(nwNear(stop.progress(elapsed: 1.05), 0.5), "pulse ring half at 1.05 s")
+    check(stop.isComplete(elapsed: 1.8) && !stop.isComplete(elapsed: 1.79), "pulse ring completes at 1.8 s")
+    let irr = HoldRingSpec.irreversible
+    check(nwNear(irr.progress(elapsed: 0.6), 0.5) && irr.isComplete(elapsed: 1.2), "irreversible ring fills over 1.2 s")
+    let ticks = HoldRingSpec.ticksCrossed(from: 0.3, to: 0.7)
+    check(ticks.count == 2 && nwNear(ticks[0], 1.0 / 3) && nwNear(ticks[1], 2.0 / 3), "ticks at a third and two thirds")
+    check(HoldRingSpec.ticksCrossed(from: 0.7, to: 0.3).isEmpty, "unwinding crosses no ticks")
+    check(nwNear(HoldRingSpec.warmth(progress: 2.0 / 3), 0), "amber until two thirds")
+    check(nwNear(HoldRingSpec.warmth(progress: 1), 1), "red at full")
+    check(nwNear(HoldRingSpec.warmth(progress: 5.0 / 6), 0.5), "halfway warm at five sixths")
+    check(nwNear(stop.unwound(from: 1, since: 0.75), 0.5), "unwinds at the fill speed")
+    check(stop.unwound(from: 0.2, since: 5) == 0, "unwound is floored at zero")
+    check(HoldRingSpec.stopScope(busy: 4) == "Press Esc in 4 busy sessions", "scope plural")
+    check(HoldRingSpec.stopScope(busy: 1) == "Press Esc in 1 busy session", "scope singular")
+    check(HoldRingSpec.stopScope(busy: 0) == "No busy sessions to stop", "scope with nothing busy")
+    check(HoldRingSpec.prompt(progress: 0, biometry: "Face ID") == "Hold to confirm", "hold prompt at rest")
+    check(HoldRingSpec.prompt(progress: 0.5, biometry: "Face ID") == "Keep holding · Face ID next", "hold prompt while filling")
+    check(HoldRingSpec.prompt(progress: 1, biometry: "Face ID") == "Face ID next", "hold prompt when full")
+}
+
+// MARK: - Navigation, sheets and links
+
+do {
+    check(NWDestination.afterDrag(from: .now, translation: -60) == .sky, "drag left from Now reveals Sky")
+    check(NWDestination.afterDrag(from: .now, translation: 60) == .now, "drag right from Now stays")
+    check(NWDestination.afterDrag(from: .sky, translation: 60) == .now, "drag right from Sky goes to Now")
+    check(NWDestination.afterDrag(from: .sky, translation: -60) == .sky, "drag left from Sky stays")
+    check(NWDestination.afterDrag(from: .now, translation: -60, vertical: 80) == .now, "vertical drag is a scroll")
+    check(NWDestination.afterDrag(from: .now, translation: -45, vertical: 40) == .now, "drag of 45 with 40 down is not horizontal")
+    check(NWDestination.afterDrag(from: .now, translation: -45) == .sky, "drag of 45 with no vertical switches")
+    check(NWDestination.isHorizontal(dx: 60, dy: 40) && !NWDestination.isHorizontal(dx: 50, dy: 40), "horizontal threshold is 1.5x")
+    check(NWDestination.now.other == .sky && NWDestination.sky.other == .now, "other destination")
+
+    var q = SheetQueue()
+    q.request(.dispatch)
+    check(q.current == .dispatch && q.pending == nil, "first sheet comes up")
+    q.request(.tower(nil))
+    check(q.current == nil && q.pending == .tower(nil), "second sheet waits for the first to dismiss")
+    q.dismissed()
+    check(q.current == .tower(nil) && q.pending == nil, "waiting sheet appears after dismiss")
+    q.request(.tower(nil))
+    check(q.current == .tower(nil) && q.pending == nil, "asking for the sheet already up changes nothing")
+    q.close()
+    check(q.current == nil && q.pending == nil, "close clears both")
+    q.request(.dispatch)
+    q.request(.history)
+    q.set(nil)
+    check(q.pending == .history, "setting nil keeps a pending sheet")
+
+    check(NWDeepLink.parse(URL(string: "page://intervention/abc")!) == .decision("abc"), "intervention link")
+    check(NWDeepLink.parse(URL(string: "page://sessions")!) == .sky, "sessions widget link opens Sky")
+    check(NWDeepLink.parse(URL(string: "page://sky")!) == .sky, "sky link")
+    check(NWDeepLink.parse(URL(string: "page://now")!) == .now, "now link")
+    check(NWDeepLink.parse(URL(string: "page://tower")!) == .tower, "tower link")
+    check(NWDeepLink.parse(URL(string: "https://x")!) == nil, "https is not a deep link")
+    check(NWDeepLink.parse(URL(string: "page://nonsense")!) == nil, "unknown page host is nil")
+
+    check(SkyMode(stored: nil) == .sky && SkyMode(stored: "bogus") == .sky, "missing or unknown Sky mode is Sky")
+    check(SkyMode(stored: "lanes") == .lanes, "lanes loads")
+    let suite = "page.logic.sky.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    SkyMode.lanes.save(to: defaults)
+    check(SkyMode.load(from: defaults) == .lanes, "Sky mode round-trips")
+}
+
+// MARK: - Pulse and Stop-all
+
+do {
+    check(PulsePress.onRelease(held: 0.1) == .tap, "short press is a tap")
+    check(PulsePress.onRelease(held: 0.3) == .tap, "dead zone is exclusive")
+    check(PulsePress.onRelease(held: 0.31) == .abandonedHold, "just past the dead zone abandons")
+    check(PulsePress.onRelease(held: 1.79) == .abandonedHold, "released just before full abandons")
+    check(PulsePress.onRelease(held: 1.8) == .completedHold, "full ring completes")
+
+    let nine = (1...9).map { i in
+        nwSession("p\(i)", title: i <= 4 ? "t\(i)" : "idle\(i)", state: i <= 4 ? "active" : "idle", canInterrupt: true)
+    }
+    let plan = StopPlan.build(sessions: nine, hasSessionList: true, macName: "Studio MBP")
+    check(plan.busy == 4 && plan.scope == "Press Esc in 4 busy sessions on Studio MBP", "four busy of nine, naming the Mac")
+    check(plan.biometricReason == "Stop 4 busy sessions on Studio MBP. Presses Esc in each." && plan.canStop, "stop names the scope and the Mac and can stop")
+    check(StopPlan.build(sessions: nine, hasSessionList: true).scope == "Press Esc in 4 busy sessions on your Mac", "an unnamed Mac reads your Mac")
+    check(plan.names == "t1, t2, t3, +1", "names are three titles plus the rest (\(plan.names))")
+    let none = StopPlan.build(sessions: [], hasSessionList: true)
+    check(none.busy == 0 && !none.canStop && none.blocker == "Nothing is working right now", "nothing busy cannot stop")
+    check(StopPlan.build(sessions: [], hasSessionList: false, workingFromStatus: 3).busy == 3, "status count before the list arrives")
+    check(StopOutcome.asked.isSuccess && !StopOutcome.nothingBusy.isSuccess && !StopOutcome.cancelled.isSuccess, "only asked is success")
+    check(StopOutcome.nothingBusy.message == "Nothing was working, so nothing was sent.", "nothing busy copy")
+}
+
+// MARK: - Night Watch (iOS): action flow, decision phases and content
+
+do {
+    check(ArmSpec.duration == 1.2, "arm lasts 1.2 s")
+    check(nwNear(ArmSpec.progress(elapsed: 0.6), 0.5) && ArmSpec.isComplete(elapsed: 1.2), "arm halfway at 0.6 s, complete at 1.2 s")
+    check(nwNear(ArmSpec.remaining(elapsed: 0.3), 0.9) && ArmSpec.remaining(elapsed: 5) == 0, "arm remaining, never negative")
+    check(ArmSpec.progress(elapsed: 5) == 1 && ArmSpec.progress(elapsed: -1) == 0, "arm progress clamps")
+
+    check(ActionGate.requiresArm(kind: .approve, commit: .swipe) && ActionGate.requiresArm(kind: .approve, commit: .tap), "swipe and tap approve arm")
+    check(ActionGate.requiresArm(kind: .deny, commit: nil) && ActionGate.requiresArm(kind: .stop, commit: nil), "deny and stop arm")
+    check(ActionGate.requiresArm(kind: .carryOn, commit: nil) && ActionGate.requiresArm(kind: .tellInstead, commit: nil), "carry on and written reply arm")
+    check(!ActionGate.requiresArm(kind: .approve, commit: .hold), "hold approve does not arm (the hold is the arm)")
+    check(!ActionGate.requiresArm(kind: .openOnMac, commit: nil), "open on Mac does not arm")
+    check(ActionGate.requiresBiometrics(kind: .approve, commit: .hold), "hold approve needs biometrics")
+    check(!ActionGate.requiresBiometrics(kind: .approve, commit: .swipe) && !ActionGate.requiresBiometrics(kind: .approve, commit: .tap), "swipe and tap never ask biometrics")
+    check(!ActionGate.requiresBiometrics(kind: .deny, commit: .hold), "deny never asks biometrics")
+    check(!ActionGate.isSendable(.openOnMac) && ActionGate.isSendable(.approve) && ActionGate.isSendable(.tellInstead), "only open on Mac is not sendable")
+
+    check(ReplyMapping.request(for: .approve) == ReplyRequest(action: .approve, text: ""), "approve is option 1")
+    check(ReplyMapping.request(for: .deny) == ReplyRequest(action: .deny, text: ""), "deny is Esc")
+    check(ReplyMapping.request(for: .stop) == ReplyRequest(action: .deny, text: ""), "stop is Esc")
+    check(ReplyMapping.request(for: .carryOn) == ReplyRequest(action: .carryOn, text: ""), "carry on")
+    check(ReplyMapping.request(for: .tellInstead, text: "  hi ") == ReplyRequest(action: .custom, text: "hi"), "written reply is trimmed")
+    check(ReplyMapping.request(for: .tellInstead, text: "  ") == nil, "blank reply is nil")
+    check(ReplyMapping.request(for: .openOnMac) == nil, "open on Mac is nil")
+    check(!ReplyMapping.needsDraftDecision(draft: "  ") && ReplyMapping.needsDraftDecision(draft: "x"), "draft decision only with words")
+    check(DraftQuestion.title(for: .approve) == "Approve without your note?", "draft question copy")
+
+    let pend = PendingAction(rowId: "r", kind: .approve, text: "", commit: .swipe, startedAt: nwNow, armed: true)
+    if case .arming(let p) = pend.phase(now: nwNow + 0.6) { check(nwNear(p, 0.5), "armed 0.6 s ago is arming at 0.5") } else { check(false, "armed 0.6 s ago is arming") }
+    check(pend.armLabel(now: nwNow + 0.6) == "Sending in 0.6 s · tap to cancel", "arm label counts down (\(pend.armLabel(now: nwNow + 0.6)))")
+    check(pend.phase(now: nwNow + 1.3) == .ready, "armed 1.3 s ago is ready")
+    check(PendingAction(rowId: "r", kind: .deny, text: "", commit: nil, startedAt: nwNow, armed: false).phase(now: nwNow) == .ready, "unarmed is ready at once")
+
+    let armingNow = nwNow + 0.6
+    if case .arming(let p) = CardOutcome.from(pending: pend, delivery: .delivered(detail: nil), now: armingNow) {
+        check(nwNear(p, 0.5), "card shows arming before anything")
+    } else { check(false, "card shows arming before anything") }
+    check(CardOutcome.from(pending: nil, delivery: nil, now: nwNow) == .none, "no pending and no delivery is none")
+    check(CardOutcome.from(pending: nil, delivery: .sent(queued: false, at: nwNow), now: nwNow) == .sending, "sent is sending, never success")
+    check(CardOutcome.from(pending: nil, delivery: .sending, now: nwNow) == .sending, "sending is sending")
+    check(CardOutcome.from(pending: nil, delivery: .delivered(detail: nil), now: nwNow) == .delivered("typed into the session on your Mac"), "delivered confirmed")
+    check(CardOutcome.from(pending: nil, delivery: .delivered(detail: "x"), now: nwNow) == .delivered("x"), "delivered detail kept")
+    check(CardOutcome.from(pending: nil, delivery: .failed("x"), now: nwNow) == .problem("x"), "failed is a problem")
+    check(CardOutcome.from(pending: nil, delivery: .alreadyReplied, now: nwNow) == .problem("Already answered at the Mac"), "already answered")
+    check(CardOutcome.from(pending: nil, delivery: .gone, now: nwNow) == .problem("Prompt closed before your answer"), "prompt closed")
+}
+
+do {
+    func inputs(_ delivery: ReplyDelivery? = nil, live: Bool = true, snapshot: Bool = false, lookup: Bool = false,
+                reason: String? = nil, closeLookup: Bool = false, now: Date = nwNow, legacy: Bool = false) -> DecisionPhase.Inputs {
+        DecisionPhase.Inputs(delivery: delivery, isLive: live, hasSnapshot: snapshot, lookupFinished: lookup,
+                             closeReason: reason, closeLookupFinished: closeLookup, now: now, legacyRelay: legacy)
+    }
+    check(DecisionPhase.derive(inputs()) == .open, "live page with no delivery is open")
+    check(DecisionPhase.derive(inputs(live: false)) == .loading, "not live and not looked up is loading")
+    check(DecisionPhase.derive(inputs(live: false, lookup: true)) == .missing, "lookup finished is missing")
+    check(DecisionPhase.derive(inputs(.delivered(detail: nil), live: false, snapshot: true, reason: "replied", closeLookup: true)) == .delivered(nil),
+          "a snapshot closed as replied is delivered")
+    check(DecisionPhase.derive(inputs(.sent(queued: false, at: nwNow.addingTimeInterval(-30)))) == .sent(queued: false, slow: false), "30 s is not slow")
+    check(DecisionPhase.derive(inputs(.sent(queued: false, at: nwNow.addingTimeInterval(-90)))) == .sent(queued: false, slow: true), "90 s is slow")
+    check(DecisionPhase.derive(inputs(.sent(queued: false, at: nwNow.addingTimeInterval(-21 * 60)))) == .unconfirmed, "21 min is unconfirmed")
+    check(DecisionPhase.derive(inputs(.sent(queued: false, at: nwNow.addingTimeInterval(-61)), legacy: true)) == .unconfirmed, "legacy relay unconfirmed after 61 s")
+    check(DecisionPhase.derive(inputs(.failed("x"))) == .failed("x"), "live failure shows the failure")
+    check(DecisionPhase.derive(inputs(.gone)) == .resolved("This page was already resolved."), "gone is resolved")
+    check(DecisionPhase.derive(inputs(.sending)) == .sending, "sending is sending")
+    check(DecisionPhase.derive(inputs(.alreadyReplied)) == .alreadyReplied, "already replied")
+    check(DecisionPhase.derive(inputs(.sent(queued: true, at: nwNow.addingTimeInterval(-3600)))) == .sent(queued: true, slow: true), "queued is never unconfirmed")
+    check(DecisionPhase.delivered(nil).autoCloseDelay == 1.4, "delivered closes after 1.4 s")
+    check(DecisionPhase.resolved("x").autoCloseDelay == 2.2 && DecisionPhase.alreadyReplied.autoCloseDelay == 2.2, "resolved and answered close after 2.2 s")
+    check(DecisionPhase.open.autoCloseDelay == nil, "open never auto closes")
+    let accepting: [DecisionPhase] = [.open, .failed("x"), .unconfirmed]
+    check(accepting.allSatisfy(\.acceptsInput), "open, failed and unconfirmed accept input")
+    check(![DecisionPhase.sending, .delivered(nil), .alreadyReplied, .loading, .missing, .resolved("x")].contains { $0.acceptsInput }, "others take no input")
+    check(DecisionPhase.alreadyReplied.statusLine(legacyRelay: false)?.text == "Already answered at the Mac", "already answered copy")
+    check(DecisionPhase.open.statusLine(legacyRelay: false) == nil, "open shows no strip")
+    check(DecisionPhase.delivered(nil).statusLine(legacyRelay: false)?.tone == .good, "delivered is the only good tone")
+    check(DecisionPhase.sent(queued: false, slow: false).statusLine(legacyRelay: false)?.tone == .neutral, "sent is not success")
+    check(DecisionPhase.delivered(nil).isDelivered && !DecisionPhase.sent(queued: false, slow: false).isDelivered, "only delivered is delivered")
+}
+
+do {
+    let mac = "Studio MBP"
+    let term = nwSession("s1", title: "bottle-flip", host: "Terminal", canType: true)
+    let rm = nwIv("x", .approval, "[Bash] rm -rf Builds/Dev/*.app\nDelete every Dev build", session: "s1")
+    let rmRow = NowRowBuilder.row(for: rm, session: term, macName: mac)
+    let rmC = DecisionContent.build(iv: rm, row: rmRow, session: term, macName: mac)
+    check(rmC.askKind == .command && rmC.ask == "rm -rf Builds/Dev/*.app", "irreversible command ask")
+    check(rmC.detail == "Delete every Dev build", "irreversible detail line")
+    check(rmC.blurb == "Claude wants to do this. It can't be undone from your phone.", "irreversible blurb")
+    check(rmC.undoNote == "No undo from your phone." && rmC.chip == .irreversible, "irreversible undo note and chip")
+    check(rmC.footer.contains(mac), "footer names the Mac")
+
+    let gem = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"g2","sessionId":"s9","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] ls","backend":"gemini"}"#.utf8))
+    let gemC = DecisionContent.build(iv: gem, row: NowRowBuilder.row(for: gem, session: nil, macName: mac), session: nil, macName: mac)
+    check(gemC.screenNote == "Couldn't tell what's on screen · Open on Mac", "unknown agent screen note")
+
+    let planPage = nwIv("pl", .approval, "Plan ready for review\n1. Refactor", session: "s1")
+    var plan = planPage; plan.subtype = "plan"
+    let planC = DecisionContent.build(iv: plan, row: NowRowBuilder.row(for: plan, session: term, macName: mac), session: term, macName: mac)
+    check(planC.askKind == .plan, "plan page asks for a plan")
+
+    let ls = nwIv("ls", .approval, "[Bash] ls", session: "s1")
+    let lsC = DecisionContent.build(iv: ls, row: NowRowBuilder.row(for: ls, session: term, macName: mac), session: term, macName: mac)
+    check(lsC.undoNote == "Read-only, or easy to take back.", "undoable undo note")
+    check(!lsC.decisionsOnly && lsC.canTell, "a normal prompt can be answered in words")
+
+    let prompt = nwIv("pr", .approval, "[Bash] npm test\n1. Yes\n2. Yes, and don't ask again for npm\n3. No", session: "s1")
+    let promptC = DecisionContent.build(iv: prompt, row: NowRowBuilder.row(for: prompt, session: term, macName: mac), session: term, macName: mac)
+    check(promptC.options.count == 3 && promptC.options[1].isStanding, "prompt options are read")
+
+    let hookPage = nwIv("hookpre-7", .approval, "[Bash] ls", session: "s1")
+    let hookC = DecisionContent.build(iv: hookPage, row: NowRowBuilder.row(for: hookPage, session: term, macName: mac), session: term, macName: mac)
+    check(hookC.isHook && hookC.footer.contains("permission hook") && hookC.footer.contains(mac), "hook footer names the hook and the Mac")
+
+    var decisionsOnly = nwIv("hk", .approval, "[Bash] ls", session: "s1"); decisionsOnly.hookBlocking = true
+    let doC = DecisionContent.build(iv: decisionsOnly, row: NowRowBuilder.row(for: decisionsOnly, session: term, macName: mac), session: term, macName: mac)
+    check(doC.decisionsOnly && !doC.canTell, "hook pages are decisions only")
+
+    let batt = nwIv("bf", .rateLimit, "Battery", subtype: "battery_forecast")
+    let battC = DecisionContent.build(iv: batt, row: NowRowBuilder.row(for: batt, session: nil, macName: mac), session: nil, macName: mac)
+    check(battC.informational != nil, "battery forecast is informational")
+    let paused = nwIv("lb", .idle, "Paused", subtype: "low_battery")
+    let pausedC = DecisionContent.build(iv: paused, row: NowRowBuilder.row(for: paused, session: nil, macName: mac), session: nil, macName: mac)
+    check(pausedC.informational != nil, "battery pause is informational")
+
+    let done = nwIv("dn", .idle, "Changed 3 files (+120 −14) · tests passed\n\nAll done.", session: "s1")
+    let doneC = DecisionContent.build(iv: done, row: NowRowBuilder.row(for: done, session: term, macName: mac), session: term, macName: mac)
+    check(doneC.turnSummary == "Changed 3 files (+120 −14) · tests passed" && doneC.ask == "All done.", "finished turn splits summary from reply")
+    check(DecisionContent.undoNote(level: nil, tags: []) == nil, "no level, no undo note")
+}
+
+// MARK: - Night Watch (iOS): the Now model, Runway, day rings, receipts
+
+do {
+    let mac = "Studio MBP"
+    func inputs(_ rows: [Intervention] = [], sessions: [LiveSession] = [], hasList: Bool = false, status: MacStatusSnapshot? = nil,
+                inbox: NowInputs.InboxState = .loaded, history: [Intervention] = [], deliveries: [String: ReplyDelivery] = [:],
+                deliveryTimes: [String: Date] = [:], now: Date = nwNow) -> NowInputs {
+        var i = NowInputs(now: now, macName: mac)
+        i.interventions = rows
+        i.sessions = sessions
+        i.hasSessionList = hasList
+        i.status = status
+        i.inbox = inbox
+        i.history = history
+        i.deliveries = deliveries
+        i.deliveryTimes = deliveryTimes
+        i.timeZone = nwUTC
+        i.calendar = nwCal
+        return i
+    }
+    let working5 = (1...5).map { nwSession("w\($0)", title: "w\($0)", state: "active", activeAt: nwT0 - 5) }
+    let reachable = nwStatus(connected: true, age: 5)
+
+    let two = NowModel.build(inputs([nwIv("a", .approval, "[Bash] ls", session: "w1"), nwIv("b", .userInput, "Which?", session: "w2")],
+                                    sessions: working5, hasList: true, status: reachable))
+    check(two.headline == "2 need you" && two.subline.hasPrefix("5 working · runway clear") && two.mood == .needsYou && two.needYouCount == 2, "two decisions and five working")
+    let one = NowModel.build(inputs([nwIv("a", .approval, "[Bash] ls", session: "w1")], status: reachable))
+    check(one.headline == "1 needs you", "one decision reads singular")
+    let look = NowModel.build(inputs([nwIv("s", .idle, "Looks stuck", session: "w1", subtype: "looping")], sessions: Array(working5.prefix(2)), hasList: true, status: reachable))
+    check(look.headline == "1 needs a look" && look.subline.hasPrefix("2 working · ") && look.mood == .needsYou, "stuck page with working sessions")
+    let quiet = NowModel.build(inputs(status: reachable))
+    check(quiet.headline == "All quiet" && quiet.mood == .quiet, "reachable and nothing open is All quiet")
+    let busyQuiet = NowModel.build(inputs(sessions: Array(working5.prefix(3)), hasList: true, status: reachable))
+    check(busyQuiet.headline == "All quiet" && busyQuiet.mood == .working, "quiet with working sessions is working")
+    let fromStatus = NowModel.build(inputs(status: nwStatus(connected: true, age: 5, working: 3)))
+    check(fromStatus.workingCount == 3 && fromStatus.subline == "3 working · nothing needs you", "working falls back to the status count")
+    let none = NowModel.build(inputs(status: nil))
+    check(none.headline == "Nothing waiting" && none.subline == "Studio MBP isn't connected" && none.mood == .quiet, "no status is never All quiet")
+    let offline = NowModel.build(inputs(status: nwStatus(connected: false, age: 5)))
+    check(offline.headline == "Nothing waiting", "offline Mac is never All quiet")
+    check(NowModel.build(inputs(inbox: .loading)).headline == "Checking…", "loading inbox reads Checking")
+    let failed = NowModel.build(inputs(status: reachable, inbox: .failed))
+    check(failed.headline == "Nothing waiting" && failed.subline == "the list may be out of date", "failed inbox says it may be stale")
+    let paused = NowModel.build(inputs([nwIv("lb", .idle, "Paused", subtype: "low_battery")], status: nwStatus(connected: true, age: 5, battery: 12, onAC: false)))
+    check(paused.mood == .dusk && paused.headline == "Paused for battery" && paused.paused, "battery pause is dusk")
+    check(paused.subline == "plug the Mac in to resume", "battery pause says how to resume")
+
+    // Receipts: the newest reply with a verdict, for 15 minutes.
+    let replied = { () -> Intervention in
+        var x = nwIv("rp", .approval, "[Bash] npm test\nRun the tests", session: "w1")
+        x.repliedAction = "approve"
+        x.repliedAt = nwNow.addingTimeInterval(-60)
+        return x
+    }()
+    let delivered = NowModel.build(inputs([], sessions: [], hasList: false, status: reachable, history: [replied],
+                                          deliveries: ["rp": .delivered(detail: nil)]))
+    check(delivered.receiptLine == "Approved npm test → page · verified 07:59:00", "delivered receipt line (\(delivered.receiptLine ?? "nil"))")
+    check(delivered.receiptFailed == false, "a confirmed delivery is not a failure")
+    let staleOK = NowModel.build(inputs([], status: reachable, history: [replied], deliveries: ["rp": .delivered(detail: nil)], now: nwNow.addingTimeInterval(20 * 60)))
+    check(staleOK.receiptLine == nil, "delivered receipts older than 15 minutes are not shown")
+    let staleFail = NowModel.build(inputs([], status: reachable, history: [replied], deliveries: ["rp": .failed("x")], now: nwNow.addingTimeInterval(20 * 60)))
+    check(staleFail.receiptLine == nil, "failed receipts are dropped after 15 minutes")
+    // A failure on a page with no reply time ages by when the phone saw it fail.
+    var unreplied = replied; unreplied.repliedAction = nil; unreplied.repliedAt = nil
+    let failedAt = nwNow.addingTimeInterval(-20 * 60)
+    let oldFail = NowModel.build(inputs([], status: reachable, history: [unreplied], deliveries: ["rp": .failed("x")], deliveryTimes: ["rp": failedAt]))
+    check(oldFail.receiptLine == nil, "a failure the phone saw 20 minutes ago is dropped")
+    let freshFail = NowModel.build(inputs([], status: reachable, history: [unreplied], deliveries: ["rp": .failed("x")], deliveryTimes: ["rp": nwNow.addingTimeInterval(-30)]))
+    check(freshFail.receiptLine != nil && freshFail.receiptFailed, "a failure seen 30 seconds ago still shows")
+    let failedReceipt = NowModel.build(inputs([], status: reachable, history: [replied], deliveries: ["rp": .failed("Mac said no")]))
+    check(failedReceipt.receiptFailed && failedReceipt.receiptLine == "npm test · Mac said no", "failed receipt is flagged")
+
+    let receiptAt = nwNow
+    var base = nwIv("rc", .approval, "[Bash] npm test\nRun", session: "w1")
+    base.repliedAction = "approve"; base.repliedAt = receiptAt
+    func rec(_ d: ReplyDelivery) -> DeliveryReceipt? { ReceiptBuilder.receipt(for: base, delivery: d, route: "cmux › page", now: nwNow) }
+    check(rec(.sending) == nil, "sending has no receipt")
+    check(rec(.sent(queued: false, at: nwNow)) == nil, "sent is not delivered")
+    check(rec(.sent(queued: true, at: nwNow))?.outcome == .macOffline, "queued while the Mac is offline")
+    check(rec(.delivered(detail: nil))?.line(timeZone: nwUTC) == "Approved npm test → cmux › page · verified 08:00:00", "delivered receipt line")
+    check(rec(.failed("x"))?.line(timeZone: nwUTC) == "npm test · x", "failed receipt line")
+    check(rec(.alreadyReplied)?.line(timeZone: nwUTC) == "npm test · Already answered at the Mac", "already answered receipt")
+    check(rec(.gone)?.line(timeZone: nwUTC) == "npm test · Prompt closed before your answer", "gone receipt")
+    var denied = base; denied.repliedAction = "deny"
+    check(ReceiptBuilder.receipt(for: denied, delivery: .delivered(detail: nil), route: "r", now: nwNow)?.verb == .denied, "deny reads Denied")
+    var stopped = nwIv("st", .idle, "x", session: "w1", subtype: "looping"); stopped.repliedAction = "deny"; stopped.repliedAt = nwNow
+    check(ReceiptBuilder.receipt(for: stopped, delivery: .delivered(detail: nil), route: "r", now: nwNow)?.verb == .stopped, "deny on a stuck page reads Stopped")
+    check(DeliveryReceipt.Outcome.timedOut.failureMessage == "Didn't confirm in time · Check on Mac", "timeout copy")
+    check(DeliveryReceipt.Outcome.sessionEnded.failureMessage == "Session ended", "session ended copy")
+    check(DeliveryReceipt.Outcome.other("").failureMessage == "Couldn't deliver the reply", "blank failure copy")
+    check(DeliveryReceipt.Outcome.delivered.failureMessage == nil, "delivered has no failure copy")
+
+    // Runway.
+    check(RunwayModel.build(status: nil, now: nwNow, timeZone: nwUTC) == .empty, "no status, empty runway")
+    let acRun = RunwayModel.build(status: nwStatus(connected: true, age: 5, onAC: true), now: nwNow, timeZone: nwUTC)
+    check(acRun.onAC && acRun.markers.isEmpty && acRun.clearUntil == nil, "on AC there is no cutoff")
+    let batt = MacBatteryForecast(cutoff: 10, minutes: 148, drainPerHour: 20)
+    let bRun = RunwayModel.build(status: nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: batt), now: nwNow, timeZone: nwUTC)
+    check(!bRun.onAC, "on battery is not AC")
+    check(bRun.clearUntil == nwNow.addingTimeInterval(148 * 60), "clear until the earliest deadline")
+    let cut = bRun.markers.first { $0.kind == .batteryCutoff }
+    check(cut?.label == "cutoff 10:28" && nwNear(cut?.fraction ?? -1, 148.0 / 360), "cutoff marker at 148 of 360 minutes (\(cut?.label ?? "nil"))")
+    check(cut?.tone == .amber, "cutoff is amber")
+    let usage = MacUsage(fiveHour: .init(pct: 62, resetsAt: nwNow.addingTimeInterval(3 * 3600)),
+                         sevenDay: .init(pct: 40, resetsAt: nwNow.addingTimeInterval(5 * 3600)),
+                         hitAt: nwNow.addingTimeInterval(2 * 3600), updatedAt: nwNow.addingTimeInterval(-60))
+    let uRun = RunwayModel.build(status: nwStatus(connected: true, age: 5, usage: usage), now: nwNow, timeZone: nwUTC)
+    let labels = Set(uRun.markers.map(\.label))
+    check(labels.contains("5h 10:00") && labels.contains("reset 11:00") && labels.contains("7d reset 13:00"), "usage markers (\(labels))")
+    check(uRun.markers.first { $0.kind == .usageLimit }?.tone == .amber && uRun.markers.first { $0.kind == .usageReset }?.tone == .green, "limit amber, reset green")
+    let staleUse = MacUsage(fiveHour: .init(pct: 62, resetsAt: nwNow.addingTimeInterval(3 * 3600)), hitAt: nil, updatedAt: nwNow.addingTimeInterval(-7 * 3600))
+    check(RunwayModel.build(status: nwStatus(connected: true, age: 5, usage: staleUse), now: nwNow, timeZone: nwUTC).markers.isEmpty, "usage older than 6 h is ignored")
+    check(RunwayModel.fraction(of: nwNow.addingTimeInterval(-1), now: nwNow) == nil && RunwayModel.fraction(of: nwNow.addingTimeInterval(7 * 3600), now: nwNow) == nil, "past or beyond six hours has no fraction")
+    check(nwNear(RunwayModel.fraction(of: nwNow.addingTimeInterval(3 * 3600), now: nwNow) ?? -1, 0.5), "three hours is halfway")
+    let lanes = RunwayModel.assignLanes([0.10, 0.20, 0.30, 0.40, 0.50].enumerated().map { i, f in
+        RunwayMarker(id: "m\(i)", kind: .usageReset, label: "x", at: nwNow, fraction: f, tone: .green)
+    })
+    check(lanes.map(\.lane) == [0, 1, 2, 0, 1], "labels that crowd each other move to later lanes (\(lanes.map(\.lane)))")
+    check(lanes.map(\.fraction) == lanes.map(\.fraction).sorted(), "markers stay sorted by fraction")
+    check(RunwayModel.assignLanes([RunwayMarker(id: "a", kind: .usageReset, label: "a", at: nwNow, fraction: 0.1, tone: .green),
+                                   RunwayModel.init(markers: [], onAC: true, clearUntil: nil).markers.first ?? RunwayMarker(id: "b", kind: .usageReset, label: "b", at: nwNow, fraction: 0.6, tone: .green)]).allSatisfy { $0.lane == 0 }, "far apart labels share a lane")
+
+    check(NowModel.runwayLine(status: nwStatus(connected: true, age: 5, battery: 41, onAC: false),
+                              runway: RunwayModel(markers: [], onAC: false, clearUntil: nwNow.addingTimeInterval(160 * 60)), timeZone: nwUTC)
+          == "runway clear till 10:40 · 41%", "runway line with a deadline")
+    check(NowModel.runwayLine(status: nwStatus(connected: true, age: 5, battery: 41, onAC: false), runway: .empty, timeZone: nwUTC) == "on battery · 41%", "on battery, no deadline")
+    check(NowModel.runwayLine(status: nwStatus(connected: true, age: 5, onAC: true), runway: .empty, timeZone: nwUTC) == "runway clear", "on AC, no deadline")
+
+    // Day rings.
+    var fast1 = nwIv("d1", .approval, "[Bash] ls", at: nwT0 - 60, session: "w1"); fast1.repliedAt = nwNow; fast1.repliedAction = "approve"
+    var fast2 = nwIv("d2", .userInput, "Which?", at: nwT0 - 30, session: "w1"); fast2.repliedAt = nwNow; fast2.repliedText = "x"; fast2.repliedAction = "custom"
+    var slow = nwIv("d3", .approval, "[Bash] ls", at: nwT0 - 300, session: "w1"); slow.repliedAt = nwNow; slow.repliedAction = "deny"
+    var yesterday = nwIv("d4", .approval, "[Bash] ls", at: nwT0 - 86_400 - 60, session: "w1"); yesterday.repliedAt = nwNow.addingTimeInterval(-86_400); yesterday.repliedAction = "approve"
+    var turn = nwIv("t1", .idle, "Done", at: nwT0 - 600, session: "w1"); turn.closedAt = nwNow
+    var turn2 = nwIv("t2", .idle, "Done", at: nwT0 - 600, session: "w1"); turn2.closedAt = nwNow
+    var stuckDone = nwIv("t3", .idle, "Looks stuck", at: nwT0 - 600, session: "w1", subtype: "looping"); stuckDone.closedAt = nwNow
+    let day = DayStats.today(history: [fast1, fast2, slow, yesterday, turn, turn2, stuckDone], now: nwNow, calendar: nwCal)
+    check(day.decisions == 3 && day.unblockedFast == 2, "three decisions, two fast (\(day.decisions), \(day.unblockedFast))")
+    check(day.finished == 3 && day.shipped == 2, "three stopped turns, two finished (\(day.finished), \(day.shipped))")
+    let rings = day.rings
+    check(rings.map(\.kind) == [.unblocked, .shipped, .calm], "rings in order")
+    check(rings[0].detail == "2 / 3" && nwNear(rings[0].progress, 2.0 / 3), "unblocked ring")
+    check(rings[1].detail == "2 / 3" && nwNear(rings[1].progress, 2.0 / 3), "shipped ring")
+    check(rings[2].detail == "not tracked" && rings[2].progress == 0, "calm not tracked on the phone")
+    let empty = DayStats.today(history: [], now: nwNow, calendar: nwCal).rings
+    check(empty[0].detail == "none yet" && empty[1].detail == "none yet" && empty[0].progress == 0, "no decisions reads none yet")
+    var calm = DayStats(); calm.calmSeconds = 7200
+    check(nwNear(calm.rings[2].progress, 0.5) && calm.rings[2].detail == "2 h", "calm from seconds (\(calm.rings[2].detail))")
+    check(RingSummary.title(rings) == "Tonight" && RingSummary.title([RingStat(kind: .calm, progress: 1, detail: "x")]) == "One ring closed ✦", "ring titles")
+    check(RingSummary.title(rings.map { RingStat(kind: $0.kind, progress: 1, detail: "x") }) == "All three rings closed ✦", "all rings closed")
+    check(RingSummary.detail(rings) == "Unblocked 2 / 3 · Shipped 2 / 3 · Calm not tracked", "ring detail line")
+}
+
+// MARK: - Now banners and Settled
+
+do {
+    func inp(auth: Bool = false, failure: String? = nil, connected: Bool = true, presence: MacPresence = .online(lastSeen: nil),
+             notifications: NotificationsState = .allowed, push: PushStatus = .registered) -> NowBanner.Inputs {
+        NowBanner.Inputs(authRejected: auth, inboxFailure: failure, connected: connected, presence: presence,
+                         notifications: notifications, push: push, now: nwNow)
+    }
+    check(NowBanner.build(inp(auth: true)).first?.title == "This pairing no longer works", "auth banner first")
+    check(NowBanner.build(inp(auth: true)).first?.action == .repair, "auth banner repairs")
+    let relay = NowBanner.build(inp(failure: "timeout", connected: false))
+    check(relay.first?.title == "Can't reach your relay" && relay.first?.action == .retry, "relay banner retries")
+    check(NowBanner.build(inp(presence: .offline(lastSeen: nwNow.addingTimeInterval(-300)))).first?.action == nil, "fresh offline offers no re-pair")
+    check(NowBanner.build(inp(presence: .offline(lastSeen: nwNow.addingTimeInterval(-7200)))).first?.action == .repair, "offline over an hour offers re-pair")
+    check(NowBanner.build(inp(presence: .offline(lastSeen: nwNow.addingTimeInterval(-300)))).first?.title == "Your Mac is offline", "offline title")
+    check(NowBanner.build(inp(notifications: .off)).first?.action == .openNotificationSettings, "notifications off opens settings")
+    check(NowBanner.build(inp(push: .problem("no token"))).first?.action == .retryPush, "push problem retries")
+    check(NowBanner.build(inp()).isEmpty, "healthy has no banners")
+    let others = NowBanner.otherMacs([TowerMacRow(id: "m2", name: "Studio", subtitle: "", isActive: false, trailing: "Switch", needsYou: 1, presence: nil),
+                                      TowerMacRow(id: "m3", name: "Air", subtitle: "", isActive: false, trailing: "Switch", needsYou: 0, presence: nil)])
+    check(others.count == 1 && others[0].title == "Studio: 1 needs you" && others[0].action == .switchMac("m2"), "other Mac banner")
+    check(SessionAvailabilityCopy(.ready).shortStatus == "Live", "ready shows Live")
+    check(SessionAvailabilityCopy(.needsRepair(keyMismatch: true)).action == .repair, "key mismatch repairs")
+    check(SessionAvailabilityCopy(.macOffline).action == .retry, "offline Mac retries")
+    check(SessionAvailabilityCopy(.macTooOld).title == "Update Page on your Mac", "old Mac copy")
+}
+
+do {
+    func settledItem(_ id: String, _ kind: InterventionKind, _ context: String, ago: TimeInterval, action: String?, subtype: String? = nil) -> Intervention {
+        var x = nwIv(id, kind, context, at: nwT0 - ago - 60, session: "w1", subtype: subtype)
+        x.repliedAt = action == nil ? nil : nwNow.addingTimeInterval(-ago)
+        x.repliedAction = action
+        return x
+    }
+    var approve = settledItem("s1", .approval, "[Bash] npm test", ago: 120, action: "approve")
+    approve.deliveryStatus = "delivered"
+    var failedDeny = settledItem("s2", .approval, "[Bash] rm -rf x", ago: 300, action: "deny")
+    failedDeny.deliveryStatus = "failed"
+    var custom = settledItem("s3", .userInput, "Which?", ago: 400, action: "custom")
+    custom.repliedText = "use the cache"
+    var longReply = settledItem("s4", .userInput, "Which?", ago: 500, action: "custom")
+    longReply.repliedText = String(repeating: "a", count: 40)
+    var sent = settledItem("s5", .approval, "[Bash] npm test", ago: 600, action: "approve")
+    sent.deliveryStatus = "sent"
+    let log = SettledLog.build(history: [approve, failedDeny, custom, longReply, sent], now: nwNow, calendar: nwCal, timeZone: nwUTC)
+    let byId = Dictionary(log.today.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    check(byId["s1"]?.text == "Approved npm test" && byId["s1"]?.tone == .approved && byId["s1"]?.status == "delivered ✓", "approved and delivered line")
+    check(byId["s5"]?.status == "sent", "approved but unconfirmed reads sent")
+    check(byId["s2"]?.text == "Denied rm -rf x" && byId["s2"]?.status == "not delivered", "failed deny reads not delivered")
+    check(byId["s3"]?.text == "Sent \u{201C}use the cache\u{201D}", "custom reply quoted")
+    check(byId["s4"]?.text == "Sent \u{201C}" + String(repeating: "a", count: 27) + "…\u{201D}", "long reply clipped to 28 characters")
+    check(log.today.first?.id == "s1", "newest first")
+    let many = (0..<14).map { settledItem("m\($0)", .approval, "[Bash] ls", ago: TimeInterval($0 * 60 + 60), action: "approve") }
+    check(SettledLog.build(history: many, now: nwNow, calendar: nwCal, timeZone: nwUTC).today.count == SettledLog.lineLimit, "today capped at twelve lines")
+
+    let yesterdayItems: [Intervention] = [
+        settledItem("y1", .approval, "[Bash] ls", ago: 86_400, action: "approve"),
+        settledItem("y2", .approval, "[Bash] ls", ago: 86_400 + 60, action: "deny"),
+        settledItem("y3", .userInput, "Which?", ago: 86_400 + 120, action: "custom"),
+        settledItem("y4", .idle, "Done", ago: 86_400 + 180, action: nil),
+        settledItem("y5", .idle, "Done", ago: 86_400 + 240, action: nil),
+        settledItem("y6", .idle, "Looks stuck", ago: 86_400 + 300, action: nil, subtype: "stuck"),
+        settledItem("y7", .idle, "Paused", ago: 86_400 + 360, action: nil, subtype: "low_battery"),
+    ]
+    let card = SettledLog.build(history: yesterdayItems, now: nwNow, calendar: nwCal, timeZone: nwUTC).days.first
+    check(card?.decided == 3 && card?.finished == 2 && card?.stuck == 1 && card?.batteryPauses == 1, "day counts (\(card?.headline ?? "nil"))")
+    check(card?.headline.hasSuffix(" · 3 decided · 2 finished · 1 stuck · battery pause ×1") == true, "day headline parts")
+    let quietDay = SettledLog.build(history: [nwIv("q", .rateLimit, "Limit", at: nwT0 - 86_400, session: "w1")], now: nwNow, calendar: nwCal, timeZone: nwUTC).days.first
+    check(quietDay?.headline.hasSuffix(" · quiet") == true, "a day with nothing decided reads quiet")
+    check(SettledLog.isDecision(approve) && !SettledLog.isDecision(nwIv("x", .approval, "x", session: "w1")), "decisions are answered pages")
+}
+
+// MARK: - Now stream: stable order, in-flight strands, Sky ring copy
+
+do {
+    let rowA = NowRowBuilder.row(for: nwIv("a", .approval, "[Bash] ls", session: "w1"), session: nil, macName: "M")
+    let rowB = NowRowBuilder.row(for: nwIv("b", .approval, "[Bash] ls", session: "w1"), session: nil, macName: "M")
+    let rowD = NowRowBuilder.row(for: nwIv("d", .approval, "[Bash] ls", session: "w1"), session: nil, macName: "M")
+    let frozen = StableOrder.merge(shown: ["a", "b", "c"], ranked: [rowD, rowA], frozen: true)
+    check(frozen.rows.map(\.id) == ["a"] && frozen.queuedNew == 1, "frozen list keeps what is shown and queues the new")
+    check(StableOrder.merge(shown: ["a", "b"], ranked: [rowD, rowB, rowA], frozen: false).rows.map(\.id) == ["d", "b", "a"], "unfrozen takes the fresh order")
+    check(StableOrder.merge(shown: [], ranked: [rowA, rowB], frozen: true).rows.map(\.id) == ["a", "b"], "frozen with nothing shown takes the fresh order")
+
+    let act1 = nwSession("i1", title: "bottle-flip", state: "active", activeAt: nwT0 - 10, canInterrupt: true)
+    let act2 = nwSession("i2", title: "page", state: "active", cwd: "~/projects/page", activeAt: nwT0 - 100)
+    let idle = nwSession("i3", title: "idle", state: "idle")
+    let strands = InFlightStrand.build(sessions: [idle, act2, act1], workflows: [:], now: nwNow)
+    check(strands.map(\.id) == ["i1", "i2"], "only working sessions, most recent first")
+    check(strands[0].age == "10s" && strands[1].age == "1m", "ages in compact form")
+    check(strands[1].project == "page" && strands[0].lastAction == "working", "project name and empty action")
+    check(InFlightStrand.build(sessions: (0..<20).map { nwSession("x\($0)", state: "active") }, workflows: [:], now: nwNow).count == 12, "at most twelve strands")
+}
+
+// MARK: - Night Watch (iOS): Sky, Lanes, the activity strip, Tower, widget copy
+
+do {
+    let s1 = nwSession("s1", title: "page", state: "active", cwd: "~/projects/page", activeAt: nwT0 - 20)
+    let s2 = nwSession("s2", title: "page-2", state: "waitingOnApproval", cwd: "~/projects/page", interventionId: "a1", activeAt: nwT0 - 60)
+    let s3 = nwSession("s3", title: "bottle", state: "idle", cwd: "~/projects/bottle-flip")
+    let sky = SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    check(sky.constellations.map(\.name) == ["bottle-flip", "page"], "constellations ordered by project name")
+    check(sky.headline == "3 sessions · 2 projects" && sky.starCount == 3, "sky headline and star count")
+    let page = sky.constellations.first { $0.name == "page" }
+    check(page?.links.count == 1 && page?.stars.count == 2, "stars in one repo are linked")
+    check(page?.urgentState == .needsYou, "a constellation shows its most urgent star")
+    let stars = Dictionary((sky.constellations.flatMap(\.stars)).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    check(stars["s2"]?.state == .needsYou && stars["s1"]?.state == .working && stars["s3"]?.state == .idle, "star states")
+    check(nwNear(stars["s1"]?.brightness ?? 0, 1), "a star that just acted is full bright")
+    check((stars["s2"]?.brightness ?? 0) >= 0.8, "a star waiting on you is never dim")
+    check(sky.constellations.flatMap(\.stars).allSatisfy { $0.x >= 0.05 && $0.x <= 0.95 && $0.y >= 0.05 && $0.y <= 0.95 }, "positions stay on the sky")
+    check(SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow) == sky, "equal input gives equal sky")
+    let stuck = SkyModel.build(sessions: [s1], interventions: [nwIv("l", .idle, "x", session: "s1", subtype: "looping")], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    check(stuck.constellations.first?.stars.first?.state == .stuck, "a stuck page makes a star stuck")
+    let paused = SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: true, now: nwNow)
+    let pausedStars = Dictionary((paused.constellations.flatMap(\.stars)).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+    check(pausedStars["s1"]?.state == .paused && pausedStars["s2"]?.state == .needsYou, "battery pause dims working stars, not waiting ones")
+    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).headline == "No live sessions", "empty sky headline")
+    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).isEmpty, "empty sky is empty")
+
+    check(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-30), state: .working, now: nwNow) == 1, "full for 30 s")
+    check(nwNear(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-600), state: .working, now: nwNow), 0.35), "working star dims to 0.35 at ten minutes")
+    check(SkyModel.brightness(lastActivityAt: nil, state: .needsYou, now: nwNow) == 1, "unknown activity waiting on you is full")
+    check(nwNear(SkyModel.brightness(lastActivityAt: nil, state: .idle, now: nwNow), 0.35), "unknown activity sits at the floor")
+    check(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-600), state: .needsYou, now: nwNow) >= 0.8, "needs-you floor is 0.8")
+    check(SkyModel.projectName(cwd: "~/projects/page", fallback: "x") == "page", "project name is the folder")
+    check(SkyModel.projectName(cwd: "~/projects/page/", fallback: "x") == "page", "trailing slash ignored")
+    check(SkyModel.projectName(cwd: "~", fallback: "fb") == "fb", "home uses the fallback")
+    check(StableHash.fnv1a("") == 0xcbf29ce484222325, "fnv1a of empty")
+    check(StableHash.fnv1a("a") == 0xaf63dc4c8601ec8c, "fnv1a of a")
+    check(StableHash.unit("page", salt: 2) == StableHash.unit("page", salt: 2) && (0..<1).contains(StableHash.unit("page", salt: 2)), "unit is repeatable and in 0..<1")
+    check(ProjectHue(key: "~/projects/page") == ProjectHue(key: "~/projects/page"), "project hue is stable")
+    check(!ProjectHue.allCases.contains { [0xF59E0B, 0xFBBF24, 0xFFB020, 0xF5A524].contains($0.hex) }, "no project hue is amber")
+
+    let needs = nwSession("n1", title: "needs", state: "waitingOnApproval", cwd: "~/a/needs", interventionId: "x1")
+    let work = nwSession("w1", title: "work", state: "active", cwd: "~/a/work", activeAt: nwT0 - 10)
+    let idleS = nwSession("i1", title: "idle", state: "idle", cwd: "~/a/idle")
+    let sky2 = SkyModel.build(sessions: [idleS, work, needs], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    let lanesModel = LanesModel.build(sky: sky2, log: ActivityLog(), now: nwNow)
+    check(lanesModel.groups.map(\.name) == ["needs", "work", "idle"], "lane groups: needs you, working, idle")
+    check(lanesModel.axis == ["-4h", "-3h", "-2h", "-1h", "now"], "lane axis")
+    check(lanesModel.coverageNote != nil, "an empty log says what is blank")
+    var seen = ActivityLog()
+    seen.record([needs.id: .needsYou, work.id: .working, idleS.id: .idle], at: nwNow.addingTimeInterval(-4 * 3600))
+    seen.record([needs.id: .needsYou, work.id: .working, idleS.id: .idle], at: nwNow)
+    check(LanesModel.build(sky: sky2, log: seen, now: nwNow).coverageNote == nil, "four hours watched is full coverage")
+    var brandNew = ActivityLog()
+    brandNew.record([needs.id: .needsYou], at: nwNow)
+    check(LanesModel.build(sky: sky2, log: brandNew, now: nwNow).coverageNote != nil, "a just-started watch says the strip is partial")
+    check(LanesModel.build(sky: sky2, log: seen, now: nwNow).groups.first?.rows.first?.id == needs.id, "needs-you row first")
+}
+
+do {
+    var log = ActivityLog()
+    let cells = log.strip(for: "s", now: nwNow, hours: 4, current: nil)
+    check(cells.count == 48 && cells.allSatisfy { $0.level == nil }, "an unseen session has 48 blank cells")
+    log.record(["s": .working], at: nwNow)
+    let withCurrent = log.strip(for: "s", now: nwNow, hours: 4, current: .needsYou)
+    check(withCurrent.last?.level == .needsYou, "the last cell takes the current state")
+    check(log.strip(for: "s", now: nwNow, hours: 4).last?.level == .working, "the last cell is what was recorded")
+    check(log.strip(for: "s", now: nwNow, hours: 4).first?.level == nil, "unobserved cells stay blank")
+    var same = ActivityLog()
+    same.record(["s": .working], at: nwNow)
+    same.record(["s": .needsYou], at: nwNow.addingTimeInterval(10))
+    same.record(["s": .working], at: nwNow.addingTimeInterval(20))
+    check(same.strip(for: "s", now: nwNow.addingTimeInterval(20), hours: 4).last?.level == .needsYou, "one bucket keeps the more urgent state")
+    var old = ActivityLog()
+    old.record(["old": .working], at: nwNow.addingTimeInterval(-25 * 3600))
+    old.record(["new": .idle], at: nwNow)
+    check(old.samples["old"] == nil && old.samples["new"] != nil, "samples older than a day are pruned")
+    var span = ActivityLog()
+    span.record(["s": .idle], at: nwNow.addingTimeInterval(-10 * 3600))
+    check(span.observedSpan(now: nwNow) == 4 * 3600, "observed span is capped at the window")
+    var short = ActivityLog()
+    short.record(["s": .idle], at: nwNow.addingTimeInterval(-60))
+    check(short.observedSpan(now: nwNow) == 60, "observed span is what was watched")
+    let data = try! JSONEncoder().encode(same)
+    check((try! JSONDecoder().decode(ActivityLog.self, from: data)) == same, "activity log round-trips as JSON")
+    check(ActivityLog.bucketIndex(nwNow) == ActivityLog.bucketIndex(nwNow.addingTimeInterval(299)), "a bucket is five minutes")
+}
+
+do {
+    let mac = "Studio MBP"
+    let rawOn = nwStatus(connected: true, age: 5, battery: 41, onAC: false)
+    check(MacChipModel.build(macName: mac, status: rawOn, now: nwNow) == MacChipModel(text: "Studio MBP · on battery · 41%", tone: .ok), "online on battery chip")
+    let soon = nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: MacBatteryForecast(cutoff: 10, minutes: 20, drainPerHour: 0))
+    check(MacChipModel.build(macName: mac, status: soon, now: nwNow).tone == .warn, "under 30 minutes is amber")
+    check(MacChipModel.build(macName: mac, status: nwStatus(connected: false, age: 5), now: nwNow) == MacChipModel(text: "Studio MBP · offline", tone: .offline), "offline chip")
+    check(MacChipModel.build(macName: mac, status: nwStatus(connected: true, age: 300), now: nwNow) == MacChipModel(text: "Studio MBP · not checking in", tone: .offline), "stale chip")
+    check(MacChipModel.build(macName: mac, status: nil, now: nwNow) == MacChipModel(text: "Studio MBP", tone: .ok), "no reading is just the name")
+
+    let fc = MacBatteryForecast(cutoff: 10, minutes: 148, drainPerHour: 20)
+    let tp = TowerPower.build(status: nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: fc))
+    check(tp.headline == "41% · cutoff in about 2 h 28 min", "power headline \(tp.headline)")
+    check(tp.state == "on battery" && !tp.warn, "on battery, not warning")
+    check(nwNear(tp.fraction ?? -1, 0.41) && nwNear(tp.cutoffFraction ?? -1, 0.10), "battery and cutoff fractions")
+    check(TowerPower.build(status: nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: MacBatteryForecast(cutoff: 10, minutes: 20, drainPerHour: 0))).warn, "under 30 minutes warns")
+    let ac = TowerPower.build(status: nwStatus(connected: true, age: 5, battery: 82, onAC: true))
+    check(ac.headline == "82% · agents keep running on power" && ac.state == "on power", "on power headline")
+    check(TowerPower.build(status: nil).headline == "No reading from your Mac", "no reading")
+
+    let saved = SavedMac(id: "a", name: "Studio MBP", relayURL: "https://page.example.workers.dev", token: "t", sessionKey: nil,
+                         pairedAt: nwCal.date(from: DateComponents(year: 2026, month: 10, day: 2, hour: 12))!)
+    let other = SavedMac(id: "b", name: "Air", relayURL: "https://page.example.workers.dev", token: "t2", sessionKey: nil,
+                         pairedAt: nwCal.date(from: DateComponents(year: 2026, month: 10, day: 3, hour: 12))!)
+    let widgetB = WidgetStatus(macName: "Air", presence: .online, needsYou: 1, working: 2, live: 5, batteryLine: nil, usageLine: nil, fetchedAt: nwNow)
+    let rows = TowerMacRow.build(saved: [saved, other], activeId: "a", activeStatus: nwStatus(connected: true, age: 5), others: ["b": widgetB], now: nwNow, calendar: nwCal)
+    check(rows.count == 2 && rows[0].trailing == "Active" && rows[0].isActive, "active Mac row")
+    check(rows[0].subtitle == "live · paired 2 Oct", "active subtitle \(rows[0].subtitle)")
+    check(rows[1].trailing == "Switch" && rows[1].needsYou == 1 && rows[1].subtitle == "1 needs you · 2 working · 5 live", "other Mac row (\(rows[1].subtitle))")
+    check(TowerMacRow.pairedDate(saved.pairedAt, calendar: nwCal) == "2 Oct", "paired date reads 2 Oct")
+    check(TowerScroll.target(from: .runway) == .budget && TowerScroll.target(from: .moon) == .power && TowerScroll.target(from: .chip) == nil, "scroll targets")
+    check(NotificationsState.off.text == "Off — you won't be paged" && NotificationsState.notSet.text == "Not set up yet", "notification copy")
+    check(PushStatus.registered.text == "Registered with your relay", "push copy")
+    check(RelayConnectionText.text(connected: true, connecting: false, failure: nil) == "Connected", "relay connected")
+    check(RelayConnectionText.text(connected: false, connecting: true, failure: nil) == "Connecting…", "relay connecting")
+    check(RelayConnectionText.text(connected: false, connecting: false, failure: "no route") == "Offline — no route", "relay offline with reason")
+    check(RelayConnectionText.text(connected: false, connecting: false, failure: nil) == "Reconnecting…", "relay reconnecting")
+}
+
+do {
+    func ws(_ presence: WidgetStatus.Presence, _ needsYou: Int, snapshot: MacStatusSnapshot? = nil) -> WidgetStatus {
+        WidgetStatus(macName: "Studio MBP", presence: presence, needsYou: needsYou, working: nil, live: nil, batteryLine: nil,
+                     usageLine: nil, fetchedAt: nwNow, usage: nil, snapshot: snapshot)
+    }
+    check(ws(.offline, 0).faceHeadline == "Mac offline", "offline face headline even with nothing to do")
+    check(ws(.stale, 0).faceHeadline == "Not checking in", "stale face headline")
+    check(ws(.online, 0).faceHeadline == "All quiet" && ws(.online, 2).faceHeadline == "2 need you", "online face headlines")
+    check(ws(.offline, 0).isUnreachable && ws(.stale, 0).isUnreachable && !ws(.online, 0).isUnreachable, "unreachable is offline or stale")
+    check(ws(.online, 0, snapshot: nwStatus(connected: true, age: 5, battery: 41, onAC: false)).macLine == "Studio MBP · on battery 41%", "mac line on battery")
+    check(ws(.online, 0, snapshot: nwStatus(connected: true, age: 5, onAC: true)).macLine == "Studio MBP · on power", "mac line on power")
+    check(ws(.online, 0).macLine == "Studio MBP", "mac line without a snapshot")
+    check(ws(.online, 0).runway(now: nwNow, timeZone: nwUTC).onAC && ws(.online, 0).runway(now: nwNow, timeZone: nwUTC).markers.isEmpty, "no snapshot, no runway")
+    let withFc = ws(.online, 0, snapshot: nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: MacBatteryForecast(cutoff: 10, minutes: 148, drainPerHour: 0)))
+    check(withFc.runway(now: nwNow, timeZone: nwUTC).markers.contains { $0.id == "battery-cutoff" }, "widget runway has the cutoff")
+}
+
+// MARK: - Dispatch
+
+do {
+    let folders = [
+        StartFolders.Folder(path: "/Users/me/a", name: "a", lastUsedAt: nwNow.addingTimeInterval(-7200)),
+        StartFolders.Folder(path: "/Users/me/b", name: "bottle", lastUsedAt: nil),
+        StartFolders.Folder(path: "/Users/me/c", name: "Page", lastUsedAt: nwNow.addingTimeInterval(-60)),
+    ]
+    var draft = DispatchDraft()
+    check(draft.visibleFolders(folders, now: nwNow).map(\.name) == ["Page", "a", "bottle"], "most recent first, never used last")
+    draft.search = "PAG"
+    check(draft.visibleFolders(folders, now: nwNow).map(\.name) == ["Page"], "search ignores case")
+    draft.search = "users/me/b"
+    check(draft.visibleFolders(folders, now: nwNow).map(\.name) == ["bottle"], "search matches the path")
+    draft.search = ""
+    draft.ensureSelection(in: folders, now: nwNow)
+    check(draft.selectedPath == "/Users/me/c", "most recent folder is picked")
+    draft.selectedPath = "/gone"
+    draft.ensureSelection(in: folders, now: nwNow)
+    check(draft.selectedPath == "/Users/me/c", "a vanished folder is replaced")
+    check(draft.canStart(availability: .ready, sending: false), "ready with a folder can start")
+    check(!draft.canStart(availability: .loading, sending: false) && !draft.canStart(availability: .ready, sending: true), "loading or sending cannot start")
+    var codex = draft; codex.agent = .codex
+    check(!codex.canStart(availability: .ready, sending: false), "only Claude starts from the phone")
+    var long = draft; long.prompt = String(repeating: "a", count: SessionComposer.maxCharacters + 1)
+    check(long.promptProblem != nil && !long.canStart(availability: .ready, sending: false), "a prompt over 8000 characters cannot start")
+    var fits = draft; fits.prompt = String(repeating: "a", count: SessionComposer.maxCharacters)
+    check(fits.promptProblem == nil, "8000 characters fits")
+    check(draft.startTitle(mac: "Studio MBP") == "Start on Studio MBP" && draft.startTitle(mac: " ") == "Start on your Mac", "start title names the Mac")
+    check(DispatchDraft.footer(mac: "Studio MBP").contains("Studio MBP"), "footer names the Mac")
+    check(DispatchAvailability.from(folders: StartFolders(clientId: nil, enabled: false, folders: folders), error: nil) == .disabledOnMac, "disabled on the Mac")
+    check(DispatchAvailability.from(folders: StartFolders(clientId: nil, enabled: true, folders: []), error: nil) == .noFolders, "no folders")
+    check(DispatchAvailability.from(folders: nil, error: "boom") == .failed("boom"), "failed with an error")
+    check(DispatchAvailability.from(folders: nil, error: nil) == .loading, "loading otherwise")
+    check(DispatchAvailability.from(folders: StartFolders(clientId: nil, enabled: true, folders: folders), error: nil) == .ready, "ready with folders")
+    check(DispatchStatus.from(state: .sending, startWaitExpired: false)?.waiting == true, "sending waits")
+    check(DispatchStatus.from(state: .typed(nil), startWaitExpired: true)?.tone == .warn, "started but not shown is a warning")
+    check(DispatchStatus.from(state: .typed("ok"), startWaitExpired: false)?.tone == .good, "typed is good")
+    check(DispatchStatus.from(state: nil, startWaitExpired: false) == nil, "no state, no status")
+    check(DispatchAgent.claude.canStartFromPhone && !DispatchAgent.codex.canStartFromPhone && !DispatchAgent.ollama.canStartFromPhone, "only Claude starts from the phone")
+}
+
+// MARK: - Return Brief
+
+do {
+    let since = nwNow.addingTimeInterval(-6720)
+    let suite = "page.logic.brief.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    check(!AwayTracker.shouldShowBrief(lastActive: nwNow.addingTimeInterval(-44 * 60), dismissedFor: nil, now: nwNow), "no brief at 44 minutes")
+    check(AwayTracker.shouldShowBrief(lastActive: nwNow.addingTimeInterval(-45 * 60), dismissedFor: nil, now: nwNow), "brief at 45 minutes")
+    check(!AwayTracker.shouldShowBrief(lastActive: nwNow.addingTimeInterval(-45 * 60), dismissedFor: nwNow.addingTimeInterval(-45 * 60), now: nwNow), "dismissed for this absence stays dismissed")
+    check(!AwayTracker.shouldShowBrief(lastActive: nil, dismissedFor: nil, now: nwNow), "no record, no brief")
+    check(Absence.make(lastActive: nwNow.addingTimeInterval(-9 * 60), returnedAt: nwNow) == nil, "under ten minutes is not an absence")
+    let abs = Absence.make(lastActive: nwNow.addingTimeInterval(-10 * 60), returnedAt: nwNow)
+    check(abs?.duration == 600, "an absence from ten minutes")
+    check(abs?.showsHandover(now: nwNow.addingTimeInterval(9 * 60)) == true && abs?.showsHandover(now: nwNow.addingTimeInterval(11 * 60)) == false, "handover for ten minutes after return")
+    let long = Absence(since: nwNow.addingTimeInterval(-45 * 60), returnedAt: nwNow)
+    check(long.shouldShowBrief(dismissedFor: nil) && !long.shouldShowBrief(dismissedFor: long.since), "absence brief unless dismissed")
+    AwayTracker.markActive(nwNow, defaults)
+    AwayTracker.markDismissed(for: nwNow, defaults)
+    let loaded = AwayTracker.load(defaults)
+    check(loaded.lastActive == nwNow && loaded.dismissedFor == nwNow, "away tracker round-trips")
+
+    check(ReturnBrief.brief(6720) == "1h 52m" && ReturnBrief.brief(2700) == "45m" && ReturnBrief.brief(7200) == "2h", "brief durations")
+    check(ReturnBrief.handoverSentence(away: 6720, finished: 3, needYou: 2) == "While you were away (1h 52m) · 3 finished · 2 need you", "handover sentence")
+    check(ReturnBrief.handoverSentence(away: 500, finished: 3, needYou: 2) == nil, "short absence has no handover")
+    check(ReturnBrief.handoverSentence(away: 6720, finished: 0, needYou: 0) == nil, "nothing to say, no handover")
+
+    var a1 = nwIv("h1", .approval, "[Bash] ls", at: nwT0 - 3600, session: "w1"); a1.repliedAt = nwNow.addingTimeInterval(-3000); a1.repliedAction = "approve"
+    var a2 = nwIv("h2", .approval, "[Bash] ls", at: nwT0 - 2500, session: "w1"); a2.repliedAt = nwNow.addingTimeInterval(-2000); a2.repliedAction = "deny"
+    var a3 = nwIv("h3", .userInput, "Which?", at: nwT0 - 1500, session: "w1"); a3.repliedAt = nwNow.addingTimeInterval(-1000); a3.repliedAction = "custom"
+    var f1 = nwIv("f1", .idle, "Changed 3 files · tests passed\n\nAll done.", at: nwT0 - 900, session: "w1"); f1.closedAt = nwNow.addingTimeInterval(-500)
+    var f2 = nwIv("f2", .idle, "Changed 1 file · tests failed\n\nOops", at: nwT0 - 800, session: "w1"); f2.closedAt = nwNow.addingTimeInterval(-400)
+    let brief = ReturnBrief.build(since: since, now: nwNow, history: [a1, a2, a3, f1, f2], open: [], sessions: [], hasSessionList: false,
+                                  status: nil, timeZone: nwUTC)
+    check(brief.title == "While you were away · 1h 52m", "brief title")
+    check(brief.window == "06:08 to 08:00", "brief window \(brief.window)")
+    check(brief.finished == 2 && brief.counts.first { $0.kind == .needYou }?.value == 0, "two finished, none need you")
+    check(nwNear(brief.sunrise, 2.0 / 6), "sunrise is finished over six")
+    check(!brief.hasUrgent, "nothing open is not urgent")
+    let decided = brief.lines.first { $0.id == "decided" }
+    check(decided?.title == "Decided 3" && decided?.detail == "1 approved · 1 denied · 1 answered in words", "decided line (\(decided?.detail ?? "nil"))")
+    let fin = brief.lines.first { $0.id == "finished" }
+    check(fin?.detail == "2 turns · 4 files · tests passing in 1 of 2" && fin?.tone == .warn, "finished line (\(fin?.detail ?? "nil"))")
+    let open = ReturnBrief.build(since: since, now: nwNow, history: [], open: [nwIv("q", .approval, "[Bash] ls", session: "w1")], sessions: [],
+                                 hasSessionList: false, status: nil, timeZone: nwUTC)
+    check(open.hasUrgent && open.counts.first { $0.kind == .needYou }?.value == 1, "an open decision is urgent and counted")
+    check(ReturnBrief.build(since: since, now: nwNow, history: [], open: [], sessions: [], hasSessionList: false,
+                            status: nwStatus(connected: true, age: 5, battery: 41, onAC: false), timeZone: nwUTC).lines.contains { $0.id == "battery" }, "battery line from the status")
+}
+
+// MARK: - First run, problem states and paired welcome
+
+do {
+    check(PairedWelcome.build(macName: "", liveSessions: nil, isFirstMac: true, notifications: .notSet).title == "Your Mac is paired", "blank Mac is named Your Mac")
+    let first = PairedWelcome.build(macName: "Studio MBP", liveSessions: nil, isFirstMac: true, notifications: .notSet)
+    check(first.subtitle == "Your first star. Sessions appear as soon as your Mac reports them.", "first star with no list yet")
+    check(first.action == .allowNotifications && first.skipTitle == "Not now", "undecided notifications ask once, skippable")
+    check(PairedWelcome.subtitle(liveSessions: 14, isFirstMac: true) == "Your first star. 14 sessions are live right now.", "fourteen live")
+    check(PairedWelcome.subtitle(liveSessions: 1, isFirstMac: false) == "1 session is live right now.", "one live, not the first Mac")
+    check(PairedWelcome.subtitle(liveSessions: 0, isFirstMac: false) == "Start an agent on your Mac and it appears here.", "none live yet")
+    check(PairedWelcome.build(macName: "M", liveSessions: 0, isFirstMac: false, notifications: .allowed).action == .continueToNow, "allowed continues")
+    check(PairedWelcome.build(macName: "M", liveSessions: 0, isFirstMac: false, notifications: .allowed).skipTitle == nil, "allowed has no skip")
+    check(PairedWelcome.build(macName: "M", liveSessions: 0, isFirstMac: false, notifications: .off).action == .openSettings, "off opens Settings")
+    check(PairedWelcome.promiseLines.count == 3, "three promises")
+
+    var pi = ProblemState.Inputs(macName: "Studio MBP", presence: .online(lastSeen: nil), authRejected: false, connected: true, now: nwNow)
+    check(ProblemState.build(pi) == nil, "a healthy online Mac has no problem")
+    pi.authRejected = true
+    let replaced = ProblemState.build(pi)
+    check(replaced?.kind == .pairingReplaced && replaced?.tone == .amber && replaced?.action == .repair, "replaced pairing is amber with repair")
+    check(replaced?.replacesBanners == ["auth", "never"], "replaced pairing replaces the auth and never banners")
+    check(replaced?.title == "This pairing was replaced", "replaced title")
+    pi.authRejected = false
+    pi.presence = .neverConnected
+    check(ProblemState.build(pi)?.title == "Your Mac hasn't used this pairing", "never connected title")
+    pi.presence = .online(lastSeen: nil)
+    pi.connected = false
+    pi.inboxFailure = "timeout"
+    pi.relayHost = "page.example.workers.dev"
+    let relay = ProblemState.build(pi)
+    check(relay?.kind == .relayUnreachable && relay?.action == .recheck, "relay unreachable rechecks")
+    check(relay?.subtitle == "page.example.workers.dev isn't answering · retrying", "relay subtitle names the host (\(relay?.subtitle ?? "nil"))")
+    check(relay?.replacesBanners == ["relay"], "relay replaces the relay banner")
+
+    var off = ProblemState.Inputs(macName: "Studio MBP", presence: .offline(lastSeen: nwNow.addingTimeInterval(-14 * 60)), authRejected: false, connected: true, now: nwNow)
+    let offline = ProblemState.build(off)
+    check(offline?.kind == .macAsleep && offline?.tone == .slate && offline?.title == "Studio MBP is offline", "offline Mac is slate")
+    check(offline?.subtitle == "Last heartbeat 14m ago", "offline subtitle (\(offline?.subtitle ?? "nil"))")
+    check(offline?.secondaryTitle == nil, "no re-pair for a recent offline Mac")
+    off.battery = 12; off.onAC = false; off.cutoff = 10
+    check(ProblemState.build(off)?.details.contains { $0.text == "It was at 12% — probably the cutoff" } == true, "battery near the cutoff explains the stop")
+    off.battery = 20
+    check(ProblemState.build(off)?.details.contains { $0.text.hasPrefix("It was at") } == false, "battery well above the cutoff says nothing")
+    off.battery = nil; off.onAC = nil; off.pausedSessions = 3
+    check(ProblemState.build(off)?.details.contains { $0.text == "Your 3 sessions were paused with summaries" } == true, "paused sessions are named")
+    var gone = off
+    gone.presence = .offline(lastSeen: nwNow.addingTimeInterval(-2 * 3600))
+    check(ProblemState.build(gone)?.secondaryAction == .repair && ProblemState.build(gone)?.secondaryTitle == "Re-pair…", "gone for over an hour offers re-pair")
+    gone.presence = .stale(lastSeen: nwNow.addingTimeInterval(-300))
+    check(ProblemState.build(gone)?.title == "Studio MBP stopped checking in", "stale title")
+}
+
+// MARK: - Night Watch (iOS): the Session Room, Story, workflows, Changes, terminal
+
+do {
+    let claude = AgentCharacter.from(backend: .known(.claude), provider: nil)
+    let codex = AgentCharacter.from(backend: .known(.codex), provider: nil)
+    let other = AgentCharacter.from(backend: .other("gemini"), provider: nil)
+    let ollama = AgentCharacter.from(backend: .known(.claude), provider: "ollama")
+    let opencode = AgentCharacter.from(backend: .other("opencode"), provider: "ollama")
+    check(claude.kind == .claude && claude.name == "Claude", "Claude character")
+    check(codex.kind == .codex && codex.name == "Codex", "Codex character")
+    check(other.kind == .other && other.name == "Gemini", "unknown agent keeps its own name")
+    check(ollama.kind == .local && ollama.runtime == "Ollama" && ollama.privacyTitle == "Private · nothing leaves this Mac", "local model privacy")
+    check(AgentCharacter.from(backend: .known(.claude), provider: "lmStudio").runtime == "LM Studio", "LM Studio runtime")
+    check(AgentCharacter.from(backend: .known(.claude), provider: "otherLocal").runtime == "A local model", "other local runtime")
+    check(claude.subtitle(backend: .known(.claude), provider: nil, host: "cmux") == "Claude · cmux", "Claude subtitle")
+    check(ollama.subtitle(backend: .known(.claude), provider: "ollama", host: "cmux") == "Claude · on Ollama · cmux", "Claude on Ollama subtitle")
+    check(opencode.subtitle(backend: .other("opencode"), provider: "ollama", host: "cmux") == "Ollama · via Opencode · cmux", "harness on Ollama subtitle")
+    check(claude.subtitle(backend: .known(.claude), provider: nil, host: "unknown") == "Claude", "unknown host is omitted")
+
+    let offer = RoomLens.available(RoomLens.Inputs(character: claude, hasScreen: true, workflowCount: 2, canAskForChanges: true))
+    check(offer == [.story, .screen, .changes, .workflows], "Claude gets every lens with something behind it")
+    check(RoomLens.available(RoomLens.Inputs(character: codex, hasScreen: true, workflowCount: 2, canAskForChanges: true)) == [.story, .screen, .changes], "Codex has no workflows")
+    check(RoomLens.available(RoomLens.Inputs(character: other, hasScreen: true, workflowCount: 2, canAskForChanges: true)) == [.story], "unknown agent gets Story only")
+    check(RoomLens.available(RoomLens.Inputs(character: ollama, hasScreen: true, workflowCount: 0, canAskForChanges: true)) == [.story, .screen, .changes], "local model has no workflows")
+    check(RoomLens.resolve(.screen, offered: [.story]) == .story && RoomLens.resolve(nil, offered: offer) == .story, "unoffered lens falls back to Story")
+    check(RoomLens.resolve(.changes, offered: offer) == .changes, "an offered lens is kept")
+    check(RoomLens.badge(for: .changes, changedFiles: 3, runningWorkflows: 0) == 3 && RoomLens.badge(for: .changes, changedFiles: nil, runningWorkflows: 0) == nil, "changes badge")
+    check(RoomLens.badge(for: .workflows, changedFiles: nil, runningWorkflows: 2) == 2 && RoomLens.badge(for: .story, changedFiles: 5, runningWorkflows: 5) == nil, "workflows badge")
+
+    let fresh = nwSession("r1", title: "page", state: "active", cwd: "~/projects/page", activeAt: nwT0 - 45)
+    let chips = RoomHeader.chips(session: fresh, character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: 62, now: nwNow)
+    check(chips.map(\.text) == ["WORKING · quiet 45s", "5h 62%"], "working chips \(chips.map(\.text))")
+    check(RoomHeader.chips(session: nwSession("r1", state: "active", activeAt: nwT0 - 45), character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "WORKING · quiet 45s", "quiet while working")
+    check(RoomHeader.chips(session: fresh, character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: 85, now: nwNow).last?.tone == .warm, "5-hour use at 80 is warm")
+    let waitingS = nwSession("r2", state: "waitingOnApproval", activeAt: nwT0 - 600)
+    check(RoomHeader.chips(session: waitingS, character: claude, ended: false, waitingSince: nwNow.addingTimeInterval(-60), hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "NEEDS YOU · 1m", "needs you with the wait")
+    let idleS = nwSession("r3", state: "idle", activeAt: nwT0 - 120)
+    check(RoomHeader.chips(session: idleS, character: claude, ended: false, waitingSince: nil, hasReviewPage: true, fiveHourPct: nil, now: nwNow).first?.text == "FINISHED · 2m ago", "finished with a review page")
+    check(RoomHeader.chips(session: idleS, character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "IDLE · 2m ago", "idle without a review")
+    check(RoomHeader.chips(session: fresh, character: claude, ended: true, waitingSince: nil, hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "ENDED", "ended")
+    let localS = nwSession("r4", state: "active", activeAt: nwT0 - 1)
+    let localChips = RoomHeader.chips(session: localS, character: ollama, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: 90, now: nwNow)
+    check(localChips.first?.text == "GENERATING" && localChips.last?.text == "on-device", "local model says generating and on-device")
+
+    // The composer: the trust model in one switch.
+    func mode(_ i: RoomComposerMode.Inputs) -> RoomComposerMode { RoomComposerMode.resolve(i) }
+    func lockedText(_ m: RoomComposerMode) -> String? { if case .locked(let t) = m { return t } else { return nil } }
+    check(mode(RoomComposerMode.Inputs(state: .active, canType: true)) == .steer, "busy session steers")
+    check(mode(RoomComposerMode.Inputs(state: .idle, canType: true)) == .nextTask, "idle session takes the next task")
+    check(mode(RoomComposerMode.Inputs(state: .unknown, canType: true)) == .nextTask, "unknown state takes the next task")
+    check(mode(RoomComposerMode.Inputs(state: .waitingOnApproval, canType: true, pageId: "p1")) == .tellInstead(pageId: "p1"), "waiting with a page answers through it")
+    check(mode(RoomComposerMode.Inputs(state: .active, canType: true, pageId: "p1", pageIsDecide: true)) == .tellInstead(pageId: "p1"), "a decision pinned while active is never steer")
+    check(lockedText(mode(RoomComposerMode.Inputs(state: .waitingOnUser, canType: true, pageId: "p1", pageAcceptsReply: false))) == "Answer this prompt from its decision above.", "waiting page with no reply is locked")
+    check(lockedText(mode(RoomComposerMode.Inputs(state: .waitingOnApproval, canType: true, pageArriving: true)))?.contains("still arriving") == true, "decision still arriving")
+    check(lockedText(mode(RoomComposerMode.Inputs(state: .waitingOnApproval, canType: true)))?.contains("on your Mac") == true, "waiting with no page says answer on the Mac")
+    check(mode(RoomComposerMode.Inputs(state: .idle, canType: false, typeBlocker: "Ghostty can't take input")) == .blocked("Ghostty can't take input"), "cannot type here")
+    check(mode(RoomComposerMode.Inputs(state: .idle, canType: false)) == .blocked(LiveSession.defaultBlocker), "blocked with the default reason")
+    check(mode(RoomComposerMode.Inputs(state: .active, canType: true, ended: true)) != .steer, "ended is never steerable")
+    check(mode(RoomComposerMode.Inputs(state: .active, canType: true, ready: false)) == .disabled("Waiting for your Mac."), "not ready is disabled")
+    check(mode(RoomComposerMode.Inputs(state: .waitingOnUser, canType: true, ended: true)) == .disabled("This session has ended."), "ended beats waiting")
+    for s in [LiveSessionState.waitingOnUser, .waitingOnApproval] {
+        let m = mode(RoomComposerMode.Inputs(state: s, canType: true, pageId: "p"))
+        check(m != .steer && m != .nextTask, "a waiting session is never steered or given a task")
+    }
+    let cl = RoomComposerMode.steer.preview(character: claude, route: "cmux › page", mac: "Studio MBP")
+    check(cl == "Your message, then Return · queues after this step · cmux › page · Studio MBP", "steer preview (Claude)")
+    check(RoomComposerMode.steer.preview(character: codex, route: nil, mac: "M") == "Your message, then Return · delivered when this turn ends · M", "steer preview (Codex)")
+    check(RoomComposerMode.steer.preview(character: ollama, route: nil, mac: "M") == "Your message, then Return · sent when generation stops · M", "steer preview (local)")
+    check(RoomComposerMode.nextTask.preview(character: claude, route: "cmux › page", mac: "M") == "Your message, then Return · cmux › page · M", "next task preview")
+    check(RoomComposerMode.tellInstead(pageId: "p").preview(character: claude, route: "cmux › page", mac: "M") == "Esc, then your message · cmux › page · M", "tell preview")
+    check(RoomComposerMode.tellInstead(pageId: "p").preview(character: claude, route: nil, mac: "M", pagePreview: "Deny, with your message, through the hook · M") == "Deny, with your message, through the hook · M", "page preview wins")
+    check(RoomComposerMode.blocked("why").preview(character: claude, route: nil, mac: "M") == "Can't type here · why · M", "blocked preview")
+    check(RoomComposerMode.locked("x").preview(character: claude, route: nil, mac: "M") == nil && RoomComposerMode.disabled("x").preview(character: claude, route: nil, mac: "M") == nil, "locked and disabled send nothing")
+    check(RoomComposerMode.tellInstead(pageId: "p").copy(for: claude).placeholder == "Tell it instead…" && RoomComposerMode.tellInstead(pageId: "p").copy(for: claude).hint.contains("sends Esc first"), "tell copy")
+    check(RoomComposerMode.steer.copy(for: claude).placeholder == "Steer Claude…" && RoomComposerMode.steer.copy(for: claude).hint == "queues after the current step", "steer copy for Claude")
+    check(RoomComposerMode.steer.copy(for: codex).placeholder == "Message Codex…" && RoomComposerMode.steer.copy(for: codex).hint == "delivered when this turn ends", "steer copy for Codex")
+    check(RoomComposerMode.steer.copy(for: ollama).placeholder == "Message the model…" && RoomComposerMode.steer.copy(for: ollama).hint == "sent when generation stops", "steer copy for a local model")
+    check(RoomComposerMode.tellInstead(pageId: "p").routesThroughPage && !RoomComposerMode.steer.routesThroughPage, "only tell routes through the page")
+    check(RoomComposerMode.steer.usesSessionInput && RoomComposerMode.nextTask.usesSessionInput && !RoomComposerMode.tellInstead(pageId: "p").usesSessionInput, "only steer and next task use session input")
+    check(!RoomComposerMode.locked("x").acceptsText && !RoomComposerMode.blocked("x").acceptsText && !RoomComposerMode.disabled("x").acceptsText, "locked, blocked and disabled take no text")
+    check(RoomComposerMode.steer.offersQuickReplies && RoomComposerMode.nextTask.offersQuickReplies && !RoomComposerMode.tellInstead(pageId: "p").offersQuickReplies, "quick replies only when a message is next")
+    check(RoomComposerMode.timingNote(character: codex, busy: true) != nil && RoomComposerMode.timingNote(character: codex, busy: false) == nil, "Codex timing note only while busy")
+
+    // The room's plan: the page behind the session, pinned or reviewed.
+    let waitingWithPage = nwSession("p1", title: "bottle-flip", state: "waitingOnApproval", host: "Terminal", canType: true, interventionId: "a1")
+    let pageRow = NowRowBuilder.row(for: nwIv("a1", .approval, "[Bash] npm test\nRun the tests", session: "p1"), session: waitingWithPage, macName: "Studio MBP")
+    let plan = RoomPlan.build(RoomPlan.Inputs(session: waitingWithPage, character: claude, pageRow: pageRow, ended: false, ready: true, macName: "Studio MBP"))
+    check(plan.pinned?.id == "a1" && plan.review == nil, "a decision is pinned in the Story")
+    check(plan.mode == .tellInstead(pageId: "a1"), "the pinned decision answers in words")
+    check(plan.preview == "Esc, then your message · Terminal › bottle-flip · Studio MBP", "plan preview names the route and Mac (\(plan.preview ?? "nil"))")
+    let reviewRow = NowRowBuilder.row(for: nwIv("r1", .idle, "Changed 1 file · tests passed\n\nDone", session: "p2"), session: nil, macName: "M")
+    let idleSession = nwSession("p2", title: "page", state: "idle", host: "cmux", canType: true, interventionId: "r1")
+    let reviewPlan = RoomPlan.build(RoomPlan.Inputs(session: idleSession, character: claude, pageRow: reviewRow, ended: false, ready: true, macName: "M"))
+    check(reviewPlan.review?.id == "r1" && reviewPlan.pinned == nil && reviewPlan.mode == .nextTask, "a finished turn is reviewed, not pinned")
+    let arriving = RoomPlan.build(RoomPlan.Inputs(session: waitingWithPage, character: claude, pageRow: nil, ended: false, ready: true, macName: "M"))
+    check(lockedText(arriving.mode)?.contains("still arriving") == true, "a waiting session whose page has not arrived is locked")
+    check(RoomPlan.build(RoomPlan.Inputs(session: waitingWithPage, character: claude, pageRow: pageRow, ended: false, ready: true, macName: "M")).preview?.contains("M") == true, "the preview always names the Mac")
+    let hookRow = NowRowBuilder.row(for: nwIv("hookpre-z", .approval, "[Bash] ls", session: "p1"), session: waitingWithPage, macName: "M")
+    let hookPlan = RoomPlan.build(RoomPlan.Inputs(session: waitingWithPage, character: claude, pageRow: hookRow, ended: false, ready: true, macName: "M"))
+    check(hookPlan.preview?.contains("hook") == true && hookPlan.preview?.contains("type") == false, "a hook page's preview names the hook, never typing")
+
+    let stopS = nwSession("q1", title: "bottle-flip", state: "active", host: "Terminal", canInterrupt: true)
+    let stop = SessionStopPlan.build(session: stopS, ready: true, ended: false, macName: "Studio MBP")
+    check(stop.canStop && stop.scope == "Press Esc in bottle-flip" && stop.preview == "Will press Esc · Terminal › bottle-flip · Studio MBP", "room stop previews Esc")
+    check(!SessionStopPlan.build(session: stopS, ready: true, ended: true, macName: "M").canStop, "ended cannot stop")
+    check(!SessionStopPlan.build(session: nwSession("q2", state: "active", canInterrupt: false), ready: true, ended: false, macName: "M").canStop, "cannot interrupt, cannot stop")
+    check(!SessionStopPlan.build(session: nwSession("q3", state: "idle", canInterrupt: true), ready: true, ended: false, macName: "M").canStop, "only mid-turn stops")
+    check(SessionStopPlan.spec == HoldRingSpec(deadZone: 0, fill: 0.6), "room stop holds for 0.6 s")
+
+    let bannerEnded = RoomBanner.build(ended: true, availability: .ready, session: fresh, agent: "Claude", pageShownInStory: false)
+    check(bannerEnded.map(\.title) == ["This session has ended"], "ended banner")
+    let bannerMac = RoomBanner.build(ended: false, availability: .macOffline, session: fresh, agent: "Claude", pageShownInStory: false)
+    check(bannerMac.first?.action == .retry && bannerMac.first?.actionTitle == "Try again", "offline Mac banner retries")
+    let openPage = nwSession("p9", title: "t", state: "waitingOnApproval", interventionId: "a9")
+    let bannerPage = RoomBanner.build(ended: false, availability: .ready, session: openPage, agent: "Claude", pageShownInStory: false)
+    check(bannerPage.first?.title == "Claude needs your approval" && bannerPage.first?.action == .openDecision("a9"), "open decision banner")
+    check(RoomBanner.build(ended: false, availability: .ready, session: openPage, agent: "Claude", pageShownInStory: true).isEmpty, "a pinned decision needs no banner")
+    let promptOnly = nwSession("p8", title: "t", state: "waitingOnUser")
+    check(RoomBanner.build(ended: false, availability: .ready, session: promptOnly, agent: "Claude", pageShownInStory: false).first?.title == "Claude is showing a prompt", "prompt with no page banner")
+
+    check(ScreenFreshness.evaluate(frameAt: nwNow.addingTimeInterval(-2), now: nwNow, busy: true) == ScreenFreshness(tone: .live, label: "LIVE · 2s"), "fresh frame is live")
+    check(ScreenFreshness.evaluate(frameAt: nwNow.addingTimeInterval(-34), now: nwNow, busy: true) == ScreenFreshness(tone: .slow, label: "SLOW · 34s"), "stalled while busy is slow")
+    check(ScreenFreshness.evaluate(frameAt: nwNow.addingTimeInterval(-12), now: nwNow, busy: true) == ScreenFreshness(tone: .quiet, label: "LIVE · 12s"), "twelve seconds while busy is quiet but live")
+    check(ScreenFreshness.evaluate(frameAt: nwNow.addingTimeInterval(-90), now: nwNow, busy: false) == ScreenFreshness(tone: .quiet, label: "1m ago"), "idle screen reads how long ago")
+
+    // Story
+    let bash = StoryStep.parse(id: "1", text: "Bash: swift build", tool: nil)
+    check(bash.kind == .shell && bash.title == "swift build" && bash.mono, "shell step")
+    let read = StoryStep.parse(id: "2", text: "Read: SessionsView.swift", tool: nil)
+    check(read.kind == .read && read.title == "Read SessionsView.swift", "read step")
+    check(StoryStep.parse(id: "3", text: "Grep: SessionGroup", tool: nil).kind == .search, "search step")
+    let edit = StoryStep.parse(id: "4", text: "Edit: a.swift", tool: nil)
+    check(edit.kind == .edit && edit.title == "Edit a.swift", "edit step")
+    check(StoryStep.parse(id: "5", text: "Write: a.swift", tool: nil).title == "Write a.swift", "write step title")
+    let planStep = StoryStep.parse(id: "6", text: "Updated the plan", tool: "update_plan")
+    check(planStep.kind == .plan && planStep.title == "Updated the plan", "plan step keeps its words")
+    check(StoryStep.parse(id: "7", text: "fetch: https://x", tool: "WebFetch").kind == .web, "web step")
+    check(StoryStep.parse(id: "8", text: "thing", tool: "Frobnicate").kind == .other, "unknown tool is other")
+    check(StoryStep.parse(id: "9", text: "just words no colon", tool: nil).title == "just words no colon", "no colon keeps the whole text")
+
+    let u = TranscriptEntry(id: "u1", role: .user, text: "fix the tests", at: nwNow, tool: nil)
+    let t1 = TranscriptEntry(id: "t1", role: .tool, text: "Bash: swift test", at: nil, tool: "Bash")
+    let t2 = TranscriptEntry(id: "t2", role: .tool, text: "Read: a.swift", at: nil, tool: "Read")
+    let asst = TranscriptEntry(id: "a1", role: .assistant, text: "Done", at: nil, tool: nil)
+    let t3 = TranscriptEntry(id: "t3", role: .tool, text: "Edit: a.swift", at: nil, tool: "Edit")
+    let sysE = TranscriptEntry(id: "x1", role: .system, text: "Interrupted", at: nil, tool: nil)
+    let blocks = StoryBuilder.build(items: [.entry(u, delivery: nil), .entry(t1, delivery: nil), .entry(t2, delivery: nil), .entry(asst, delivery: nil),
+                                            .entry(t3, delivery: nil), .entry(sysE, delivery: nil)], active: true, timeZone: nwUTC)
+    check(blocks.count == 6, "six blocks (\(blocks.count))")
+    if case .divider(_, let label) = blocks[0] { check(label == "08:00", "user turn gets a time divider") } else { check(false, "first block is a divider") }
+    if case .steps(_, let steps, let live) = blocks[2] { check(steps.count == 2 && !live, "consecutive tool calls group, not live") } else { check(false, "steps group") }
+    let liveBlocks = StoryBuilder.build(items: [.entry(u, delivery: nil), .entry(t3, delivery: nil)], active: true, timeZone: nwUTC)
+    if case .steps(_, let steps, let live) = liveBlocks.last ?? .marker(id: "", text: "") { check(steps.count == 1 && live, "trailing steps are live while busy") } else { check(false, "trailing steps") }
+    check(!blocks.contains { if case .steps(_, _, let live) = $0 { return live } else { return false } }, "a story that ends in a marker has no live steps")
+    if case .marker(_, let text) = blocks[5] { check(text == "Interrupted", "system entries become markers") } else { check(false, "marker") }
+    let quiet = StoryBuilder.build(items: [.entry(t1, delivery: nil)], active: false, timeZone: nwUTC)
+    if case .steps(_, _, let live) = quiet.last ?? .marker(id: "", text: "") { check(!live, "idle story has no live steps") } else { check(false, "idle steps") }
+    let sent = SentSessionCommand(clientId: "c1", sessionId: "p1", kind: .input, text: "hi there", sentAt: nwNow, state: .sending)
+    let phoneBlocks = StoryBuilder.build(items: [.entry(u, delivery: sent)], active: false, timeZone: nwUTC)
+    if case .divider(_, let label) = phoneBlocks[0] { check(label == "08:00 · from iPhone", "a message from the phone is marked") } else { check(false, "phone divider") }
+    let pendingBlocks = StoryBuilder.build(items: [.pending(sent)], active: false, timeZone: nwUTC)
+    check(pendingBlocks.contains { if case .pending = $0 { return true } else { return false } }, "a pending message becomes a pending block")
+        check(StoryBuilder.liveLine(session: nwSession("l1", state: "active", preview: "vitest · 212 passed"), character: claude) == "vitest · 212 passed", "live line is the preview")
+    check(StoryBuilder.liveLine(session: nwSession("l2", state: "active", preview: "x"), character: claude, trailingStepsAreLive: true) == "Working…", "live steps say working")
+    check(StoryBuilder.liveLine(session: nwSession("l3", state: "active", preview: "x"), character: ollama, trailingStepsAreLive: true) == "Generating…", "local model says generating")
+    check(StoryBuilder.liveLine(session: nwSession("l4", state: "active", preview: ""), character: claude) == "Working…", "empty preview says working")
+    check(StoryBuilder.liveLine(session: nwSession("l5", state: "idle", preview: "x"), character: claude) == nil, "no live line unless active")
+
+    let userTask = TranscriptEntry(id: "k1", role: .user, text: "port the app", at: nil, tool: nil)
+    let later = TranscriptEntry(id: "k2", role: .user, text: "also the widget", at: nil, tool: nil)
+    let agent = AgentRoomModel.build(entries: [userTask, t1, later, asst], finished: true)
+    check(agent.task == "port the app", "task is the first user entry")
+    let userBlocks = agent.blocks.compactMap { b -> String? in if case .user(let e, _) = b { return e.text } else { return nil } }
+    check(userBlocks == ["also the widget"], "the task is not repeated, later messages are kept (\(userBlocks))")
+    check(!agent.blocks.contains { if case .steps(_, _, let live) = $0 { return live } else { return false } }, "a finished agent is not live")
+    check(AgentRoomModel.build(entries: [userTask, t1], finished: false).blocks.contains { if case .steps(_, _, let live) = $0 { return live } else { return false } }, "a running agent is live")
+    let oddOrder = AgentRoomModel.build(entries: [t1, userTask], finished: true)
+    check(!oddOrder.blocks.contains { if case .user = $0 { return true } else { return false } }, "the task is not repeated even when a tool call came first")
+    check(AgentRoomModel.readOnlyNote.contains("read-only"), "workflow agents are read-only")
+}
+
+do {
+    func wr(_ id: String, _ name: String, _ status: String, done: Int, total: Int, agents: [WorkflowRun.Agent] = [], endedAt: Date? = nil,
+            startedAt: Date? = nil, tokens: Int? = nil, phase: String? = nil) -> WorkflowRun {
+        WorkflowRun(id: id, name: name, status: status, phase: phase, done: done, total: total, startedAt: startedAt, endedAt: endedAt,
+                    tokens: tokens, agents: agents)
+    }
+    let agents = [
+        WorkflowRun.Agent(id: "a1", label: "scan", phase: nil, state: "done", lastActivityAt: nil),
+        WorkflowRun.Agent(id: "a2", label: "verify", phase: nil, state: "running", lastActivityAt: nil),
+        WorkflowRun.Agent(id: "a3", label: "port", phase: nil, state: "failed", lastActivityAt: nil),
+        WorkflowRun.Agent(id: "a4", label: "lint", phase: nil, state: "weird", lastActivityAt: nil),
+    ]
+    let run = wr("r1", "design-pass", "running", done: 4, total: 7, agents: agents, startedAt: nwNow.addingTimeInterval(-120), tokens: 184_000, phase: "Verify")
+    let orbit = WorkflowOrbit.build(run: run, now: nwNow)
+    check(orbit.centre == "4/7" && orbit.caption == "agents done", "orbit centre and caption")
+    check(orbit.meta == "phase Verify · 2m · 184.0k tokens", "orbit meta (\(orbit.meta))")
+    check(orbit.isRunning && orbit.nodes.count == 4, "running with four nodes")
+    check(orbit.nodes.first?.state == .running && orbit.nodes.first?.label == "verify", "running agents come first")
+    check(orbit.nodes.map(\.state).contains(.stopped) && orbit.nodes.map(\.state).contains(.failed) && orbit.nodes.map(\.state).contains(.done), "node states")
+    check(nwNear(orbit.nodes[1].angle, .pi / 2), "nodes are spaced clockwise from twelve o'clock")
+    check(WorkflowOrbit.build(run: wr("r2", "big", "running", done: 0, total: 30, agents: (0..<30).map { WorkflowRun.Agent(id: "x\($0)", label: "a", phase: nil, state: "done", lastActivityAt: nil) }), now: nwNow).nodes.count == WorkflowOrbit.maxNodes, "at most twenty-four nodes")
+    let finishedToday = [wr("f1", "design-pass", "completed", done: 7, total: 7, endedAt: nwNow.addingTimeInterval(-60)),
+                         wr("f2", "port-android", "completed", done: 3, total: 3, endedAt: nwNow.addingTimeInterval(-120)),
+                         wr("f3", "old", "completed", done: 1, total: 1, endedAt: nwNow.addingTimeInterval(-86_400 * 2))]
+    check(WorkflowOrbit.finishedLine(runs: finishedToday, now: nwNow, calendar: nwCal) == "2 finished today · design-pass ✓ · port-android ✓", "finished today line")
+    check(WorkflowOrbit.finishedLine(runs: [], now: nwNow, calendar: nwCal) == nil, "no finished runs, no line")
+    let groups = WorkflowOrbit.groups(run)
+    check(groups.map(\.title) == ["Running", "Failed or didn't finish", "Done"], "groups in order (\(groups.map(\.title)))")
+    check(WorkflowOrbit.groups(wr("d", "d", "completed", done: 1, total: 1, agents: [agents[0]])).map(\.title) == ["Done"], "empty groups are omitted")
+    check(WorkflowRun.duration(120) == "2m" && WorkflowRun.tokens(1500) == "1.5k tokens" && WorkflowRun.tokens(12) == "12 tokens", "run duration and token formats")
+    check(wr("s", "s", "killed", done: 0, total: 0).statusLabel == "Stopped" && wr("s", "s", "stalled", done: 0, total: 0).statusLabel == "No recent activity", "run status labels")
+}
+
+do {
+    let base = SessionDiff(sessionId: "p1", clientId: nil, scope: "turn", repo: nil,
+                           files: [SessionDiff.File(path: "x.swift", added: 120, removed: 14, status: "modified")],
+                           patch: "diff --git a/x.swift b/x.swift\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/y.swift b/y.swift\n+more\n",
+                           truncated: false, note: nil)
+    let model = ChangesModel.build(base)
+    check(model.scopeLabel == "THIS TURN" && model.added == 120 && model.removed == 14, "turn changes totals")
+    check(nwNear(model.addedFraction, 120.0 / 134), "added share of the bar")
+    check(model.fileCountText == "1 file", "one file, singular")
+    check(model.unmatchedSections.map(\.path) == ["y.swift"], "a patch section with no file row is still shown")
+    let uncommitted = ChangesModel.build(SessionDiff(sessionId: "p1", clientId: nil, scope: "uncommitted", repo: nil, files: [], patch: "", truncated: false, note: nil))
+    check(uncommitted.scopeLabel == "UNCOMMITTED CHANGES" && uncommitted.emptyText == "No uncommitted changes.", "uncommitted empty copy")
+    let quietTurn = ChangesModel.build(SessionDiff(sessionId: "p1", clientId: nil, scope: "turn", repo: nil, files: [], patch: "", truncated: false, note: nil))
+    check(quietTurn.emptyText == "This turn didn't change any files." && quietTurn.addedFraction == 1, "empty turn copy and full bar")
+    check(ChangesModel.lineKind("@@ -1 +1 @@") == .hunk && ChangesModel.lineKind("+x") == .added && ChangesModel.lineKind("-x") == .removed, "hunk, added, removed")
+    check(ChangesModel.lineKind("+++ b/x") == .context && ChangesModel.lineKind("--- a/x") == .context && ChangesModel.lineKind(" y") == .context, "file headers and context are not changes")
+    check(ChangesModel.question(about: "Sources/A.swift") == "Why did you change Sources/A.swift?", "ask about a file")
+    check(ChangesModel.question(about: nil) == "Why did you make these changes?", "ask about the change")
+    check(ChangesModel.load(hasDiff: true, error: nil, requestedAt: nwNow, now: nwNow) == .loaded, "a diff has loaded")
+    check(ChangesModel.load(hasDiff: false, error: "x", requestedAt: nwNow, now: nwNow) == .failed("x"), "error shows")
+    check(ChangesModel.load(hasDiff: false, error: nil, requestedAt: nwNow.addingTimeInterval(-5), now: nwNow) == .loading, "waiting")
+    check(ChangesModel.load(hasDiff: false, error: nil, requestedAt: nwNow.addingTimeInterval(-25), now: nwNow) == .noAnswer, "no answer after 20 s")
+}
+
+do {
+    check(TerminalTone.classify("● Bash(x)") == .tool && TerminalTone.classify("⏺ Reading") == .tool, "tool lines")
+    check(TerminalTone.classify("✻ Testing… (esc to interrupt)") == .busy, "spinner is busy")
+    check(TerminalTone.classify("⏵⏵ auto mode on") == .footer, "footer row")
+    check(TerminalTone.classify("❯ ") == .prompt, "prompt row")
+    check(TerminalTone.classify("────────────") == .quiet && TerminalTone.classify("⎿  Done") == .quiet, "rules and continuations are quiet")
+    check(TerminalTone.classify("hello") == .plain && TerminalTone.classify("") == .plain, "anything else is plain")
+}
 
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

@@ -44,6 +44,8 @@ struct PreferencesForm: Equatable {
     var batteryForecastPageEnabled: Bool
     var earlyBatteryPause: Bool
     var usageForecastPageEnabled: Bool
+    // Appearance
+    var cardGlow: CardGlow
 
     init(_ c: Config) {
         relayEnabled = c.relayEnabled
@@ -80,6 +82,7 @@ struct PreferencesForm: Equatable {
         batteryForecastPageEnabled = c.batteryForecastPageEnabled
         earlyBatteryPause = c.earlyBatteryPause
         usageForecastPageEnabled = c.usageForecastPageEnabled
+        cardGlow = c.cardGlow
     }
 
     /// Why this form can't be saved, or nil.
@@ -144,6 +147,7 @@ struct PreferencesForm: Equatable {
         if batteryForecastPageEnabled != baseline.batteryForecastPageEnabled { c.batteryForecastPageEnabled = batteryForecastPageEnabled }
         if earlyBatteryPause != baseline.earlyBatteryPause { c.earlyBatteryPause = earlyBatteryPause }
         if usageForecastPageEnabled != baseline.usageForecastPageEnabled { c.usageForecastPageEnabled = usageForecastPageEnabled }
+        if cardGlow != baseline.cardGlow { c.cardGlow = cardGlow }
         return c
     }
 }

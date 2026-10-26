@@ -365,6 +365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func rebuildModel() {
         guard let snap = lastSnapshot else { return }
         let cfg = coordinator.config
+        NWAppearance.shared.set(cardGlow: cfg.cardGlow)
         let now = Date()
         var inputs = NowInputs(snapshot: snap, now: now, macName: macName)
         inputs.cutoff = cfg.lowBatteryCutoff
@@ -400,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // MARK: the Now panel
 
     private func setUpNowSurfaces() {
+        NWAppearance.shared.set(cardGlow: coordinator.config.cardGlow)
         nowStore = NowStore(model: NowModel.starting(macName: macName))
         nowStore.perform = { [weak self] effect in self?.perform(effect) }
         nowStore.command = { [weak self] command in self?.run(command) }

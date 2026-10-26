@@ -109,6 +109,11 @@ struct Config: Codable, Equatable {
     /// the 5-hour limit is 30 min away at the current pace.
     var usageForecastPageEnabled: Bool = true
 
+    // Appearance.
+    /// How much of a teal glow glass cards (the menu bar panel, Dispatch,
+    /// Welcome back, the Tower) get along their bottom edge. Off by default.
+    var cardGlow: CardGlow = .off
+
     init() {}
 
     // `interventionScanIntervalSeconds` used to live here but nothing ever
@@ -130,6 +135,7 @@ struct Config: Codable, Equatable {
         case lowBatteryAction, lowBatteryPauseGraceSeconds, resumeAfterBatteryRecovery
         case stuckAlertsEnabled, stuckAfterMinutes, turnSummaryEnabled, phoneStartSessionsEnabled
         case batteryForecastPageEnabled, earlyBatteryPause, usageForecastPageEnabled
+        case cardGlow
     }
 
     /// Collects per-key decode problems. Passed through `decoder.userInfo`
@@ -195,6 +201,7 @@ struct Config: Codable, Equatable {
         batteryForecastPageEnabled = field(.batteryForecastPageEnabled, d.batteryForecastPageEnabled)
         earlyBatteryPause = field(.earlyBatteryPause, d.earlyBatteryPause)
         usageForecastPageEnabled = field(.usageForecastPageEnabled, d.usageForecastPageEnabled)
+        cardGlow = field(.cardGlow, d.cardGlow)
     }
 
     // MARK: validation
@@ -518,6 +525,29 @@ struct Config: Codable, Equatable {
             return path.isEmpty ? "the top level must be a JSON object" : "“\(path)”: \(ctx.debugDescription)"
         default:
             return error.localizedDescription
+        }
+    }
+}
+
+/// `cardGlow` in config.json: how strong the teal glow along the bottom of a
+/// glass card is. An unknown string falls back to `off`.
+enum CardGlow: String, Codable, CaseIterable, Equatable {
+    case off, subtle, full
+
+    var label: String {
+        switch self {
+        case .off: return "Off"
+        case .subtle: return "Subtle"
+        case .full: return "Full"
+        }
+    }
+
+    /// 0...1: how much of the full glow is drawn.
+    var intensity: Double {
+        switch self {
+        case .off: return 0
+        case .subtle: return 0.5
+        case .full: return 1
         }
     }
 }

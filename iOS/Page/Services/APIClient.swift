@@ -60,6 +60,8 @@ final class APIClient: NSObject, ObservableObject {
     /// talks to the relay; PairingStore unpairs and shows the re-pair screen.
     @Published private(set) var retiredWhy: String?
     @Published private(set) var deliveries: [String: DeliveryState] = [:]
+    /// When each entry of `deliveries` last changed, so a failure can age out of Now.
+    private(set) var deliveryTimes: [String: Date] = [:]
     /// Close reasons for pages that closed while the app was watching, so an
     /// open reply sheet can say *why* it closed.
     @Published private(set) var recentCloseReasons: [String: String] = [:]
@@ -188,6 +190,7 @@ final class APIClient: NSObject, ObservableObject {
         authRejected = false
         retiredWhy = nil
         deliveries = [:]
+        deliveryTimes = [:]
         deliveryTouchedSeq = [:]
         recentCloseReasons = [:]
         inboxEvents = []
@@ -290,7 +293,7 @@ final class APIClient: NSObject, ObservableObject {
             let local = deliveries[iv.id]
             let next = ReplyDelivery.synced(local: local, deliveryStatus: iv.deliveryStatus,
                                             deliveryDetail: iv.deliveryDetail, repliedAt: iv.repliedAt, now: now)
-            if next != local { deliveries[iv.id] = next }
+            if next != local { deliveries[iv.id] = next; deliveryTimes[iv.id] = now }
         }
     }
 
@@ -302,6 +305,7 @@ final class APIClient: NSObject, ObservableObject {
             deliveryTouchedSeq = deliveryTouchedSeq.filter { $0.value > inboxSeq - 200 }
         }
         deliveries[id] = state
+        deliveryTimes[id] = Date()
     }
 
     func refreshHistory() async {

@@ -41,6 +41,9 @@ enum TowerFixtures {
         return (snap, NowModel.build(i))
     }
 
+    /// Card glow for harness renders (`--card-glow`); the shipped default is off.
+    static var cardGlow: CardGlow = .off
+
     /// The board's settings: cutoff 10%, pause, hold 1 h, both lid options on, resume on power at 25%.
     static func boardConfig() -> Config {
         var c = Config()
@@ -55,6 +58,7 @@ enum TowerFixtures {
         c.relayEnabled = true
         c.relayURL = "https://page-relay.roy.workers.dev"
         c.codexBackendEnabled = true
+        c.cardGlow = cardGlow
         return c
     }
 

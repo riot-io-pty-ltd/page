@@ -67,7 +67,7 @@ struct OpenSessionsIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        AppRouter.shared.tab = .sessions
+        AppRouter.shared.destination = .sky
         return .result()
     }
 }

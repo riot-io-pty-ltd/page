@@ -3,25 +3,63 @@ import SwiftUI
 @main
 struct PageApp: App {
     @UIApplicationDelegateAdaptor(PageAppDelegate.self) private var appDelegate
+
+    var body: some Scene {
+        WindowGroup {
+            LaunchGate()
+        }
+    }
+}
+
+/// Chooses what the window shows. In DEBUG, `-NWRender <screen>` swaps the
+/// app for the render harness (fixtures only); `LiveApp`, which owns every
+/// live store (pairing, relay, notifications, sessions), is then never built,
+/// so the harness cannot touch the Keychain, the network or push.
+struct LaunchGate: View {
+    var body: some View {
+        #if DEBUG
+        if let args = RenderArguments.parse(ProcessInfo.processInfo.arguments) {
+            RenderHarnessRoot(args: args)
+        } else {
+            LiveApp()
+        }
+        #else
+        LiveApp()
+        #endif
+    }
+}
+
+/// The real app: the live stores, the Card glow setting and the root view.
+struct LiveApp: View {
     @StateObject private var pairing = PairingStore()
     @StateObject private var api = APIClient.shared
     @StateObject private var notifications = NotificationService.shared
     @StateObject private var router = AppRouter.shared
     @StateObject private var sessions = SessionStore.shared
+    @StateObject private var glow = CardGlowStore()
+    @StateObject private var coordinator = ActionCoordinator()
+    @StateObject private var stop = StopCoordinator()
+    @StateObject private var activity = ActivityStore()
+    @StateObject private var away = AwayStore()
 
-    var body: some Scene {
-        WindowGroup {
-            RootView()
-                .environmentObject(pairing)
-                .environmentObject(api)
-                .environmentObject(notifications)
-                .environmentObject(router)
-                .environmentObject(sessions)
-                .onOpenURL { url in
-                    // page://intervention/<id> opens that page's reply screen.
-                    router.handle(url: url)
-                }
-        }
+    var body: some View {
+        RootView()
+            .environmentObject(pairing)
+            .environmentObject(api)
+            .environmentObject(notifications)
+            .environmentObject(router)
+            .environmentObject(sessions)
+            .environmentObject(glow)
+            .environmentObject(coordinator)
+            .environmentObject(stop)
+            .environmentObject(activity)
+            .environmentObject(away)
+            // The one place every glass surface reads the Card glow from.
+            .environment(\.nwCardGlow, glow.glow)
+            .onOpenURL { url in
+                // page://intervention/<id> opens that page's reply screen.
+                router.handle(url: url)
+            }
     }
 }
 
@@ -29,15 +67,33 @@ struct RootView: View {
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var api: APIClient
     @EnvironmentObject var notifications: NotificationService
+    @EnvironmentObject var activity: ActivityStore
+    @EnvironmentObject var router: AppRouter
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
-        Group {
+        ZStack {
             if pairing.isPaired {
-                MainTabView()
+                NightWatchRoot()
             } else {
                 PairMacView()
             }
+            // A first pairing ends on its own screen: the first star, what Page pages you for,
+            // and the one place notifications are asked for.
+            if router.pairedWelcome && pairing.isPaired {
+                PairedContainer()
+                    .transition(.opacity)
+                    .zIndex(1)
+            }
+        }
+        .animation(.easeInOut(duration: 0.35), value: router.pairedWelcome)
+        .onChange(of: pairing.isPaired) { was, now in
+            guard !was, now else { return }
+            #if DEBUG
+            if api.isDevMode { return }
+            #endif
+            // Only the first Mac gets the welcome; adding another Mac (a sheet) does not.
+            if pairing.savedMacs.count <= 1 { router.pairedWelcome = true }
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -50,63 +106,22 @@ struct RootView: View {
                 WidgetShare.sync()
                 if pairing.isPaired {
                     api.activate()
-                    Task { await notifications.requestAuthorizationIfNeeded() }
+                    #if DEBUG
+                    if api.isDevMode { break }
+                    #endif
+                    if !router.pairedWelcome { Task { await notifications.requestAuthorizationIfNeeded() } }
                 }
             case .background:
                 // iOS would freeze the socket anyway; close it cleanly and
                 // rely on APNs until we're back.
                 api.disconnect()
                 WidgetShare.reload()
+                // When Page was last in front: the Return Brief measures an absence from here.
+                AwayTracker.markActive(Date())
+                activity.flush()
             default:
                 break
             }
         }
-    }
-}
-
-struct MainTabView: View {
-    @EnvironmentObject var api: APIClient
-    @EnvironmentObject var notifications: NotificationService
-    @EnvironmentObject var router: AppRouter
-
-    var body: some View {
-        ZStack(alignment: .bottom) {
-            Group {
-                switch router.tab {
-                case .inbox:    InboxView()
-                case .sessions: SessionsView()
-                case .history:  HistoryView()
-                case .settings: SettingsView()
-                }
-            }
-            // A second sheet host: only one sheet can be up at a time, and
-            // AppRouter hands over between this one and the reply sheet.
-            .sheet(item: $router.presentedSession, onDismiss: router.sheetDismissed) { item in
-                SessionDetailView(sessionId: item.id)
-            }
-            TabBarHost(selection: $router.tab, inboxCount: api.inbox.count)
-        }
-        .ignoresSafeArea(.keyboard)
-        .task {
-            // First appearance after launch or after pairing.
-            api.activate()
-            await notifications.requestAuthorizationIfNeeded()
-        }
-        .sheet(item: $router.presented, onDismiss: router.sheetDismissed) { item in
-            ReplyView(interventionId: item.id)
-        }
-    }
-}
-
-/// The tab bar plus the one thing it needs from live sessions (how many
-/// need you), so session updates re-render the bar, not every tab.
-private struct TabBarHost: View {
-    @Binding var selection: AppTab
-    let inboxCount: Int
-    @EnvironmentObject var sessions: SessionStore
-
-    var body: some View {
-        PillTabBar(selection: $selection, inboxCount: inboxCount,
-                   sessionsNeedingYou: SessionGrouping.needsYouCount(sessions.sessions))
     }
 }

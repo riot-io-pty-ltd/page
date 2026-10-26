@@ -107,7 +107,7 @@ final class NowPanelController: NSObject {
 
     init(store: NowStore) {
         self.store = store
-        host = NSHostingView(rootView: AnyView(NWNowPopover(store: store).environment(\.colorScheme, .dark)))
+        host = NSHostingView(rootView: AnyView(NWAppearanceRoot { NWNowPopover(store: store) }.environment(\.colorScheme, .dark)))
         super.init()
         panel.contentView = host
         // Resize when the content changes height; never replace the root view.
@@ -273,7 +273,7 @@ final class DispatchPanelController: NSObject {
 
     init(store: DispatchStore) {
         self.store = store
-        host = NSHostingView(rootView: AnyView(NWDispatchView(store: store).environment(\.colorScheme, .dark)))
+        host = NSHostingView(rootView: AnyView(NWAppearanceRoot { NWDispatchView(store: store) }.environment(\.colorScheme, .dark)))
         super.init()
         panel.contentView = host
         store.close = { [weak self] in self?.close(restoreFocus: true) }
@@ -362,7 +362,7 @@ final class WelcomeBackController: NSObject {
     func show(_ model: WelcomeBack, near anchor: NSRect?, duration: TimeInterval = WelcomeBack.displayDuration) {
         dismissTimer?.invalidate()
         let host = NSHostingView(rootView: AnyView(
-            NWWelcomeBackView(model: model).environment(\.colorScheme, .dark)
+            NWAppearanceRoot { NWWelcomeBackView(model: model) }.environment(\.colorScheme, .dark)
                 .onTapGesture { [weak self] in self?.dismiss() }))
         panel.contentView = host
         let screen = NSScreen.screens.first { $0.frame.intersects(anchor ?? .zero) } ?? NSScreen.main

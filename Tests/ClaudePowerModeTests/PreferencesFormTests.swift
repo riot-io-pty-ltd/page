@@ -41,6 +41,7 @@ final class PreferencesFormTests: XCTestCase {
         ("turnSummaryEnabled", { $0.turnSummaryEnabled.toggle() }),
         ("batteryForecastPageEnabled", { $0.batteryForecastPageEnabled.toggle() }),
         ("usageForecastPageEnabled", { $0.usageForecastPageEnabled.toggle() }),
+        ("cardGlow", { $0.cardGlow = .full }),
     ]
 
     /// The stored properties whose values differ between two values, by name.
@@ -52,7 +53,7 @@ final class PreferencesFormTests: XCTestCase {
 
     func testThereAreThirtyFourControlsAndEachIsTested() {
         let formFields = Mirror(reflecting: PreferencesForm(Config())).children.compactMap { $0.label }
-        XCTAssertEqual(formFields.count, 34)
+        XCTAssertEqual(formFields.count, 35)
         XCTAssertEqual(changes.map(\.field).sorted(), formFields.sorted())
     }
 

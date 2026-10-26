@@ -26,18 +26,23 @@ struct NWTowerView: View {
         }
         .background(NWTowerBackground())
         .environment(\.colorScheme, .dark)
+        // The Tower previews the unsaved choice; the other panels follow it after Apply.
+        .environment(\.nwCardGlow, store.form.cardGlow)
         // The live window draws under its transparent title bar.
         .ignoresSafeArea()
     }
 }
 
 /// Near-black navy with a faint teal pool at the bottom left and a violet one
-/// at the top right, as on the board's window.
+/// at the top right, as on the board's window (the teal pool only with Card glow on).
 struct NWTowerBackground: View {
+    @Environment(\.nwCardGlow) private var cardGlow
+
     var body: some View {
         ZStack {
             P.background.color
-            RadialGradient(colors: [P.glass.opacity(0.07).color, .clear],
+            // The teal pool along the bottom belongs to the "Card glow" setting too.
+            RadialGradient(colors: [P.glass.opacity(0.07 * cardGlow.intensity).color, .clear],
                            center: .bottomLeading, startRadius: 10, endRadius: 700)
             RadialGradient(colors: [P.violet.opacity(0.05).color, .clear],
                            center: .topTrailing, startRadius: 10, endRadius: 600)
@@ -114,7 +119,7 @@ struct NWTowerCard: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NWGlassBackground(radius: 14, fill: P.surface.opacity(0.7), glow: P.glass.opacity(0.3), glowHeight: 14))
+        .background(NWGlassBackground(radius: 14, fill: P.surface.opacity(0.7), glowHeight: 14))
         .accessibilityElement(children: .contain)
     }
 }
@@ -256,7 +261,7 @@ struct NWCard<Content: View>: View {
             VStack(alignment: .leading, spacing: 0) { content() }
                 .padding(padding)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(NWGlassBackground(radius: 14, fill: RGBAHex.card, glow: P.glass.opacity(0.28), glowHeight: 12))
+                .background(NWGlassBackground(radius: 14, fill: RGBAHex.card, glowHeight: 12))
         }
     }
 }

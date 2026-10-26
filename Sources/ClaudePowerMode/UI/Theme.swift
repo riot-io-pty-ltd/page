@@ -156,7 +156,16 @@ private struct NWFixedPhaseKey: EnvironmentKey {
     static let defaultValue: Double? = nil
 }
 
+private struct NWCardGlowKey: EnvironmentKey {
+    static let defaultValue: CardGlow = .off
+}
+
 extension EnvironmentValues {
+    /// The one place every glass surface reads the "Card glow" setting from.
+    var nwCardGlow: CardGlow {
+        get { self[NWCardGlowKey.self] }
+        set { self[NWCardGlowKey.self] = newValue }
+    }
     /// True when animations must fall back to a still frame.
     var nwReduceMotion: Bool {
         get { self[NWReduceMotionKey.self] }
@@ -166,6 +175,29 @@ extension EnvironmentValues {
     var nwFixedPhase: Double? {
         get { self[NWFixedPhaseKey.self] }
         set { self[NWFixedPhaseKey.self] = newValue }
+    }
+}
+
+/// The live appearance setting, shared by the separate panels (menu bar panel,
+/// Dispatch, Welcome back). The app writes it from config.json; `NWAppearanceRoot`
+/// feeds it into the environment. The Tower previews its own unsaved form value.
+final class NWAppearance: ObservableObject {
+    static let shared = NWAppearance()
+    @Published var cardGlow: CardGlow = .off
+
+    /// Only publishes a change, so a per-tick call is free.
+    func set(cardGlow value: CardGlow) {
+        if cardGlow != value { cardGlow = value }
+    }
+}
+
+/// Root of a panel's SwiftUI tree: puts the shared appearance in the environment.
+struct NWAppearanceRoot<Content: View>: View {
+    @ObservedObject private var appearance = NWAppearance.shared
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content().environment(\.nwCardGlow, appearance.cardGlow)
     }
 }
 

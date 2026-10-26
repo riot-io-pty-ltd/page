@@ -83,6 +83,8 @@ struct WidgetStatus: Equatable {
     var fetchedAt: Date
     /// The raw usage, for the rings (nil without usage tracking).
     var usage: MacUsage? = nil
+    /// The whole reading, for the Runway on the medium widget.
+    var snapshot: MacStatusSnapshot? = nil
 
     static func from(json: [String: Any], macName: String?, now: Date, format: (Date) -> String) -> WidgetStatus {
         let snap = MacStatusSnapshot.from(json: json)
@@ -96,13 +98,42 @@ struct WidgetStatus: Equatable {
         return WidgetStatus(macName: macName ?? "Your Mac", presence: presence, needsYou: snap.pendingCount ?? 0,
                             working: snap.working, live: snap.activeSessions,
                             batteryLine: snap.batteryLine, usageLine: snap.usageLine(now: now, format: format),
-                            fetchedAt: now, usage: snap.usage)
+                            fetchedAt: now, usage: snap.usage, snapshot: snap)
+    }
+
+    /// The next six hours as the app's Runway shows them: battery cutoff,
+    /// 5-hour limit and resets. Empty when the relay sent no forecast or usage.
+    func runway(now: Date, timeZone: TimeZone = .current) -> RunwayModel {
+        RunwayModel.build(status: snapshot, now: now, timeZone: timeZone)
+    }
+
+    /// "Studio MBP · on battery 41%": the Mac's name and its power, whatever is known.
+    var macLine: String {
+        var parts = [macName]
+        if let s = snapshot {
+            if s.onAC == true { parts.append("on power") }
+            else if s.onAC == false { parts.append(s.batteryPercent.map { "on battery \($0)%" } ?? "on battery") }
+        }
+        return parts.joined(separator: " · ")
     }
 
     /// "2 need you" / "All quiet".
     var headline: String {
         needsYou == 0 ? "All quiet" : "\(needsYou) need\(needsYou == 1 ? "s" : "") you"
     }
+
+    /// What the widget's first line says. Silence has to be earned: a Mac that
+    /// is offline or not checking in is never "All quiet".
+    var faceHeadline: String {
+        switch presence {
+        case .offline: return "Mac offline"
+        case .stale: return "Not checking in"
+        default: return headline
+        }
+    }
+
+    /// The Mac cannot be reached right now (offline or not checking in).
+    var isUnreachable: Bool { presence == .offline || presence == .stale }
 
     /// "3 working · 9 live" (whatever is known).
     var detail: String? {

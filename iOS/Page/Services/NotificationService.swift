@@ -253,7 +253,10 @@ final class NotificationService: NSObject, ObservableObject {
 
     fileprivate func handleResponse(interventionId: String, kind: String?, project: String,
                                     response: NotificationResponseKind, userText: String?) async {
-        switch NotificationDecision.decide(response, userText: userText, kind: kind) {
+        // Approve from a banner only for an Undoable action; the page must be
+        // in the inbox to be judged, otherwise the Decision sheet opens.
+        let level = APIClient.shared.inbox.first { $0.id == interventionId }.flatMap(PhoneReversibility.verdict(for:))?.level
+        switch NotificationDecision.decide(response, userText: userText, kind: kind, approveLevel: level) {
         case .open:
             AppRouter.shared.open(interventionId: interventionId)
         case .ignore:

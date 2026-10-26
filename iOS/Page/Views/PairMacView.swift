@@ -11,9 +11,7 @@ struct PairMacView: View {
     var onPaired: (() -> Void)? = nil
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var api: APIClient
-    @Environment(\.colorScheme) private var scheme
-    @ScaledMetric(relativeTo: .body) private var primaryHeight: CGFloat = 52
-
+    @EnvironmentObject var router: AppRouter
     private enum Stage: Equatable {
         case idle
         case checking(ValidatedPairing)
@@ -31,48 +29,31 @@ struct PairMacView: View {
     @State private var probeTask: Task<Void, Never>?
 
     var body: some View {
-        ZStack {
-            Theme.Colour.surface.ignoresSafeArea()
-            ScrollView {
-                VStack(spacing: Theme.Space.xxl) {
-                    Spacer().frame(height: 40)
-                    PulseMark(size: 96)
-                    Text("Pair your Mac")
-                        .font(Theme.Font.display22)
-                        .foregroundStyle(Theme.Colour.text)
-                        .accessibilityAddTraits(.isHeader)
-                    Text("On your Mac, click the Page icon in the menu bar → Pair phone…, then scan the QR code shown there.")
-                        .font(Theme.Font.body15)
-                        .foregroundStyle(Theme.Colour.textMuted)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, Theme.Space.l)
-
-                    if let notice = pairing.retirementNotice {
-                        StatusBanner(tone: .error, systemImage: "key.slash",
-                                     title: "Pair again",
-                                     message: "\(TokenRetirement.sentence(notice)) Your old inbox and history were cleared.",
-                                     actionTitle: "Dismiss") { pairing.dismissRetirementNotice() }
+        stageScreen
+            .preferredColorScheme(.dark)
+            .sheet(isPresented: $showingScanner) {
+                ScannerSheet(onValidCode: { pairing in
+                    showingScanner = false
+                    startProbe(pairing)
+                }, onCancel: { showingScanner = false }, onCameraFailure: { message in
+                    showingScanner = false
+                    stage = .problem(title: "Camera unavailable", message: message, retry: nil, openSettings: false)
+                }, onPaste: {
+                    showingScanner = false
+                    manualError = nil
+                    // The scanner has to finish leaving before the next sheet can come up.
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 450_000_000)
+                        showingManualEntry = true
                     }
-
-                    stageView
-                }
-                .padding(.horizontal, Theme.Space.xxl)
-                .padding(.bottom, 34)
+                })
+                .presentationBackground(NightWatch.Palette.backgroundDeep.color)
             }
-        }
-        .sheet(isPresented: $showingScanner) {
-            ScannerSheet(onValidCode: { pairing in
-                showingScanner = false
-                startProbe(pairing)
-            }, onCancel: { showingScanner = false }, onCameraFailure: { message in
-                showingScanner = false
-                stage = .problem(title: "Camera unavailable", message: message, retry: nil, openSettings: false)
-            })
-        }
-        .sheet(isPresented: $showingManualEntry) {
-            ManualPairSheet(text: $manualText, error: $manualError, onPair: attemptManualPair,
-                            onCancel: { showingManualEntry = false })
-        }
+            .sheet(isPresented: $showingManualEntry) {
+                ManualPairSheet(text: $manualText, error: $manualError, onPair: attemptManualPair,
+                                onCancel: { showingManualEntry = false })
+                    .presentationBackground(NightWatch.Palette.backgroundDeep.color)
+            }
         .onDisappear { probeTask?.cancel() }
         #if DEBUG
         .onAppear {
@@ -83,12 +64,30 @@ struct PairMacView: View {
             let args = ProcessInfo.processInfo.arguments
             if args.contains("-PageDevPairing") {
                 DevBypass.start(pairing: pairing, api: api)
-                if let i = args.firstIndex(of: "-PageDevOpen"), i + 1 < args.count {
-                    AppRouter.shared.open(interventionId: args[i + 1])
-                }
-                // `-PageDevSession <id|active>` opens a mock session's detail.
-                if let i = args.firstIndex(of: "-PageDevSession"), i + 1 < args.count {
-                    AppRouter.shared.openSession(args[i + 1] == "active" ? DevBypass.activeSessionId : args[i + 1])
+                // Opened a moment later, once the root view has settled (it resets the router on first activation).
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    if let i = args.firstIndex(of: "-PageDevOpen"), i + 1 < args.count {
+                        AppRouter.shared.open(interventionId: args[i + 1])
+                    }
+                    // `-PageDevSheet tower|tower-budget|dispatch|history` opens that sheet, and
+                    // `-PageDevDestination sky` starts on Sky (mock data only, for screenshots).
+                    if let i = args.firstIndex(of: "-PageDevSheet"), i + 1 < args.count {
+                        switch args[i + 1] {
+                        case "tower": AppRouter.shared.openTower()
+                        case "tower-budget": AppRouter.shared.openTower(.budget)
+                        case "dispatch": AppRouter.shared.openDispatch()
+                        case "history": AppRouter.shared.openHistory()
+                        default: break
+                        }
+                    }
+                    if let i = args.firstIndex(of: "-PageDevDestination"), i + 1 < args.count, args[i + 1] == "sky" {
+                        AppRouter.shared.destination = .sky
+                    }
+                    // `-PageDevSession <id|active>` opens a mock session's detail.
+                    if let i = args.firstIndex(of: "-PageDevSession"), i + 1 < args.count {
+                        AppRouter.shared.openSession(args[i + 1] == "active" ? DevBypass.activeSessionId : args[i + 1])
+                    }
                 }
             }
         }
@@ -97,114 +96,45 @@ struct PairMacView: View {
 
     // MARK: Stage UI
 
+    /// Each stage is one Night Watch screen: Welcome, then (behind the
+    /// scanner sheet) the relay check, the confirmation and any problem.
     @ViewBuilder
-    private var stageView: some View {
+    private var stageScreen: some View {
         switch stage {
         case .idle:
-            startButtons
+            NWWelcomeScreen(notice: retirementNotice, onPair: { Task { await openScanner() } },
+                            onDismissNotice: { pairing.dismissRetirementNotice() }, onSkipDev: devSkip)
         case .checking(let p):
-            VStack(spacing: Theme.Space.m) {
-                ProgressView()
-                Text("Checking \(p.relayHost)…")
-                    .font(Theme.Font.body15)
-                    .foregroundStyle(Theme.Colour.textMuted)
-                Button("Cancel") { cancelProbe() }
-                    .font(Theme.Font.body15)
-                    .frame(minHeight: 44)
-            }
-            .padding(.top, Theme.Space.l)
+            NWPairStep(content: .checking(host: p.relayHost), onSecondary: { cancelProbe() }, secondaryTitle: "Cancel")
         case .confirm(let p, let macOnline, let unused):
-            confirmCard(p, macOnline: macOnline, unused: unused)
+            NWPairStep(content: .confirm(mac: p.macName, host: p.relayHost, online: macOnline, unused: unused),
+                       onPrimary: { confirm(p) }, primaryTitle: "Pair", onSecondary: { stage = .idle }, secondaryTitle: "Cancel")
         case .problem(let title, let message, let retry, let openSettings):
-            VStack(spacing: Theme.Space.m) {
-                StatusBanner(tone: .error, systemImage: "exclamationmark.triangle", title: title, message: message)
-                if openSettings {
-                    primaryButton("Open Settings") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-                    }
-                }
-                if let retry {
-                    primaryButton("Try again") { startProbe(retry) }
-                }
-                Button("Start over") { stage = .idle }
-                    .font(Theme.Font.body15)
-                    .foregroundStyle(Theme.Colour.textMuted)
-                    .frame(minHeight: 44)
-            }
+            NWPairStep(content: .problem(title: title, message: message),
+                       onPrimary: problemPrimary(retry: retry, openSettings: openSettings),
+                       primaryTitle: openSettings ? "Open Settings" : "Try again",
+                       onSecondary: { stage = .idle }, secondaryTitle: "Start over")
         }
     }
 
-    private var startButtons: some View {
-        VStack(spacing: Theme.Space.m) {
-            primaryButton("Scan pairing code") { Task { await openScanner() } }
-            Button("Enter pairing code manually") {
-                manualError = nil
-                showingManualEntry = true
-            }
-            .font(Theme.Font.body15)
-            .foregroundStyle(Theme.Colour.textMuted)
-            .frame(minHeight: 44)
-
-            #if DEBUG
-            Button("Skip pairing (DEV)") {
-                DevBypass.start(pairing: pairing, api: api)
-            }
-            .font(Theme.Font.caption12)
-            .foregroundStyle(Theme.Colour.textMuted)
-            #endif
-        }
-        .padding(.top, Theme.Space.l)
+    private var retirementNotice: (title: String, message: String)? {
+        pairing.retirementNotice.map { ("Pair again", "\(TokenRetirement.sentence($0)) Your old inbox and history were cleared.") }
     }
 
-    private func confirmCard(_ p: ValidatedPairing, macOnline: Bool?, unused: Bool) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Space.m) {
-            Text("Pair with \(p.macName)?")
-                .font(Theme.Font.title17)
-                .foregroundStyle(Theme.Colour.text)
-            Text("Relay: \(p.relayHost)")
-                .font(Theme.Font.mono13)
-                .foregroundStyle(Theme.Colour.textMuted)
-                .lineLimit(1)
-                .truncationMode(.middle)
-            switch macOnline {
-            case true?:
-                Label("Your Mac is connected to this relay.", systemImage: "checkmark.circle.fill")
-                    .font(Theme.Font.caption12)
-                    .foregroundStyle(Theme.Colour.success)
-            case false? where unused:
-                Label("No Mac has connected to this relay with this code yet. If it's an old screenshot or you regenerated the token on your Mac, show the pairing code on your Mac again and scan the new one.", systemImage: "exclamationmark.triangle")
-                    .font(Theme.Font.caption12)
-                    .foregroundStyle(Theme.Colour.destructiveText)
-            case false?:
-                Label("Your Mac isn't connected to this relay right now. That's fine — pages will arrive once it is.", systemImage: "exclamationmark.circle")
-                    .font(Theme.Font.caption12)
-                    .foregroundStyle(Theme.Colour.warning)
-            case nil:
-                EmptyView()
-            }
-            Text("Only pair with a code from your own Mac: whoever runs this relay sees your pages and replies.")
-                .font(Theme.Font.caption12)
-                .foregroundStyle(Theme.Colour.textMuted)
-            primaryButton("Pair") { confirm(p) }
-            Button("Cancel") { stage = .idle }
-                .font(Theme.Font.body15)
-                .foregroundStyle(Theme.Colour.textMuted)
-                .frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .cardStyle()
+    private var devSkip: (() -> Void)? {
+        #if DEBUG
+        return { DevBypass.start(pairing: pairing, api: api) }
+        #else
+        return nil
+        #endif
     }
 
-    private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(Theme.Font.button17)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: primaryHeight)
-                .background(Theme.Colour.pulseGradient(scheme))
-                .foregroundStyle(Theme.Colour.onAccent)
-                .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+    private func problemPrimary(retry: ValidatedPairing?, openSettings: Bool) -> (() -> Void)? {
+        if openSettings {
+            return { if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) } }
         }
-        .buttonStyle(.plain)
+        if let retry { return { startProbe(retry) } }
+        return nil
     }
 
     // MARK: Flow
@@ -283,9 +213,13 @@ struct PairMacView: View {
     }
 
     private func confirm(_ p: ValidatedPairing) {
+        // A first pairing ends on the Paired screen, so Page must not ask for notifications before it.
+        let firstMac = onPaired == nil && pairing.savedMacs.isEmpty
+        if firstMac { router.pairedWelcome = true }
         if pairing.adopt(p) {
             onPaired?()
         } else {
+            if firstMac { router.pairedWelcome = false }
             stage = .problem(title: "Couldn't save the pairing",
                              message: "iOS refused to store the pairing in the Keychain. Unlock your iPhone and try again.",
                              retry: p, openSettings: false)
@@ -301,107 +235,72 @@ private struct ManualPairSheet: View {
     let onPair: () -> Void
     let onCancel: () -> Void
 
+    private var empty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
     var body: some View {
-        NavigationStack {
-            ZStack {
-                Theme.Colour.surface.ignoresSafeArea()
-                ScrollView {
-                    VStack(alignment: .leading, spacing: Theme.Space.l) {
-                        Text("On your Mac, click the Page menu-bar icon → Pair phone… → Copy pairing JSON, then paste it here.")
-                            .font(Theme.Font.body15)
-                            .foregroundStyle(Theme.Colour.textMuted)
-
-                        TextEditor(text: $text)
-                            .font(Theme.Font.mono13)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .scrollContentBackground(.hidden)
-                            .padding(8)
-                            .frame(minHeight: 160)
-                            .background(Theme.Colour.surfaceRaised)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.Colour.hairline, lineWidth: 1))
-                            .accessibilityLabel("Pairing code")
-
-                        Button {
-                            if let pasted = UIPasteboard.general.string { text = pasted }
-                            error = nil
-                        } label: {
-                            Label("Paste from clipboard", systemImage: "doc.on.clipboard")
-                                .font(Theme.Font.bodyEm)
-                                .frame(minHeight: 44)
-                        }
-
-                        if let error {
-                            Text(error)
-                                .foregroundStyle(Theme.Colour.destructiveText)
-                                .font(Theme.Font.caption12)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+        ZStack {
+            NWBackdrop()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        Button("Cancel", action: onCancel).font(NightWatch.Typo.bodyStrong)
+                            .foregroundColor(NightWatch.Palette.textSecondary.color).frame(minHeight: 44)
+                        Spacer()
+                        Button("Pair", action: onPair).font(NightWatch.Typo.bodyStrong)
+                            .foregroundColor((empty ? NightWatch.Palette.textQuiet : NightWatch.Palette.teal).color)
+                            .frame(minHeight: 44).disabled(empty)
                     }
-                    .padding(Theme.Space.xxl)
+                    Text("Enter pairing code").font(.system(size: 30, weight: .bold)).kerning(-0.8)
+                        .foregroundColor(NightWatch.Palette.textPrimary.color).accessibilityAddTraits(.isHeader)
+                    Text("On your Mac, click the Page menu-bar icon → Pair phone… → Copy pairing JSON, then paste it here.")
+                        .font(NightWatch.Typo.body).foregroundColor(NightWatch.Palette.textSecondary.color)
+                    TextEditor(text: $text)
+                        .font(NightWatch.Typo.monoBody)
+                        .foregroundColor(NightWatch.Palette.textPrimary.color)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .scrollContentBackground(.hidden)
+                        .padding(10)
+                        .frame(minHeight: 170)
+                        .background(NWGlassBackground(radius: 18, fill: NightWatch.Palette.surface.opacity(0.95)))
+                        .accessibilityLabel("Pairing code")
+                    Button {
+                        if let pasted = UIPasteboard.general.string { text = pasted }
+                        error = nil
+                    } label: {
+                        HStack(spacing: 10) { Image(systemName: "doc.on.clipboard"); Text("Paste from clipboard") }
+                    }
+                    .buttonStyle(NWButtonStyle(kind: .quiet))
+                    if let error {
+                        Text(error).foregroundColor(NightWatch.Palette.amber.color).font(NightWatch.Typo.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-            }
-            .navigationTitle("Enter pairing code")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel", action: onCancel)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Pair", action: onPair)
-                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
+                .padding(24)
             }
         }
+        .preferredColorScheme(.dark)
     }
 }
 
 // MARK: - QR scanner
 
-/// Full-screen scanner with a viewfinder, instructions and Cancel. Codes
-/// that aren't Page pairing codes show an inline hint and scanning carries
-/// on, instead of closing the sheet and silently doing nothing.
+/// The scanner: the camera sits in the viewfinder window. Codes that aren't
+/// Page pairing codes show an inline hint and scanning carries on, instead of
+/// closing the sheet and silently doing nothing.
 private struct ScannerSheet: View {
     let onValidCode: (ValidatedPairing) -> Void
     let onCancel: () -> Void
     let onCameraFailure: (String) -> Void
+    let onPaste: () -> Void
     @State private var hint: String?
     @State private var accepted = false
 
     var body: some View {
-        ZStack {
+        NWScanScreen(hint: hint, onPaste: onPaste, onCancel: onCancel) {
             QRScannerView(onCode: handle, onFailure: onCameraFailure)
-                .ignoresSafeArea()
-            VStack(spacing: Theme.Space.l) {
-                HStack {
-                    Spacer()
-                    Button("Cancel", action: onCancel)
-                        .font(Theme.Font.bodyEm)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, Theme.Space.l)
-                        .frame(minHeight: 44)
-                        .background(.black.opacity(0.4), in: Capsule())
-                }
-                .padding(Theme.Space.l)
-                Spacer()
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .strokeBorder(.white.opacity(0.85), lineWidth: 3)
-                    .frame(width: 240, height: 240)
-                    .accessibilityHidden(true)
-                Spacer()
-                Text(hint ?? "Point the camera at the QR code in Page on your Mac.")
-                    .font(Theme.Font.bodyEm)
-                    .foregroundStyle(.white)
-                    .multilineTextAlignment(.center)
-                    .padding(Theme.Space.l)
-                    .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .padding(.horizontal, Theme.Space.xl)
-                    .padding(.bottom, 40)
-                    .accessibilityAddTraits(.updatesFrequently)
-            }
         }
-        .background(Color.black)
+        .preferredColorScheme(.dark)
     }
 
     private func handle(_ text: String) {

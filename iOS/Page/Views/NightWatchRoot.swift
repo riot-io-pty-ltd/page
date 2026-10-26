@@ -1,0 +1,102 @@
+import SwiftUI
+
+/// The root of the paired app: Now and Sky, the capsule with the pulse, and
+/// every sheet. Two places and one verb; sessions are rooms and Settings is
+/// the Tower, never tabs.
+struct NightWatchRoot: View {
+    @EnvironmentObject var api: APIClient
+    @EnvironmentObject var notifications: NotificationService
+    @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var sessions: SessionStore
+    @EnvironmentObject var pairing: PairingStore
+    @EnvironmentObject var stop: StopCoordinator
+    @State private var held: TimeInterval?
+
+    var body: some View {
+        let busy = StopPlan.build(sessions: sessions.sessions, hasSessionList: sessions.hasList, workingFromStatus: api.macStatus?.working,
+                                 macName: nwMacName(sessions: sessions, pairing: pairing))
+        NWShell(destination: $router.destination,
+                decideCount: api.inbox.filter { NowRowBuilder.section(of: $0) == .decide }.count,
+                workingCount: sessions.hasList ? sessions.sessions.filter { $0.state == .active }.count : (api.macStatus?.working ?? 0),
+                stop: stop.phase, stopPlan: busy, biometry: BiometricGate.displayName, held: $held,
+                onPulseTap: { router.openDispatch() },
+                onPulseHold: { stop.holdCompleted(plan: busy) }) {
+            NowContainer()
+        } sky: {
+            SkyContainer()
+        }
+        // Set on the shell only, so the sheet that covers it keeps animating.
+        .environment(\.nwAnimationsPaused, router.sheets.current != nil)
+        .preferredColorScheme(.dark)
+        .ignoresSafeArea(.keyboard)
+        .task {
+            // First appearance after launch or after pairing.
+            api.activate()
+            #if DEBUG
+            // Mock data (`-PageDevPairing`) never asks iOS for notifications.
+            if api.isDevMode { return }
+            #endif
+            // After a first pairing, the Paired screen asks (once, in words first).
+            if router.pairedWelcome { return }
+            await notifications.requestAuthorizationIfNeeded()
+        }
+        .sheet(item: router.sheetBinding, onDismiss: router.sheetDismissed) { sheet in
+            SheetHost(sheet: sheet)
+        }
+        .confirmationDialog("Unpair \(pairing.pairedMac?.name ?? "this Mac")?", isPresented: $router.confirmingUnpair, titleVisibility: .visible) {
+            Button("Unpair", role: .destructive) { pairing.unpair() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This iPhone will stop receiving pages until you scan a pairing code again. On your Mac, open Page → Pair phone… and scan the new code.")
+        }
+    }
+}
+
+/// What each sheet holds.
+private struct SheetHost: View {
+    let sheet: NWSheet
+
+    var body: some View {
+        switch sheet {
+        case .decision(let id):
+            DecisionContainer(interventionId: id)
+                .presentationDetents([.fraction(0.92), .large])
+                .presentationDragIndicator(.hidden)
+                .presentationCornerRadius(34)
+        case .session(let id):
+            SessionRoomContainer(sessionId: id)
+                .presentationDetents([.large])
+                .presentationDragIndicator(.hidden)
+                .presentationCornerRadius(34)
+                .presentationBackground(NightWatch.Palette.backgroundDeep.color)
+        case .tower(let section):
+            TowerContainer(scrollTo: section)
+                .presentationDragIndicator(.visible)
+        case .dispatch:
+            DispatchContainer()
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        case .history:
+            HistorySheet()
+        }
+    }
+}
+
+/// Everything Settled, and the day's stats: the old History screen, reached
+/// from Settled's "See all" and from the Tower.
+private struct HistorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            HistoryView()
+            Button { dismiss() } label: {
+                Image(systemName: "xmark").font(.system(.body, weight: .semibold))
+                    .foregroundStyle(Theme.Colour.text)
+                    .frame(width: 44, height: 44)
+            }
+            .padding(.top, 14).padding(.trailing, 14)
+            .accessibilityLabel("Close")
+        }
+        .preferredColorScheme(.dark)
+    }
+}

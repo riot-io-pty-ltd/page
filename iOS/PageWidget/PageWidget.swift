@@ -18,12 +18,15 @@ struct MacStatusWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "page.mac-status", provider: StatusProvider()) { entry in
             StatusWidgetView(entry: entry)
-                .containerBackground(Theme.Colour.surface, for: .widget)
-                .widgetURL(URL(string: "page://sessions"))
+                .containerBackground(for: .widget) {
+                    NWWidgetBackground(palette: entry.status?.facePalette ?? .asleep)
+                }
+                // Opens Now, where the decisions are.
+                .widgetURL(URL(string: "page://now"))
         }
         .configurationDisplayName("Page")
-        .description("Sessions that need you, agents at work, and your Mac's battery.")
-        .supportedFamilies([.systemSmall, .systemMedium, .accessoryRectangular, .accessoryCircular, .accessoryInline])
+        .description("Sessions that need you, agents at work, and the Runway: when your Mac's battery or your usage will stop the work.")
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge, .accessoryRectangular, .accessoryCircular, .accessoryInline])
     }
 }
 
@@ -76,22 +79,22 @@ struct StatusWidgetView: View {
     @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        switch family {
-        case .accessoryCircular: circular
-        case .accessoryRectangular: rectangular
-        case .accessoryInline: inline
-        case .systemMedium: medium
-        default: small
+        Group {
+            switch family {
+            case .accessoryCircular: circular
+            case .accessoryRectangular: rectangular
+            case .accessoryInline: inline
+            case .systemMedium: face(.medium)
+            case .systemLarge: face(.large)
+            default: face(.small)
+            }
         }
+        // A widget is one still frame: the pulse and aurora hold a pose instead of animating.
+        .environment(\.nwFixedPhase, 2.0)
     }
 
-    private var presenceColor: Color {
-        switch entry.status?.presence {
-        case .online: return Theme.Colour.success
-        case .stale: return Theme.Colour.warning
-        case .offline: return Theme.Colour.destructiveText
-        default: return Theme.Colour.textMuted
-        }
+    private func face(_ size: NWWidgetSize) -> some View {
+        NWWidgetStatusFace(status: entry.status, problem: entry.problem, size: size, now: entry.date)
     }
 
     private var presenceText: String {
@@ -103,81 +106,12 @@ struct StatusWidgetView: View {
         }
     }
 
-    private func macRow(_ s: WidgetStatus) -> some View {
-        HStack(spacing: 5) {
-            Circle().fill(presenceColor).frame(width: 7, height: 7)
-            Text(s.macName).font(.caption2.weight(.semibold)).lineLimit(1)
-            Spacer(minLength: 0)
-        }
-        .foregroundStyle(Theme.Colour.textMuted)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(s.macName), \(presenceText)")
-    }
-
-    private var problemView: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Page").font(.headline).foregroundStyle(Theme.Colour.text)
-            Text(entry.problem ?? "—").font(.caption).foregroundStyle(Theme.Colour.textMuted)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    @ViewBuilder
-    private var small: some View {
-        if let s = entry.status {
-            VStack(alignment: .leading, spacing: 6) {
-                macRow(s)
-                Spacer(minLength: 0)
-                Text(s.headline)
-                    .font(.title3.weight(.bold))
-                    .foregroundStyle(s.needsYou > 0 ? Theme.Colour.warning : Theme.Colour.text)
-                    .minimumScaleFactor(0.7)
-                    .lineLimit(1)
-                if let d = s.detail { Text(d).font(.caption).foregroundStyle(Theme.Colour.textMuted).lineLimit(1) }
-                if let b = s.batteryLine { Text(b).font(.caption2).foregroundStyle(Theme.Colour.textMuted).lineLimit(2) }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        } else {
-            problemView
-        }
-    }
-
-    @ViewBuilder
-    private var medium: some View {
-        if let s = entry.status {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
-                    macRow(s)
-                    Spacer(minLength: 0)
-                    Text(s.headline)
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(s.needsYou > 0 ? Theme.Colour.warning : Theme.Colour.text)
-                        .lineLimit(1)
-                    if let d = s.detail { Text(d).font(.caption).foregroundStyle(Theme.Colour.textMuted) }
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    if let b = s.batteryLine { Label(b, systemImage: "battery.25") }
-                    if let u = s.usageLine { Label(u, systemImage: "gauge.with.dots.needle.67percent") }
-                    if s.batteryLine == nil && s.usageLine == nil {
-                        Text("Updated \(s.fetchedAt.formatted(date: .omitted, time: .shortened))")
-                    }
-                }
-                .font(.caption2)
-                .foregroundStyle(Theme.Colour.textMuted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        } else {
-            problemView
-        }
-    }
-
     @ViewBuilder
     private var rectangular: some View {
         if let s = entry.status {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Page · \(presenceText)").font(.caption2.weight(.semibold))
-                Text(s.headline).font(.headline).widgetAccentable()
+                Text(s.faceHeadline).font(.headline).widgetAccentable()
                 if let d = s.detail { Text(d).font(.caption2) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -191,19 +125,23 @@ struct StatusWidgetView: View {
         if let s = entry.status {
             ZStack {
                 AccessoryWidgetBackground()
-                VStack(spacing: 0) {
-                    Text("\(s.needsYou)").font(.title2.weight(.bold)).widgetAccentable()
-                    Text("need").font(.system(size: 9))
+                if s.presence == .offline || s.presence == .stale {
+                    Image(systemName: "moon.zzz").font(.title3).widgetAccentable()
+                } else {
+                    VStack(spacing: 0) {
+                        Text("\(s.needsYou)").font(.title2.weight(.bold)).widgetAccentable()
+                        Text("need").font(.system(size: 9))
+                    }
                 }
             }
-            .accessibilityLabel(s.headline)
+            .accessibilityLabel(s.faceHeadline)
         } else {
             ZStack { AccessoryWidgetBackground(); Image(systemName: "bell.slash") }
         }
     }
 
     private var inline: some View {
-        Text(entry.status.map { "Page: \($0.headline)" + ($0.working.map { ", \($0) working" } ?? "") } ?? "Page")
+        Text(entry.status.map { "Page: \($0.faceHeadline)" + ($0.presence == .online ? ($0.working.map { ", \($0) working" } ?? "") : "") } ?? "Page")
     }
 }
 
@@ -214,8 +152,9 @@ struct UsageWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: "page.claude-usage", provider: StatusProvider()) { entry in
             UsageWidgetView(entry: entry)
-                .containerBackground(Theme.Colour.surface, for: .widget)
-                .widgetURL(URL(string: "page://sessions"))
+                .containerBackground(for: .widget) { NWWidgetBackground(palette: .quiet, strength: 0.5) }
+                // Opens the Tower (Power and Budget live there).
+                .widgetURL(URL(string: "page://tower"))
         }
         .configurationDisplayName("Claude usage")
         .description("Your 5-hour and 7-day Claude usage and when each resets. Turn on usage tracking in Page on your Mac.")
@@ -230,52 +169,14 @@ struct UsageWidgetView: View {
     private var model: UsageCardModel? { UsageCardModel(entry.status?.usage, now: entry.date) }
 
     var body: some View {
-        if let m = model {
-            switch family {
-            case .accessoryCircular: circular(m)
-            case .accessoryRectangular: rectangular(m)
-            case .systemMedium: medium(m)
-            default: small(m)
-            }
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Claude usage").font(.headline).foregroundStyle(Theme.Colour.text)
-                Text(entry.problem ?? "Turn on usage tracking in Page on your Mac")
-                    .font(.caption).foregroundStyle(Theme.Colour.textMuted)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-    }
-
-    private func ringColumn(_ g: UsageGauge, size: CGFloat, line: CGFloat, font: Font) -> some View {
-        VStack(spacing: 4) {
-            UsageRing(gauge: g, lineWidth: line, valueFont: font).frame(width: size, height: size)
-            Text(g.label).font(.caption2.weight(.semibold)).foregroundStyle(Theme.Colour.text)
-            if let r = g.resetsAt, r > entry.date {
-                Text(r, style: .relative).font(.system(size: 10)).foregroundStyle(Theme.Colour.textMuted)
-                    .multilineTextAlignment(.center).lineLimit(1).minimumScaleFactor(0.7)
+        Group {
+            if let m = model, family == .accessoryCircular || family == .accessoryRectangular {
+                if family == .accessoryCircular { circular(m) } else { rectangular(m) }
+            } else {
+                NWWidgetUsageFace(model: model, problem: entry.problem, size: family == .systemSmall ? .small : .medium, now: entry.date)
             }
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func small(_ m: UsageCardModel) -> some View {
-        HStack(spacing: 6) {
-            if let g = m.fiveHour { ringColumn(g, size: 58, line: 7, font: .system(size: 16, weight: .bold, design: .rounded)) }
-            if let g = m.sevenDay { ringColumn(g, size: 58, line: 7, font: .system(size: 16, weight: .bold, design: .rounded)) }
-        }
-    }
-
-    private func medium(_ m: UsageCardModel) -> some View {
-        HStack(spacing: 12) {
-            if let g = m.fiveHour { ringColumn(g, size: 70, line: 8, font: .system(size: 19, weight: .bold, design: .rounded)) }
-            if let g = m.sevenDay { ringColumn(g, size: 70, line: 8, font: .system(size: 19, weight: .bold, design: .rounded)) }
-            let v = m.verdict(format: { $0.formatted(date: .omitted, time: .shortened) })
-            Text(v.text)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(v.warning ? Theme.Colour.warning : Theme.Colour.textMuted)
-                .frame(maxWidth: 110, alignment: .leading)
-        }
+        .environment(\.nwFixedPhase, 2.0)
     }
 
     private func circular(_ m: UsageCardModel) -> some View {

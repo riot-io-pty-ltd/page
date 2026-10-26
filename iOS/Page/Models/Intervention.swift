@@ -106,6 +106,10 @@ struct Intervention: Identifiable, Hashable {
     var repliedAction: String?
     /// Worker fills in "claude" if a pre-Phase-4 Mac didn't send one.
     var backend: InterventionBackend?
+    /// The `backend` string as the relay sent it, kept so an agent Page does
+    /// not know (a value `backend` could not decode) is not mistaken for
+    /// Claude. Decode-only; the wire is unchanged.
+    var backendRaw: String?
     var source: InterventionSource?
     var subtype: String?
     /// v2 (Worker-managed): "pending" | "delivered" | "failed".
@@ -127,6 +131,12 @@ struct Intervention: Identifiable, Hashable {
 
     /// Name of the agent for copy ("Claude needs your input").
     var agentName: String { backend?.displayName ?? "Your agent" }
+
+    /// The relay named an agent Page has no adapter for. A page with no
+    /// backend at all is an older Mac's Claude page, not this.
+    var hasUnknownBackend: Bool {
+        backend == nil && !(backendRaw ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    }
 }
 
 extension Intervention: Decodable {
@@ -156,7 +166,8 @@ extension Intervention: Decodable {
         repliedAt = try? c.decodeIfPresent(Date.self, forKey: .repliedAt)
         repliedText = c.lenientString(.repliedText)
         repliedAction = c.lenientString(.repliedAction)
-        backend = c.lenientString(.backend).flatMap(InterventionBackend.init(rawValue:))
+        backendRaw = c.lenientString(.backend)
+        backend = backendRaw.flatMap(InterventionBackend.init(rawValue:))
         source = c.lenientString(.source).map { InterventionSource(rawValue: $0) ?? .unknown }
         subtype = c.lenientString(.subtype)
         deliveryStatus = c.lenientString(.deliveryStatus)

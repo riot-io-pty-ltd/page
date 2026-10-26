@@ -179,6 +179,15 @@ enum TowerOptions {
         case .off: return "left alone · the Mac just sleeps"
         }
     }
+
+    /// Pure. The line under the Card glow control.
+    static func cardGlowDetail(_ g: CardGlow) -> String {
+        switch g {
+        case .off: return "plain glass · no teal along the bottom of cards"
+        case .subtle: return "a faint teal light rising from the bottom of cards"
+        case .full: return "a stronger teal light rising from the bottom of cards"
+        }
+    }
 }
 
 // MARK: - Coupling and availability
@@ -529,6 +538,8 @@ enum TowerControlMap {
         .init(old: "turnSummaryEnabled", oldTab: "Alerts", section: .attention, newControl: "Start finished-turn pages with what changed toggle"),
         .init(old: "batteryForecastPageEnabled", oldTab: "Alerts", section: .attention, newControl: "Page me before the battery cutoff toggle"),
         .init(old: "usageForecastPageEnabled", oldTab: "Alerts", section: .attention, newControl: "Page me before the 5-hour limit toggle"),
+        // Appearance
+        .init(old: "cardGlow", oldTab: "(new)", section: .about, newControl: "Card glow segments (Appearance)"),
         // Not form fields
         .init(old: "action: usage capture toggle", oldTab: "Rate limits", section: .budget, newControl: "Show my Claude usage toggle (applies at once)"),
         .init(old: "action: power helper Install / Check again", oldTab: "Power", section: .power, newControl: "Power helper row"),
