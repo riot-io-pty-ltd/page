@@ -116,7 +116,7 @@ enum StuckWatch {
             id: "\(session.sessionId)-\(finding.subtype)-\(epoch)",
             sessionId: session.sessionId,
             cwd: cwd,
-            projectName: InterventionDetector.projectName(forCwd: cwd),
+            projectName: InterventionDetector.projectName(forCwd: cwd, fallback: session.name),
             kind: .idle,
             openedAt: now,
             context: context(for: finding, now: now),

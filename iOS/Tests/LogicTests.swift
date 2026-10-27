@@ -1989,6 +1989,105 @@ do {
     check(SettledLog.isDecision(approve) && !SettledLog.isDecision(nwIv("x", .approval, "x", session: "w1")), "decisions are answered pages")
 }
 
+// MARK: - History screen
+
+do {
+    func hItem(_ id: String, _ kind: InterventionKind, _ context: String, ago: TimeInterval, action: String?, subtype: String? = nil, project: String = "page") -> Intervention {
+        var x = nwIv(id, kind, context, at: nwT0 - ago - 60, session: "w1", project: project, subtype: subtype)
+        x.repliedAt = action == nil ? nil : nwNow.addingTimeInterval(-ago)
+        x.repliedAction = action
+        x.closedAt = nwNow.addingTimeInterval(-ago)
+        return x
+    }
+    // Twenty pages today (Now's Settled stops at twelve lines), three yesterday, one 40 days ago (past Settled's 14 days).
+    var items = (0..<20).map { hItem("t\($0)", .approval, "[Bash] ls", ago: TimeInterval($0 * 30 + 30), action: "approve") }
+    items += [hItem("y1", .approval, "[Bash] ls", ago: 86_400, action: "approve", project: "relay"),
+              hItem("y2", .idle, "Done", ago: 86_400 + 60, action: nil, project: "relay"),
+              hItem("y3", .idle, "Looks stuck", ago: 86_400 + 120, action: nil, subtype: "stuck")]
+    items.append(hItem("old", .approval, "[Bash] ls", ago: 40 * 86_400, action: "deny"))
+    let m = HistoryScreenModel.build(history: items, inbox: [nwIv("open", .approval, "[Bash] ls", session: "w1")], now: nwNow, calendar: nwCal, timeZone: nwUTC)
+    check(m.total == 24 && m.pending == 1, "History lists every settled page")
+    check(m.days.first?.title == "Today" && m.days.first?.rows.count == 20, "today shows all twenty lines, not Settled's twelve")
+    check(m.days.dropFirst().first?.title == "Yesterday" && m.days.dropFirst().first?.summary == "1 decided · 1 finished · 1 stuck", "yesterday is titled and summarised")
+    check(m.days.last?.rows.map(\.id) == ["old"] && m.days.last?.title.contains(" ") == true && m.days.last?.title != "Today", "an old day keeps its own heading past the 14-day limit")
+    check(m.days.map(\.day) == m.days.map(\.day).sorted(by: >), "days run newest first")
+    check(m.days.first?.rows.first?.id == "t0", "rows run newest first")
+    let row = m.days.first?.rows.first
+    check(row?.text == "Approved ls" && row?.tone == .approved && row?.detail.hasPrefix("page · APPROVAL") == true, "a row reads like its Settled line plus project and kind")
+    check(m.rings.count == 3 && m.stats.today == 21 && m.stats.topProjects.first?.name == "page", "the tiles count the open page too (21 today), the rings the settled ones")
+    check(SettledLog.summaryText(decided: 0, finished: 0, stuck: 0, battery: 0) == "quiet", "an empty day reads quiet")
+    check(HistoryEmpty.state(isEmpty: false, loaded: true, failure: "x") == nil, "rows hide the empty state")
+    check(HistoryEmpty.state(isEmpty: true, loaded: false, failure: nil) == .loading, "no rows before the first load: loading")
+    check(HistoryEmpty.state(isEmpty: true, loaded: true, failure: nil) == HistoryEmpty.none, "loaded and empty: no history yet")
+    check(HistoryEmpty.state(isEmpty: true, loaded: false, failure: "offline") == .failed("offline"), "a failed load is shown with its message")
+    check(HistoryScreenModel.build(history: [], inbox: [], now: nwNow, calendar: nwCal, timeZone: nwUTC).days.isEmpty, "nothing settled: no days")
+    check(MacPresence.online(lastSeen: nil).summary(now: nwNow) == "Online" && MacPresence.neverConnected.summary(now: nwNow) == "Never connected with this pairing", "Mac presence copy")
+}
+
+// MARK: - History and presence copy, edge cases (conversion)
+
+do {
+    // Mid-day of nwNow's day, in UTC. The helpers below are all relative to it.
+    let hcDay0 = nwCal.startOfDay(for: nwNow)
+    func hcPage(_ id: String, replied: TimeInterval?, closed: TimeInterval? = nil, delivery: String? = nil) -> Intervention {
+        // `replied` and `closed` are offsets from nwNow; the page opened a minute before its settle.
+        var x = nwIv(id, .approval, "[Bash] ls", at: nwNow.timeIntervalSince1970 + (replied ?? closed ?? 0) - 60, session: "w1", project: "page")
+        if let replied {
+            x.repliedAt = nwNow.addingTimeInterval(replied)
+            x.repliedAction = "approve"
+            x.deliveryStatus = delivery
+        }
+        if let closed { x.closedAt = nwNow.addingTimeInterval(closed) }
+        return x
+    }
+
+    // A page at 23:30 UTC on the day before today, and one at noon that day.
+    let hcLate = hcPage("late", replied: TimeInterval(hcDay0.timeIntervalSince(nwNow)) - 1_800)
+    let hcNoon = hcPage("noon", replied: TimeInterval(hcDay0.timeIntervalSince(nwNow)) - 43_200)
+    let hcUTC = HistoryScreenModel.build(history: [hcLate, hcNoon], inbox: [], now: nwNow, calendar: nwCal, timeZone: nwUTC)
+    check(hcUTC.days.count == 1 && hcUTC.days[0].rows.map(\.id) == ["late", "noon"] && hcUTC.days[0].title == "Yesterday",
+          "in UTC both pages fall on yesterday")
+    let hcEast = HistoryScreenModel.build(history: [hcLate, hcNoon], inbox: [], now: nwNow, calendar: nwCal,
+                                          timeZone: TimeZone(secondsFromGMT: 2 * 3600)!)
+    check(hcEast.days.map { $0.rows.map(\.id) } == [["late"], ["noon"]] && hcEast.days[0].title == "Today",
+          "at +2 the 23:30 UTC page has already become today's")
+
+    // A page nobody answered is ordered by when it closed, not when it opened.
+    let hcClosed = hcPage("closed", replied: nil, closed: -60)
+    let hcAnswered = hcPage("answered", replied: -600)
+    let hcOrder = HistoryScreenModel.build(history: [hcAnswered, hcClosed], inbox: [], now: nwNow, calendar: nwCal, timeZone: nwUTC)
+    check(hcOrder.days.first?.rows.map(\.id) == ["closed", "answered"], "an unanswered page sorts by its close time")
+
+    // Row copy: the trailing pair, the spoken line and the detail with and without a response time.
+    let hcRow = HistoryScreenModel.row(for: hcPage("r", replied: -120, delivery: "delivered"), now: nwNow)
+    check(hcRow.trailing == "2m · delivered ✓", "a delivered reply reads its age and delivery")
+    check(hcRow.spoken == "Approved ls, page, 2m · delivered ✓", "the spoken line reads the same words")
+    check(hcRow.detail.contains("Answered in 1m"), "a replied page shows how long it took")
+    let hcQuiet = HistoryScreenModel.row(for: hcPage("q", replied: nil, closed: -300), now: nwNow)
+    check(hcQuiet.trailing == "5m" && !hcQuiet.detail.contains("Answered in"), "an unanswered page shows only its age, with no response time")
+
+    // Summaries and day titles.
+    check(SettledLog.summaryText(decided: 0, finished: 0, stuck: 0, battery: 2) == "battery pause ×2", "battery pauses alone")
+    check(SettledLog.summaryText(decided: 14, finished: 6, stuck: 2, battery: 1) == "14 decided · 6 finished · 2 stuck · battery pause ×1",
+          "the full summary keeps its order")
+    var hcTitleCal = nwCal
+    hcTitleCal.timeZone = nwUTC
+    var hcTwentieth = DateComponents()
+    hcTwentieth.year = 2026; hcTwentieth.month = 10; hcTwentieth.day = 20
+    let hcOld = hcTitleCal.date(from: hcTwentieth)!
+    check(HistoryScreenModel.dayTitle(hcOld, today: hcDay0, calendar: hcTitleCal, timeZone: nwUTC) == "Tue 20 Oct",
+          "an older day is titled with its weekday, day and month")
+    check(HistoryScreenModel.dayTitle(hcDay0, today: hcDay0, calendar: hcTitleCal, timeZone: nwUTC) == "Today", "today is titled Today")
+
+    // Every Mac presence line, not just the two the Settled list reads.
+    check(MacPresence.unknown.summary(now: nwNow) == "Checking…", "unknown reads Checking…")
+    check(MacPresence.online(lastSeen: nwNow.addingTimeInterval(-2)).summary(now: nwNow) == "Online · heartbeat just now", "a fresh heartbeat reads just now")
+    check(MacPresence.online(lastSeen: nwNow.addingTimeInterval(-12)).summary(now: nwNow) == "Online · heartbeat 12s ago", "a heartbeat 12s old")
+    check(MacPresence.stale(lastSeen: nwNow.addingTimeInterval(-200)).summary(now: nwNow) == "Not responding · last heartbeat 3m ago", "a stale Mac says so")
+    check(MacPresence.offline(lastSeen: nil).summary(now: nwNow) == "Offline", "offline with no heartbeat on record")
+    check(MacPresence.offline(lastSeen: nwNow.addingTimeInterval(-7_200)).summary(now: nwNow) == "Offline · last seen 2h ago", "offline names the last heartbeat")
+}
+
 // MARK: - Now stream: stable order, in-flight strands, Sky ring copy
 
 do {
@@ -2043,7 +2142,7 @@ do {
     check(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-600), state: .needsYou, now: nwNow) >= 0.8, "needs-you floor is 0.8")
     check(SkyModel.projectName(cwd: "~/projects/page", fallback: "x") == "page", "project name is the folder")
     check(SkyModel.projectName(cwd: "~/projects/page/", fallback: "x") == "page", "trailing slash ignored")
-    check(SkyModel.projectName(cwd: "~", fallback: "fb") == "fb", "home uses the fallback")
+    check(SkyModel.projectName(cwd: "~", fallback: "fb") == "~", "home reads ~, as on the Mac")
     check(StableHash.fnv1a("") == 0xcbf29ce484222325, "fnv1a of empty")
     check(StableHash.fnv1a("a") == 0xaf63dc4c8601ec8c, "fnv1a of a")
     check(StableHash.unit("page", salt: 2) == StableHash.unit("page", salt: 2) && (0..<1).contains(StableHash.unit("page", salt: 2)), "unit is repeatable and in 0..<1")
@@ -2771,7 +2870,7 @@ do {
     check(target.route == "riot-io-teltonika · cmux · Studio MBP", "route: project, terminal, Mac")
     check(target.expectCwd == "~/projects/riot-io-teltonika" && target.expectTitle == "riot-io-teltonika", "what travels is what the Mac listed")
     check(SessionTarget(session: nwSession("x1", host: "unknown", cwd: "~/a/b"), macName: "").route == "b · your Mac", "unknown terminal and blank Mac name")
-    check(SessionTarget(session: nwSession("zz", title: "Some thread", cwd: "~"), macName: "M").project == "Some thread", "home folder falls back to the title")
+    check(SessionTarget(session: nwSession("zz", title: "Some thread", cwd: "~"), macName: "M").project == "~", "home folder reads ~, as on the Mac")
     let blank = nwSession("abcdef123456", title: "", cwd: "")
     check(SessionTarget(session: blank, macName: "M").expectCwd == nil && SessionTarget(session: blank, macName: "M").expectTitle == nil,
           "a title this phone made up is never sent as an expectation")
@@ -3389,6 +3488,306 @@ do {
     check(TowerHosts.othersLine.contains("Ghostty") && TowerHosts.othersLine.contains("Warp") && TowerHosts.othersLine.contains("VS Code"), "the unsupported terminals are named")
     check(TowerSection.allCases.contains(.terminals), "the Works with section is in the list")
     check(TowerSection.terminals.title == "Works with", "the section is titled Works with")
+}
+
+
+// In flight rows, how a room opens, the first-time tips and the Gestures page.
+do {
+    let a = nwSession("s-a", title: "relay", state: "active", host: "tmux", cwd: "~/projects/relay", preview: "[Bash] vitest · 212 passed", activeAt: nwT0 - 9, canInterrupt: true)
+    let b = nwSession("s-b", title: "Page", state: "active", host: "cmux", canType: false, cwd: "~/projects/page", activeAt: nwT0 - 130)
+    let c = nwSession("s-c", title: "alpha", state: "active", host: "Ghostty", backend: "codex", cwd: "~/projects/alpha")
+    let d = nwSession("s-d", title: "delta", state: "active", host: "Terminal", cwd: "~/projects/delta")
+    let waiting = nwSession("s-w", title: "wait", state: "waitingOnApproval", cwd: "~/projects/wait")
+    let idle = nwSession("s-i", title: "idle", state: "idle", cwd: "~/projects/idle")
+    let all = [d, waiting, b, idle, a, c]
+
+    // Only working sessions, in a steady order (project name, not recency), and N counts them all.
+    let sec = InFlightSection.build(sessions: all, hasSessionList: true, now: nwNow)
+    check(sec.rows.map(\.id) == ["s-c", "s-d", "s-b"] && sec.total == 4 && sec.hidden == 1 && sec.isCapped, "capped at three, steady project order, N counts all")
+    check(sec.showAllLabel == "Show all 4" && !sec.isExpanded, "the cap says Show all N")
+    let shuffled = InFlightSection.build(sessions: all.reversed(), hasSessionList: true, now: nwNow.addingTimeInterval(60))
+    check(shuffled.rows.map(\.id) == sec.rows.map(\.id), "a refresh or a reordered list never swaps rows")
+    let open = InFlightSection.build(sessions: all, hasSessionList: true, now: nwNow, expanded: true)
+    check(open.rows.map(\.id) == ["s-c", "s-d", "s-b", "s-a"] && open.hidden == 0 && open.isExpanded, "Show all lists every working session")
+    let few = InFlightSection.build(sessions: [a, b], hasSessionList: true, now: nwNow, expanded: true)
+    check(!few.isCapped && !few.isExpanded && few.rows.count == 2, "two rows need no Show all")
+    check(InFlightSection.build(sessions: all, hasSessionList: false, now: nwNow) == .empty, "no list yet: nothing is drawn as in flight")
+    check(InFlightSection.build(sessions: [waiting, idle], hasSessionList: true, now: nwNow).total == 0, "waiting and idle sessions are not in flight")
+    check(InFlightSection.build(sessions: all, hasSessionList: true, now: nwNow).total == NowModel.build(NowInputs(sessions: all, hasSessionList: true, now: nwNow, macName: "M")).workingCount,
+          "N is the Horizon's working count")
+
+    let relay = open.rows.first { $0.id == "s-a" }!
+    check(relay.project == "relay" && relay.character == "Claude" && relay.route == "tmux › relay", "project, character and host route")
+    check(relay.step == "[Bash] vitest · 212 passed" && relay.age == "9s", "the step is the session's preview, the age the time since its last step")
+    check(relay.host == "tmux" && open.rows.first { $0.id == "s-c" }?.host == "Ghostty", "the small print names the terminal alone")
+    check(relay.canType && relay.canStop && relay.canMirror, "tmux can be typed into, stopped and mirrored")
+    let cmux = open.rows.first { $0.id == "s-b" }!
+    check(cmux.step == "working" && cmux.age == "2m" && !cmux.canType && !cmux.canStop && cmux.canMirror, "no preview reads working; capabilities are the Mac's word")
+    let codex = open.rows.first { $0.id == "s-c" }!
+    check(codex.character == "Codex" && !codex.canMirror && codex.age == nil, "an unmirrored terminal is marked and a missing time is nil")
+    check(relay.spoken == "relay, Claude in tmux › relay, Running vitest · 212 passed, active 9s ago", "spoken row \(relay.spoken)")
+
+    // How a room opens.
+    check(RoomEntry.story.lens == .story && RoomEntry.screen.lens == .screen && RoomEntry.type.lens == .story && RoomEntry.stop.lens == .story, "entries map to lenses")
+    check(RoomEntry.allCases.filter(\.focusesComposer) == [.type] && RoomEntry.allCases.filter(\.showsStopHint) == [.stop], "only Type takes the keyboard, only Stop shows the hint")
+    check(RoomLens.resolve(RoomEntry.screen.lens, offered: [.story]) == .story, "Screen falls back to Story until a mirror exists")
+    check(RoomLens.resolve(RoomEntry.screen.lens, offered: [.story, .screen]) == .screen, "Screen opens once the mirror exists")
+}
+
+do {
+    func nowIv(_ id: String, _ ctx: String) -> NowRow {
+        NowRowBuilder.row(for: nwIv(id, .approval, ctx, session: "w1"), session: nil, macName: "M")
+    }
+    let irrev = nowIv("irr", "[Bash] rm -rf Builds/Dev/*.app\nDelete every Dev build")
+    let undo = nowIv("und", "[Bash] swift test --filter StuckTests")
+    check(irrev.chip == .irreversible && undo.chip == .undoable, "fixtures are one irreversible and one undoable row")
+    func inputs(_ rows: [NowRow], inFlight: [String] = [], busy: Set<String> = []) -> NowTipInputs {
+        NowTipInputs(rows: rows.map { ($0.id, $0.chip) }, inFlight: inFlight, busy: busy)
+    }
+
+    // One tip at a time, in priority order, each on the first row of its kind.
+    var book = TipBook()
+    check(book.nowTip(inputs([])) == nil, "nothing to point at, no tip")
+    check(book.nowTip(inputs([undo])) == NowTipTarget(tip: .swipeToApprove, anchorId: "und"), "the first undoable row gets the swipe tip")
+    check(book.nowTip(inputs([irrev])) == NowTipTarget(tip: .holdToApprove, anchorId: "irr"), "the first irreversible row gets the hold tip")
+    check(book.nowTip(inputs([undo, irrev], inFlight: ["s-a"])) == NowTipTarget(tip: .holdToApprove, anchorId: "irr"), "hold first, then swipe, then in flight: never two at once")
+    check(book.nowTip(inputs([], inFlight: ["s-a", "s-b"])) == NowTipTarget(tip: .inFlight, anchorId: "s-a"), "the first in-flight row gets its tip")
+    check(book.nowTip(inputs([undo], busy: ["und"])) == nil, "no tip points at a row with an action under way")
+    check(book.nowTip(inputs([undo, nowIv("und2", "[Bash] swift build")], busy: ["und"]))?.anchorId == "und2", "it moves to the next row of its kind")
+    check(book.decisionTip(hasPreview: true) == .willType && book.decisionTip(hasPreview: false) == nil, "the Decision tip needs a preview to point at")
+
+    // Retired once, never again; the next one takes its turn.
+    check(book.retire(.holdToApprove) && !book.retire(.holdToApprove), "retiring is news once")
+    check(book.nowTip(inputs([undo, irrev, ])) == NowTipTarget(tip: .swipeToApprove, anchorId: "und"), "after the hold tip, the swipe tip")
+    book.retire(.swipeToApprove); book.retire(.inFlight)
+    check(book.nowTip(inputs([undo, irrev], inFlight: ["s-a"])) == nil, "every Now tip seen: none returns")
+    book.retire(.willType)
+    check(book.decisionTip(hasPreview: true) == nil, "the Decision tip is shown once")
+    book.reset()
+    check(book.seen.isEmpty && book.nowTip(inputs([irrev]))?.tip == .holdToApprove, "Show the tips again brings every tip back")
+
+    // Remembered on the phone, and never written by a fixed book.
+    let suite = "page.tests.tips.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    check(TipBook.load(from: defaults).seen.isEmpty, "a fresh phone has seen nothing")
+    var saved = TipBook()
+    saved.retire(.swipeToApprove); saved.retire(.willType)
+    saved.save(to: defaults)
+    check(TipBook.load(from: defaults) == saved && defaults.bool(forKey: "page.tip.swipeToApprove"), "dismissed tips stay dismissed after a relaunch")
+    saved.reset(); saved.save(to: defaults)
+    check(TipBook.load(from: defaults).seen.isEmpty, "reset is remembered too")
+
+    // The Tower's page is the single source of the tips' copy.
+    check(NWTip.swipeToApprove.text() == "Swipe right to approve — it can be undone", "swipe tip copy")
+    check(NWTip.holdToApprove.text() == "Hold to approve — Face ID confirms" && NWTip.holdToApprove.text(biometry: "Touch ID") == "Hold to approve — Touch ID confirms", "hold tip copy names the phone's own check")
+    check(NWTip.inFlight.text() == "Tap to watch it work · Steer to guide it", "in flight tip copy")
+    check(NWTip.willType.text() == "Will type … shows exactly what lands on your Mac", "decision tip copy")
+    for tip in NWTip.allCases {
+        let e = GestureGuide.entry(for: tip)
+        check(e != nil && e?.tipText?.contains("{biometry}") != nil && !tip.text().contains("{"), "\(tip) has one gesture entry and a filled-in line")
+    }
+    check(GestureGuide.entries.filter { $0.tip != nil }.count == NWTip.allCases.count, "every tip has exactly one entry")
+    check(Set(GestureGuide.entries.map(\.id)).count == GestureGuide.entries.count && GestureGuide.entries.allSatisfy { !$0.effect.isEmpty && !$0.gesture.isEmpty }, "entries are unique and complete")
+    check(TowerSection.gestures.title == "Gestures & shortcuts" && TowerSection.allCases.contains(.gestures), "the Tower has a Gestures & shortcuts section")
+    check(GestureGuide.shortcuts.count == 3, "the three Siri phrases are listed")
+}
+
+
+// In flight cards: the optional list fields, plain-words steps, clocks, health, the header jump and the project fallback.
+do {
+    func decode(_ extra: [String: Any]) -> LiveSession {
+        var d: [String: Any] = ["id": "s1", "backend": "claude", "title": "page", "cwd": "~/projects/page", "state": "active", "host": "cmux",
+                                "canType": true, "canInterrupt": true, "preview": "[Bash] swift test", "lastActivityAt": nwISO(nwT0 - 20)]
+        for (k, v) in extra { d[k] = v }
+        return try! JSONDecoder.page().decode(LiveSession.self, from: try! JSONSerialization.data(withJSONObject: d))
+    }
+
+    // An older Mac sends none of it: no detail, never an error, and the card still has words.
+    let old = decode([:])
+    check(old.flight == nil, "an older Mac's row carries no flight detail")
+    let oldCard = InFlightCard.build(session: old, now: nwNow)
+    check(oldCard.now == "Running swift test" && oldCard.previous.isEmpty && oldCard.turn == nil && oldCard.session == nil, "older Mac: the step in words, no clocks")
+    check(oldCard.quiet == "active 20s ago" && oldCard.timeText == "active 20s ago", "older Mac: says when it last did something, not how long it has worked")
+    check(oldCard.workflows.isEmpty && oldCard.workflowHeading == nil && oldCard.model == nil && oldCard.health == .normal && oldCard.healthLine == nil, "older Mac: no workflows, model or health note")
+
+    // A Mac that sends everything, with dates as ISO, milliseconds or seconds.
+    let rich = decode(["busySince": nwISO(nwT0 - 12 * 60), "startedAt": (nwT0 - 7800) * 1000, "model": "claude-opus-4-5-20251101",
+                       "recentSteps": ["[Read] Sources/App/Room.swift", ["text": "[Edit] Sources/App/SessionRoom.swift"], 42, "[Bash] swift test"],
+                       "health": "longRunning",
+                       "workflows": [["name": "Review changes", "phase": "Reviewing", "done": 3, "total": 5, "status": "running"],
+                                     ["name": "Old run", "done": 2, "total": 2, "status": "completed"], ["phase": "no name"]]])
+    check(rich.flight?.busySince == Date(timeIntervalSince1970: nwT0 - 720) && rich.flight?.startedAt == Date(timeIntervalSince1970: nwT0 - 7800), "ISO and millisecond dates both decode")
+    check(rich.flight?.recentSteps == ["[Read] Sources/App/Room.swift", "[Edit] Sources/App/SessionRoom.swift", "[Bash] swift test"], "steps are strings or objects; a malformed one is dropped")
+    check(rich.flight?.workflows.count == 2, "a workflow without a name is dropped")
+    let card = InFlightCard.build(session: rich, now: nwNow)
+    check(card.turn == "working 12m" && card.session == "session 2h 10m" && card.timeText == "working 12m · session 2h 10m", "turn and session clocks")
+    check(card.quiet == nil, "with a start time the quiet line is not also shown")
+    check(card.now == "Running swift test" && card.previous == ["Editing SessionRoom.swift", "Reading Room.swift"], "the current step is not repeated; previous steps are newest first, in words")
+    check(card.model == "Opus 4.5", "model")
+    check(card.health == .longRunning && card.healthLine == "Long-running command", "the Mac's health word")
+    check(card.workflows.count == 1 && card.workflows[0].text == "Review changes · Reviewing · 3/5 agents" && card.workflowHeading == "1 workflow running", "only running workflows, with name, phase, progress")
+    check(abs((card.workflows[0].fraction ?? 0) - 0.6) < 0.0001, "progress fraction")
+    // Seconds as numbers.
+    check(decode(["busySince": nwT0 - 90]).flight?.busySince == Date(timeIntervalSince1970: nwT0 - 90), "epoch seconds decode")
+    check(decode(["busySince": "soon", "model": 7, "recentSteps": "nope", "workflows": 3]).flight == nil, "garbage in every field is the same as none")
+    let spokenRow = InFlightSection.build(sessions: [rich], hasSessionList: true, now: nwNow).rows[0]
+    check(spokenRow.spoken == "page, Claude in cmux › page, Running swift test, Long-running command, working 12m · session 2h 10m, 1 workflow running", "spoken card \(spokenRow.spoken)")
+
+    // Watched session's full runs win over the list's summaries.
+    let run = WorkflowRun(id: "r1", name: "Design pass", status: "running", phase: "Draft", done: 1, total: 4)
+    let viaRuns = InFlightCard.build(session: rich, runs: [run, WorkflowRun(id: "r2", name: "Done one", status: "completed", done: 3, total: 3)], now: nwNow)
+    check(viaRuns.workflows.map(\.name) == ["Design pass"] && viaRuns.workflowHeading == "1 workflow running", "full runs replace the summaries")
+    let twoRuns = InFlightCard.build(session: old, runs: [run, WorkflowRun(id: "r3", name: "Lint", status: "running", done: 0, total: 0)], now: nwNow)
+    check(twoRuns.workflowHeading == "2 workflows running" && twoRuns.workflows[1].progress == nil && twoRuns.workflows[1].fraction == nil, "two workflows; no total means no progress shown")
+
+    // Health: the Mac's word, a stuck page, a silence.
+    check(FlightHealth.classify(state: .active, flight: nil, hasStuckPage: true, lastActivityAt: nwNow, now: nwNow) == .stuck, "a stuck page makes it look stuck")
+    check(FlightHealth.classify(state: .active, flight: rich.flight, hasStuckPage: true, lastActivityAt: nwNow, now: nwNow) == .longRunning, "the Mac's health word beats a guess")
+    check(FlightHealth.classify(state: .active, flight: decode(["health": "normal"]).flight, hasStuckPage: true, lastActivityAt: nwNow, now: nwNow) == .stuck, "a stuck page still wins over normal")
+    check(FlightHealth.classify(state: .active, flight: nil, hasStuckPage: false, lastActivityAt: nwNow.addingTimeInterval(-6 * 60), now: nwNow) == .longRunning, "six silent minutes is a long-running command")
+    check(FlightHealth.classify(state: .active, flight: nil, hasStuckPage: false, lastActivityAt: nwNow.addingTimeInterval(-60), now: nwNow) == .normal, "a recent step is normal")
+    check(FlightHealth.classify(state: .rateLimited, flight: nil, hasStuckPage: false, lastActivityAt: nil, now: nwNow) == .rateLimited, "rate limited")
+    check(FlightHealth.from(wire: "rate_limited") == .rateLimited && FlightHealth.from(wire: "looks-stuck") == .stuck && FlightHealth.from(wire: "weird") == nil, "health words are read leniently")
+    let silent = InFlightCard.build(session: decode(["lastActivityAt": nwISO(nwT0 - 6 * 60)]), now: nwNow)
+    check(silent.healthLine == "Long-running command · no new step for 6m", "the silence is named")
+    let noted = InFlightCard.build(session: decode(["health": "stuck", "healthNote": "the same step 6 times"]), now: nwNow)
+    check(noted.healthLine == "Looks stuck · the same step 6 times" && noted.health.needsAttention, "the Mac's note follows the label")
+    let stuckRow = InFlightSection.build(sessions: [old], hasSessionList: true, stuck: ["s1"], now: nwNow).rows[0]
+    check(stuckRow.card.health == .stuck, "InFlightSection takes the open stuck pages")
+    check(FlightHealth.stuckSessionIds([nwIv("a", .idle, "x", session: "s1", subtype: "looping"), nwIv("b", .idle, "x", session: "s2"), nwIv("c", .approval, "x", session: "s3", subtype: "stuck")]) == ["s1"], "only idle looping or stuck pages count")
+
+    // Steps in plain words.
+    check(StepPhrase.plain("[Bash] swift test") == "Running swift test", "bash")
+    check(StepPhrase.plain("Bash: swift test --filter A") == "Running swift test --filter A", "the Mac's own Tool: text form")
+    check(StepPhrase.plain("[Edit] /Users/me/p/Sources/SessionRoom.swift") == "Editing SessionRoom.swift", "edit shows the file's name")
+    check(StepPhrase.plain("[Write] a/b/c.txt") == "Writing c.txt" && StepPhrase.plain("[Read] x.swift") == "Reading x.swift", "write and read")
+    check(StepPhrase.plain("[Grep] TODO") == "Searching TODO" && StepPhrase.plain("[Task] audit the docs") == "Sub-agent: audit the docs", "search and sub-agent")
+    check(StepPhrase.plain("[Frobnicate] now") == "Frobnicate: now" && StepPhrase.plain("[Bash]") == "Running a command", "an unknown tool and an empty one")
+    check(StepPhrase.plain("Done. All tests pass.") == "Done. All tests pass.", "an agent's own line passes through")
+    check(StepPhrase.plain("Note: remember this") == "Note: remember this", "a colon alone is not a tool")
+    check(StepPhrase.plain("[Bash] " + String(repeating: "x", count: 300), limit: 40).count == 40, "clipped")
+    check(StepPhrase.plain("   ") == "" && InFlightCard.build(session: decode(["preview": ""]), now: nwNow).now == "Working", "no step reads Working")
+
+    // Clocks.
+    check(FlightClock.duration(5) == "5s" && FlightClock.duration(59) == "59s" && FlightClock.duration(60) == "1m" && FlightClock.duration(3599) == "59m", "short durations")
+    check(FlightClock.duration(3600) == "1h" && FlightClock.duration(7800) == "2h 10m" && FlightClock.duration(86_400 * 3) == "3d" && FlightClock.duration(-5) == "0s", "hours, days and a clock that ran backwards")
+    check(FlightClock.turn(since: nil, now: nwNow) == nil && FlightClock.session(since: nil, now: nwNow) == nil && FlightClock.quiet(since: nil, now: nwNow) == nil, "no start time, no clock")
+    check(FlightClock.quiet(since: nwNow, now: nwNow) == "active just now", "just now")
+    check(InFlightCard.modelName("claude-sonnet-4-5") == "Sonnet 4.5" && InFlightCard.modelName("claude-3-5-haiku-20241022") == "Haiku 3.5" && InFlightCard.modelName("llama3:8b") == "llama3:8b", "model names")
+
+    // The strip keeps every session when the cards are capped; one session needs no strip.
+    let many = (0..<5).map { nwSession("m\($0)", title: "p\($0)", state: "active", cwd: "~/projects/p\($0)") }
+    let capped = InFlightSection.build(sessions: many, hasSessionList: true, now: nwNow)
+    check(capped.rows.count == 3 && capped.strip.count == 5 && capped.showsStrip, "the strip lists all five, the cards three")
+    check(!InFlightSection.build(sessions: [many[0]], hasSessionList: true, now: nwNow).showsStrip, "one session: just its card")
+
+    // Buttons in words.
+    check(RoomEntry.screen.buttonTitle == "Open" && RoomEntry.type.buttonTitle == "Steer" && RoomEntry.stop.buttonTitle == "Stop", "buttons say Open and Steer")
+
+    // The header jump.
+    check(HeaderJump.target(working: 2, inFlightShown: 2) == "section-in flight", "2 working jumps to the cards")
+    check(HeaderJump.target(working: 0, inFlightShown: 0) == nil && HeaderJump.target(working: 2, inFlightShown: 0) == nil, "nothing to jump to")
+    check(HeaderJump.split(subline: "2 working · 4:12 PM runway", working: 2)?.jump == "2 working" && HeaderJump.split(subline: "2 working · 4:12 PM runway", working: 2)?.rest == " · 4:12 PM runway", "the subline splits after the count")
+    check(HeaderJump.split(subline: "20 working", working: 2) == nil && HeaderJump.split(subline: "Checking…", working: 2) == nil && HeaderJump.split(subline: "2 working", working: 0) == nil, "only the working sentence jumps")
+
+    // A project is never "/".
+    check(ProjectLabel.name(cwd: "/", fallback: "builds") == "builds" && ProjectLabel.name(cwd: "", fallback: "builds") == "builds", "root falls back to the session's name")
+    check(ProjectLabel.name(cwd: "/", fallback: "") == "root" && ProjectLabel.name(cwd: "//", fallback: " / ") == "root" && ProjectLabel.name(cwd: "", fallback: "") == "Unknown project", "never a bare slash: root, as on the Mac")
+    check(ProjectLabel.name(cwd: "~", fallback: "") == "~" && ProjectLabel.name(cwd: "/Users/roy", fallback: "") == "~" && ProjectLabel.name(cwd: "/Users/roy/", fallback: "docs") == "~", "the home folder reads ~ whatever the session is called")
+    check(ProjectLabel.name(cwd: "~/projects/page/", fallback: "x") == "page" && ProjectLabel.name(cwd: "/Users/roy/projects/page", fallback: "x") == "page", "a real folder is its own name")
+    check(ProjectLabel.clean("/", cwd: "/Users/roy/projects/page") == "page" && ProjectLabel.clean(" ", cwd: "/", fallback: "web") == "web" && ProjectLabel.clean("page", cwd: "/") == "page", "a name the Mac sent as / is repaired")
+    check(SkyModel.projectName(cwd: "/", fallback: "tokenizer") == "tokenizer", "Sky and In flight share the fallback")
+    let slash = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"i","sessionId":"s","openedAt":"2026-10-27T01:00:00Z","cwd":"/","projectName":"/","kind":"idle"}"#.utf8))
+    check(slash.projectName != "/" && !slash.projectName.isEmpty, "a finished page from / is not named /")
+    let slashRow = NowRowBuilder.row(for: slash, session: nwSession("s", title: "tokenizer", state: "idle", cwd: "/"), macName: "M")
+    check(slashRow.projectName == "tokenizer", "its row takes the session's name: \(slashRow.projectName)")
+}
+
+// In-flight audit: the Mac's golden wire rows (the same literals as Tests/InFlightCoverageTests.swift on the Mac) read by
+// this phone. A "BUG:" line is a real mismatch between what the Mac sends and what the phone shows.
+do {
+    let goldenNow = Date(timeIntervalSince1970: 1_790_000_000)  // 14:13:20Z, the Mac golden's clock
+    let goldenStuck = #"{"busySince":"2026-09-21T14:01:20Z","health":"stuck","healthDetail":"no progress for 15 min","model":"Opus 4.7","recentSteps":["Running swift test"],"startedAt":"2026-09-21T12:03:20Z"}"#
+    let goldenRateLimited = #"{"busySince":"2026-09-21T14:01:20Z","health":"rateLimited","recentSteps":["Reading Package.swift"],"resetsAt":"2026-09-21T14:28:20Z"}"#
+    let goldenLongRunning = #"{"busySince":"2026-09-21T14:01:20Z","health":"longRunning","recentSteps":["Running make all"],"stepSince":"2026-09-21T14:06:40Z"}"#
+    let goldenSixWorkflows = #"{"workflows":[{"done":3,"name":"Review changes","phase":"Reviewing","running":2,"total":5},{"done":1,"name":"Lint","running":1,"total":2},{"done":0,"name":"Docs","running":0,"total":4}],"workflowsRunning":6}"#
+    let newKeys = ["busySince", "startedAt", "model", "recentSteps", "workflows", "workflowsRunning", "health", "healthDetail", "resetsAt", "stepSince"]
+
+    /// A Mac list row with the golden fields merged in (or with some of them dropped).
+    func rowData(_ golden: String, preview: String = "Bash: swift test", drop: [String] = []) -> Data {
+        var g = try! JSONSerialization.jsonObject(with: Data(golden.utf8)) as! [String: Any]
+        for k in drop { g.removeValue(forKey: k) }
+        var d: [String: Any] = ["id": "s1", "backend": "claude", "title": "page", "cwd": "/Users/roy/projects/page", "state": "active",
+                                "host": "cmux", "canType": true, "canInterrupt": true, "preview": preview,
+                                "lastActivityAt": "2026-09-21T14:13:00Z"]
+        for (k, v) in g { d[k] = v }
+        return try! JSONSerialization.data(withJSONObject: d)
+    }
+    func liveRow(_ golden: String, preview: String = "Bash: swift test", drop: [String] = []) -> LiveSession {
+        try! JSONDecoder.page().decode(LiveSession.self, from: rowData(golden, preview: preview, drop: drop))
+    }
+
+    // Stuck: the Mac's detail and model reach the card.
+    let stuck = liveRow(goldenStuck)
+    let stuckCard = InFlightCard.build(session: stuck, now: goldenNow)
+    check(stuck.flight?.busySince == Date(timeIntervalSince1970: 1_790_000_000 - 720), "golden: busySince decodes as an absolute date")
+    check(stuckCard.health == .stuck && stuckCard.now == "Running swift test", "golden: the stuck row reads as stuck, in words")
+    check(stuckCard.turn == "working 12m" && stuckCard.session == "session 2h 10m", "golden: the clocks match the Mac's card")
+    check(stuckCard.model == "Opus 4.7", "BUG: model version lost: the Mac sends \"Opus 4.7\", the phone shows \"\(stuckCard.model ?? "nil")\"")
+    check(stuckCard.healthLine?.contains("no progress for 15 min") == true,
+          "BUG: stuck detail lost: the Mac sends healthDetail, the phone reads healthNote; the line is \"\(stuckCard.healthLine ?? "nil")\"")
+
+    // Rate limited and long-running: the health word arrives.
+    check(InFlightCard.build(session: liveRow(goldenRateLimited), now: goldenNow).health == .rateLimited, "golden: rateLimited reads as rate limited")
+    check(InFlightCard.build(session: liveRow(goldenLongRunning, preview: "Bash: make all"), now: goldenNow).health == .longRunning,
+          "golden: longRunning reads as a long-running command")
+
+    // Six workflows: the Mac says six are running; the phone sends three and must not say three.
+    let six = InFlightCard.build(session: liveRow(goldenSixWorkflows, preview: "Bash: swift test"), now: goldenNow)
+    check(six.workflows.count == 3 && six.workflows.first?.text == "Review changes · Reviewing · 3/5 agents", "golden: the three sent workflows show in words")
+    check(six.workflowHeading == "6 workflows running", "BUG: workflow count: the Mac says workflowsRunning 6, the phone counts the 3 it was sent: \"\(six.workflowHeading ?? "nil")\"")
+
+    // The current step must not come back as an earlier step, in whichever words each side used.
+    let grep = InFlightCard.build(session: liveRow(#"{"recentSteps":["Reading Package.swift","Searching for TODO"]}"#, preview: "Grep: TODO in Sources"), now: goldenNow)
+    check(!grep.previous.contains("Searching for TODO"), "BUG: step repeats: now \"\(grep.now)\", earlier \(grep.previous)")
+    let fetch = InFlightCard.build(session: liveRow(#"{"recentSteps":["Reading Package.swift","Fetching example.com"]}"#, preview: "WebFetch: https://example.com/a/b"), now: goldenNow)
+    check(!fetch.previous.contains("Fetching example.com"), "BUG: fetch repeats: now \"\(fetch.now)\", earlier \(fetch.previous)")
+    let task = InFlightCard.build(session: liveRow(#"{"recentSteps":["Running a subagent: review the diff"]}"#, preview: "Task: review the diff"), now: goldenNow)
+    check(!task.previous.contains("Running a subagent: review the diff"), "BUG: sub-agent step repeats: now \"\(task.now)\", earlier \(task.previous)")
+    let edit = InFlightCard.build(session: liveRow(#"{"recentSteps":["Editing SessionRoom.swift"]}"#, preview: "Edit: /a/b/SessionRoom.swift"), now: goldenNow)
+    check(edit.now == "Editing SessionRoom.swift" && edit.previous.isEmpty, "an edit reads the same on both sides and is not repeated")
+
+    // The home folder reads "~" on the Mac; the phone must agree even when the session has a name.
+    check(ProjectLabel.name(cwd: "/Users/roy/", fallback: "docs") == "~", "BUG: the home folder reads \"\(ProjectLabel.name(cwd: "/Users/roy/", fallback: "docs"))\" here, \"~\" on the Mac (spec: home → ~); see line 3698, which asserts the other way")
+
+    // Mac list rows: the model as sent, the current step as the Mac worded it, resets and step times, a missing health.
+    check(InFlightCard.modelName("Opus 4.7") == "Opus 4.7" && InFlightCard.modelName("Sonnet 4.5") == "Sonnet 4.5" && InFlightCard.modelName("Haiku 4.5") == "Haiku 4.5"
+          && InFlightCard.modelName("claude-opus-4-7") == "Opus 4.7", "the Mac's model names show as sent; raw ids are read")
+    let wording = InFlightCard.build(session: liveRow(#"{"recentSteps":["Reading Package.swift","Running swift test","Searching TODO in Sources"]}"#, preview: "Grep: TODO in Sources"), now: goldenNow)
+    check(wording.now == "Searching TODO in Sources" && wording.previous == ["Running swift test", "Reading Package.swift"], "the Mac's last step is NOW, the rest follow newest first")
+    let limited = InFlightCard.build(session: liveRow(goldenRateLimited), now: goldenNow)
+    check(limited.healthLine == "Rate limited · resets \(NowFormat.clock(Date(timeIntervalSince1970: 1_790_000_000 + 900)))", "a rate limit names when it resets: \(limited.healthLine ?? "nil")")
+    let longRun = InFlightCard.build(session: liveRow(goldenLongRunning, preview: "Bash: make all"), now: goldenNow)
+    check(longRun.healthLine == "Long-running command · no new step for 6m", "the Mac's stepSince names the wait: \(longRun.healthLine ?? "nil")")
+    let calm = InFlightCard.build(session: liveRow(#"{"busySince":"2026-09-21T14:01:20Z","recentSteps":["Running swift test"],"lastActivityAt":"2026-09-21T14:07:20Z"}"#), now: goldenNow)
+    check(calm.health == .normal && calm.healthLine == nil, "a Mac that sends fields and no health says normal: no guess from a quiet minute count")
+
+    // Old phones: the legacy fields read the same whether or not the new keys are there, and a decoder that knows only
+    // the legacy keys accepts the whole new row.
+    let full = liveRow(goldenStuck)
+    let bare = liveRow(goldenStuck, drop: newKeys)
+    check(full.id == bare.id && full.title == bare.title && full.state == bare.state && full.preview == bare.preview
+          && full.host == bare.host && full.canType == bare.canType && full.lastActivityAt == bare.lastActivityAt,
+          "old Mac direction: the legacy fields are the same with and without the new keys")
+    check(bare.flight == nil && InFlightCard.build(session: bare, hasStuckPage: true, now: goldenNow).health == .stuck,
+          "old Mac: no flight detail, and an open stuck page still says stuck")
+    struct LegacyOnlyRow: Decodable { let id: String; let state: String; let preview: String }
+    let legacy = try? JSONDecoder().decode(LegacyOnlyRow.self, from: rowData(goldenSixWorkflows, preview: "Bash: swift test"))
+    check(legacy?.id == "s1" && legacy?.preview == "Bash: swift test", "old phone: a decoder that knows only the legacy keys accepts the whole row")
+
+    // Stated clock difference, not a bug: the Mac says "72h" for three days, the phone says "3d".
+    check(FlightClock.duration(86_400 * 3) == "3d", "phone clock: three days reads 3d")
 }
 
 print("passes=\(passes) failures=\(failures)")

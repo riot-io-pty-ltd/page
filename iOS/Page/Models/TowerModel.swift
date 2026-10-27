@@ -7,7 +7,7 @@ import Foundation
 // switch that does nothing.
 
 enum TowerSection: String, CaseIterable, Identifiable, Equatable {
-    case power, budget, macs, attention, terminals, pairing, appearance, about
+    case power, budget, macs, attention, gestures, terminals, pairing, appearance, about
 
     var id: String { rawValue }
 
@@ -18,6 +18,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .budget: return "Budget"
         case .macs: return "Macs"
         case .attention: return "Attention"
+        case .gestures: return GestureGuide.title
         case .terminals: return "Works with"
         case .pairing: return "Pairing & encryption"
         case .appearance: return "Appearance"

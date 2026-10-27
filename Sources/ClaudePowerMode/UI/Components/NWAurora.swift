@@ -370,6 +370,14 @@ struct NWAuroraHeader: View {
     /// The pulse's counts and the exhale; nil draws `pulse` with one of everything.
     var pulseInputs: NWPulseInputs? = nil
     var sky: NWSky = .clear
+    /// "N working" in the headline or subline becomes a button that jumps to
+    /// the In-flight cards. nil: plain text (every other surface).
+    var onWorkingTap: (() -> Void)? = nil
+    /// The pulse becomes a button that opens Settings. nil: just the glyph.
+    var onPulseTap: (() -> Void)? = nil
+
+    /// The header's height in the popover.
+    static let headerHeight: CGFloat = 92
 
     /// Where the pulse's centre sits, from the header's top-right corner.
     static let pulseInset = CGSize(width: 14 + 30, height: 10 + 30)
@@ -394,23 +402,17 @@ struct NWAuroraHeader: View {
             if sky.horizon > 0.005 { NWHorizonLine(strength: sky.horizon, at: sky.horizonAt) }
             if !sky.stars.isEmpty { NWSkyStars(stars: sky.stars) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(headline)
-                    .font(NightWatch.Typo.headline)
-                    .kerning(NightWatch.Typo.headlineTracking)
-                    .foregroundColor(NightWatch.Palette.textPrimary.color)
-                    .lineLimit(1)
-                Text(subline)
-                    .font(NightWatch.Typo.subline)
-                    .foregroundColor(NightWatch.Palette.textSecondary.color)
-                    .lineLimit(1)
+                NWHeaderLine(text: headline, font: NightWatch.Typo.headline, kerning: NightWatch.Typo.headlineTracking,
+                             color: NightWatch.Palette.textPrimary, onWorkingTap: onWorkingTap)
+                NWHeaderLine(text: subline, font: NightWatch.Typo.subline, kerning: 0,
+                             color: NightWatch.Palette.textSecondary, onWorkingTap: onWorkingTap)
             }
             .padding(.leading, 18)
             .padding(.top, 20)
             .padding(.trailing, showsPulse ? 70 : 18)
             .frame(maxWidth: .infinity, alignment: .leading)
             if showsPulse {
-                NWPulseOrb(inputs: pulseInputs ?? NWPulseInputs(style: pulse))
-                    .frame(width: 60, height: 60)
+                pulseView
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.top, 10)
                     .padding(.trailing, 14)
@@ -418,6 +420,87 @@ struct NWAuroraHeader: View {
         }
         .frame(height: height)
         .clipped()
+    }
+
+    /// The pulse, 60 pt square (its centre anchors the arriving cards' contrails, so a
+    /// button around it never moves it).
+    @ViewBuilder
+    private var pulseView: some View {
+        let orb = NWPulseOrb(inputs: pulseInputs ?? NWPulseInputs(style: pulse)).frame(width: 60, height: 60)
+        if let tap = onPulseTap {
+            Button(action: tap) { orb.contentShape(Circle()) }
+                .buttonStyle(.plain)
+                .overlay(NWCursorRect(cursor: .pointingHand))
+                .help("Settings")
+                .accessibilityLabel(Text("Settings"))
+                .accessibilityHint(Text("Opens Page's settings"))
+        } else {
+            orb
+        }
+    }
+}
+
+/// One line of the header's words. With `onWorkingTap`, the "N working" in it
+/// is a button (underlined on hover, with a pointing hand); the rest is plain text.
+struct NWHeaderLine: View {
+    var text: String
+    var font: Font
+    var kerning: CGFloat
+    var color: NightWatch.RGBA
+    var onWorkingTap: (() -> Void)? = nil
+    @State private var hovering = false
+
+    var body: some View {
+        if let tap = onWorkingTap, let part = WorkingPhrase.split(text) {
+            HStack(spacing: 0) {
+                if !part.before.isEmpty { line(part.before) }
+                Button(action: tap) {
+                    line(part.token).underline(hovering, color: color.opacity(0.7).color)
+                }
+                .buttonStyle(.plain)
+                .layoutPriority(1)
+                .onHover { hovering = $0 }
+                .overlay(NWCursorRect(cursor: .pointingHand))
+                .help("Show the sessions in flight")
+                .accessibilityLabel(Text(part.token))
+                .accessibilityHint(Text("Shows the working sessions"))
+                if !part.after.isEmpty { line(part.after) }
+            }
+        } else {
+            line(text)
+        }
+    }
+
+    private func line(_ s: String) -> Text {
+        Text(s).font(font).kerning(kerning).foregroundColor(color.color)
+    }
+}
+
+/// A pointing-hand cursor over the view it overlays, through AppKit's own
+/// cursor rects (no push and pop to get out of balance when a panel closes
+/// under the pointer). Mouse events pass straight through it.
+struct NWCursorRect: NSViewRepresentable {
+    var cursor: NSCursor
+
+    func makeNSView(context: Context) -> NSView { CursorView(cursor: cursor) }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? CursorView)?.cursor = cursor
+        nsView.window?.invalidateCursorRects(for: nsView)
+    }
+
+    private final class CursorView: NSView {
+        var cursor: NSCursor
+        init(cursor: NSCursor) {
+            self.cursor = cursor
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: cursor) }
+        override func layout() {
+            super.layout()
+            window?.invalidateCursorRects(for: self)
+        }
     }
 }
 

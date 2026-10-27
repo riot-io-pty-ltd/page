@@ -18,6 +18,9 @@ struct NWTerminalsPage: View {
 
     var body: some View {
         let rows = store.terminalRows
+        if store.cmuxSetupOpen {
+            NWCmuxSetupPage(store: store)
+        } else {
         NWPage(section: .terminals) {
             NWCard(title: rows.isEmpty ? "WORKS WITH" : "WORKS WITH · " + TerminalCatalog.summary(rows).uppercased()) {
                 if rows.isEmpty {
@@ -43,12 +46,13 @@ struct NWTerminalsPage: View {
                 .padding(.horizontal, 4)
             NWCard(title: "ANY OTHER TERMINAL") {
                 NWRow(title: "Agent hooks", detail: "phone approvals for Claude Code and Codex in any terminal, with a diff and a backup first") {
-                    NWButton(title: "Install agent hooks…", kind: .secondary) { store.env.installHooks() }
+                    NWButton(title: "Install agent hooks…", kind: .secondary) { store.openPhoneApprovals() }
                 }
             }
         }
         .onAppear { store.refreshTerminals() }
         .onReceive(tick) { _ in store.refreshTerminalsIfVisible() }
+        }
     }
 }
 

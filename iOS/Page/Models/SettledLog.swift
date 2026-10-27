@@ -109,13 +109,18 @@ struct SettledLog: Equatable {
         f.calendar = calendar
         f.timeZone = timeZone
         f.dateFormat = "EEE"
-        var parts = [f.string(from: day)]
+        let summary = summaryText(decided: decided, finished: finished, stuck: stuck, battery: battery)
+        return SettledDay(day: day, decided: decided, finished: finished, stuck: stuck, batteryPauses: battery,
+                          headline: [f.string(from: day), summary].joined(separator: " · "))
+    }
+
+    /// "14 decided · 6 finished · 2 stuck · battery pause ×1", or "quiet" for a day with none.
+    static func summaryText(decided: Int, finished: Int, stuck: Int, battery: Int) -> String {
+        var parts: [String] = []
         if decided > 0 { parts.append("\(decided) decided") }
         if finished > 0 { parts.append("\(finished) finished") }
         if stuck > 0 { parts.append("\(stuck) stuck") }
         if battery > 0 { parts.append("battery pause ×\(battery)") }
-        if parts.count == 1 { parts.append("quiet") }
-        return SettledDay(day: day, decided: decided, finished: finished, stuck: stuck, batteryPauses: battery,
-                          headline: parts.joined(separator: " · "))
+        return parts.isEmpty ? "quiet" : parts.joined(separator: " · ")
     }
 }

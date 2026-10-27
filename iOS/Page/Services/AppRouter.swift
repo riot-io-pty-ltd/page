@@ -42,9 +42,21 @@ final class AppRouter: ObservableObject {
         sheets.request(.decision(interventionId))
     }
 
-    /// Opens a live session's room.
-    func openSession(_ sessionId: String) {
+    /// How the next room opens (Screen, Type, Stop), read once by that room.
+    private var roomEntry: (sessionId: String, entry: RoomEntry, at: Date)?
+
+    /// Opens a live session's room, on Story unless the caller says how.
+    func openSession(_ sessionId: String, entry: RoomEntry = .story) {
+        roomEntry = entry == .story ? nil : (sessionId, entry, Date())
         sheets.request(.session(sessionId))
+    }
+
+    /// The entry asked for this session's room, once: a request older than a
+    /// few seconds belongs to an earlier opening and is dropped.
+    func takeRoomEntry(for sessionId: String, now: Date = Date()) -> RoomEntry {
+        defer { roomEntry = nil }
+        guard let e = roomEntry, e.sessionId == sessionId, now.timeIntervalSince(e.at) < 5 else { return .story }
+        return e.entry
     }
 
     /// Opens the Tower, optionally scrolled to a section.
@@ -73,6 +85,7 @@ final class AppRouter: ObservableObject {
 
     func reset() {
         destination = .now
+        roomEntry = nil
         sheets.close()
         confirmingUnpair = false
     }

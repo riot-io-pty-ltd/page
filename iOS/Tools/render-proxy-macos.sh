@@ -19,5 +19,6 @@ swiftc -swift-version 5 -DDEBUG -o "$work/render-proxy" \
   "$ios/Page/Services/RenderHarness.swift" \
   "$ios/Page/Services/RenderHarnessStage3.swift" \
   "$ios/Page/Services/RenderHarnessMotion.swift" \
+  "$ios/Page/Services/RenderHarnessHistory.swift" \
   "$here/macos-proxy/main.swift" 2>&1 | grep -v "warning:" | grep -E "error" || true
 "$work/render-proxy" "$out" "$@"

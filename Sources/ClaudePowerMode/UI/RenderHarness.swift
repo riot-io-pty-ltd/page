@@ -162,9 +162,13 @@ enum RenderSurfaces {
         AnyView(v.padding(pad).background(NWBackdrop()))
     }
 
+    /// `tip`: a first-run panel (the tip not yet dismissed). Every other surface has seen it.
+    /// The preferences are a throwaway suite: the harness never touches the real app's defaults.
     @MainActor
-    private static func store(_ inputs: NowInputs, select: String? = nil) -> NowStore {
-        let st = NowStore(model: NowModel.build(inputs))
+    private static func store(_ inputs: NowInputs, select: String? = nil, tip: Bool = false) -> NowStore {
+        let prefs = NowPrefs.ephemeral()
+        prefs.tipDismissed = !tip
+        let st = NowStore(model: NowModel.build(inputs), prefs: prefs)
         // The harness pins the clock so holds and receipts are deterministic.
         st.now = { inputs.now }
         if let select { st.select(select) }
@@ -198,12 +202,61 @@ enum RenderSurfaces {
         let stopped = store(NightWatchFixtures.allQuiet())
         stopped.notice = NowStore.Notice(text: "Stopped 5 agents", failed: false)
 
+        // One waiting, two in flight: collapsed, pointed at, composing, receipts, the shortcuts, first run.
+        let flightInputs = NightWatchFixtures.oneWaitingTwoInFlight()
+        let pageRow = InFlightRow.idPrefix + "sess-page"
+        let flightRest = store(flightInputs)
+        let flightCollapsed = store(flightInputs)
+        flightCollapsed.setInFlightCollapsed(true)
+        let flightHover = store(flightInputs)
+        flightHover.hoverFlight(pageRow)
+        let flightComposer = store(flightInputs)
+        flightComposer.hoverFlight(pageRow)
+        flightComposer.handle(NowKeyPress(key: .char("t")))
+        flightComposer.composerText = "also run the Terminals tests"
+        let flightDigit = store(flightInputs)
+        flightDigit.hoverFlight(pageRow)
+        flightDigit.handle(NowKeyPress(key: .char("t")))
+        flightDigit.composerText = "2 more cases please"
+        let flightQueued = store(flightInputs)
+        flightQueued.hoverFlight(pageRow)
+        flightQueued.previewFlightReceipt(InFlightReceipt(outcome: .queued, route: "cmux › page", at: flightInputs.now),
+                                          forSessionId: "sess-page")
+        let flightTyped = store(flightInputs)
+        flightTyped.hoverFlight(pageRow)
+        flightTyped.previewFlightReceipt(InFlightReceipt(outcome: .typed, route: "cmux › page", at: flightInputs.now),
+                                         forSessionId: "sess-page")
+        let flightRefused = store(flightInputs)
+        flightRefused.hoverFlight(pageRow)
+        flightRefused.previewFlightReceipt(
+            InFlightReceipt(outcome: .refused("A prompt is waiting — answer it first"), route: "cmux › page", at: flightInputs.now),
+            forSessionId: "sess-page")
+        let flightBlockedInputs = NightWatchFixtures.oneWaitingTwoInFlight(blocked: true)
+        let flightBlocked = store(flightBlockedInputs)
+        flightBlocked.hoverFlight(InFlightRow.idPrefix + "sess-payments-api")
+        let flightLocal = store(flightBlockedInputs)
+        flightLocal.setInFlightExpanded(true)   // the local row sits past the compact list
+        flightLocal.hoverFlight(InFlightRow.idPrefix + "local-ollama")
+        let flightMore = store(flightBlockedInputs)
+        flightMore.setInFlightCollapsed(false)
+        let flightKeys = store(flightInputs)
+        flightKeys.select(flightInputs.snapshot.pendingInterventions[0].id)
+        flightKeys.handle(NowKeyPress(key: .down))
+        let flightSheet = store(flightInputs)
+        flightSheet.toggleShortcuts()
+        let flightFirstRun = store(flightInputs, tip: true)
+        let flightDecisionSelected = store(flightInputs, select: flightInputs.snapshot.pendingInterventions[0].id)
+        var flightQuietInputs = NightWatchFixtures.allQuiet()
+        flightQuietInputs.hosts = flightInputs.hosts
+        let flightQuiet = store(flightQuietInputs)
+        flightQuiet.hoverFlight(InFlightRow.idPrefix + "sess-page")
+
         let quiet = store(NightWatchFixtures.allQuiet())
         let paused = store(NightWatchFixtures.pausedForBattery())
         let pausedWithRows = store(NightWatchFixtures.pausedForBattery(
             waiting: Array(needsInputs.snapshot.pendingInterventions.prefix(2))))
         let battery = store(NightWatchFixtures.onBattery())
-        let starting = NowStore(model: NowModel.starting(macName: "Studio MBP"))
+        let starting = NowStore(model: NowModel.starting(macName: "Studio MBP"), prefs: .ephemeral())
 
         let calm = WelcomeBack.build(away: 52 * 60, finished: 2, needYou: 0, handledOnPhone: 0, rings: rings)
         let amber = WelcomeBack.build(away: 52 * 60, finished: 2, needYou: 1, handledOnPhone: 0, rings: rings)
@@ -225,6 +278,22 @@ enum RenderSurfaces {
             Surface(name: "popover-failed-receipt", width: w, view: onBackdrop(NWNowPopover(store: failed))),
             Surface(name: "popover-overflow", width: w, view: onBackdrop(NWNowPopover(store: overflow))),
             Surface(name: "popover-config-problem", width: w, view: onBackdrop(NWNowPopover(store: configProblem))),
+            Surface(name: "popover-inflight-rest", width: w, view: onBackdrop(NWNowPopover(store: flightRest))),
+            Surface(name: "popover-inflight-collapsed", width: w, view: onBackdrop(NWNowPopover(store: flightCollapsed))),
+            Surface(name: "popover-inflight-hover", width: w, view: onBackdrop(NWNowPopover(store: flightHover))),
+            Surface(name: "popover-inflight-composer", width: w, view: onBackdrop(NWNowPopover(store: flightComposer))),
+            Surface(name: "popover-inflight-composer-digit", width: w, view: onBackdrop(NWNowPopover(store: flightDigit))),
+            Surface(name: "popover-inflight-receipt-queued", width: w, view: onBackdrop(NWNowPopover(store: flightQueued))),
+            Surface(name: "popover-inflight-receipt-typed", width: w, view: onBackdrop(NWNowPopover(store: flightTyped))),
+            Surface(name: "popover-inflight-receipt-refused", width: w, view: onBackdrop(NWNowPopover(store: flightRefused))),
+            Surface(name: "popover-inflight-blocked", width: w, view: onBackdrop(NWNowPopover(store: flightBlocked))),
+            Surface(name: "popover-inflight-local", width: w, view: onBackdrop(NWNowPopover(store: flightLocal))),
+            Surface(name: "popover-inflight-more", width: w, view: onBackdrop(NWNowPopover(store: flightMore))),
+            Surface(name: "popover-inflight-keys", width: w, view: onBackdrop(NWNowPopover(store: flightKeys))),
+            Surface(name: "popover-inflight-shortcuts", width: w, view: onBackdrop(NWNowPopover(store: flightSheet))),
+            Surface(name: "popover-inflight-first-run", width: w, view: onBackdrop(NWNowPopover(store: flightFirstRun))),
+            Surface(name: "popover-inflight-decision-selected", width: w, view: onBackdrop(NWNowPopover(store: flightDecisionSelected))),
+            Surface(name: "popover-inflight-all-quiet", width: w, view: onBackdrop(NWNowPopover(store: flightQuiet))),
             Surface(name: "popover-all-quiet", width: w, view: onBackdrop(NWNowPopover(store: quiet))),
             Surface(name: "popover-stopped", width: w, view: onBackdrop(NWNowPopover(store: stopped))),
             Surface(name: "popover-paused", width: w, view: onBackdrop(NWNowPopover(store: paused))),
@@ -236,7 +305,7 @@ enum RenderSurfaces {
             Surface(name: "welcome-back", width: 380 + 56, view: onBackdrop(NWWelcomeBackView(model: amber))),
             Surface(name: "welcome-back-calm", width: 380 + 56, view: onBackdrop(NWWelcomeBackView(model: calm))),
             Surface(name: "welcome-back-phone", width: 380 + 56, view: onBackdrop(NWWelcomeBackView(model: phone))),
-        ] + towerSurfaces() + [
+        ] + towerSurfaces() + legacySurfaces() + inFlightSurfaces() + [
             Surface(name: "components", width: 760, view: AnyView(NWComponentSheet())),
             Surface(name: "glyphs", width: 1140, view: AnyView(NWGlyphSheet()))
         ]

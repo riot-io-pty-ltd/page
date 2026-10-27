@@ -63,6 +63,14 @@ protocol SessionRemoteBackends: AnyObject {
     func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder]
     /// Starts a session. Blocking; probe queue only.
     func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult
+    /// What a working session's card shows: its last steps and model, when its
+    /// turn and the session began, the workflows running in it. Blocking; probe
+    /// queue only (one caller at a time). Defaults to nothing.
+    func flightFacts(_ sessions: [AgentSession]) -> [String: InFlightFacts]
+}
+
+extension SessionRemoteBackends {
+    func flightFacts(_ sessions: [AgentSession]) -> [String: InFlightFacts] { [:] }
 }
 
 /// One phone → Mac command, decrypted (SESSIONS-PROTOCOL.md §5).
@@ -300,6 +308,9 @@ struct RemoteSessionRow: Equatable {
     /// phone can answer. Its presence is also how a phone knows this Mac
     /// accepts `answer`.
     var ask: AskedQuestionSet? = nil
+    /// Optional fields of a working session (busySince, startedAt, model,
+    /// recentSteps, workflows, health…): see `InFlightWire`.
+    var working: WireFields? = nil
 
     var jsonObject: [String: Any] {
         var o: [String: Any] = [
@@ -313,7 +324,25 @@ struct RemoteSessionRow: Equatable {
         if let interventionId { o["interventionId"] = interventionId }
         if let preview, !preview.isEmpty { o["preview"] = preview }
         if let ask { o["ask"] = ask.phoneObject }
+        // Added keys never replace one the row already has.
+        if let working { o.merge(working.object) { mine, _ in mine } }
         return o
+    }
+}
+
+/// JSON-ready optional fields of a list row; equal when their JSON is.
+struct WireFields: Equatable {
+    let object: [String: Any]
+
+    /// nil for no fields at all.
+    init?(_ object: [String: Any]) {
+        guard !object.isEmpty else { return nil }
+        self.object = object
+    }
+
+    static func == (a: WireFields, b: WireFields) -> Bool {
+        func bytes(_ o: [String: Any]) -> Data? { try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) }
+        return bytes(a.object) == bytes(b.object)
     }
 }
 
@@ -342,6 +371,8 @@ final class SessionRemote {
     /// A session's preview is re-read at most this often.
     static let previewInterval: TimeInterval = 2
     static let liveStatusInterval: TimeInterval = 1
+    /// A working session's card facts are re-read at most this often.
+    static let flightInterval: TimeInterval = 4
     static let maxTitle = 200
     static let maxCwd = 500
     /// The list plaintext's budget: sealed and base64url-encoded (×4/3 plus
@@ -371,6 +402,13 @@ final class SessionRemote {
     private var statusesAt: Date?
     private var hosts: [String: (info: SessionHostInfo, at: Date)] = [:]
     private var probing = false
+    /// What each working session's card shows, re-read every `flightInterval`
+    /// while a phone is looking (probe queue), and the stuck watch's and rate
+    /// limit's word on each session (from the tick).
+    private var flightFacts: [String: InFlightFacts] = [:]
+    private var flightChecked: Date?
+    private var flightProbing = false
+    private var rateLimited: [String: Date] = [:]
     private var previews: [String: (stamp: FileStamp?, checkedAt: Date, entries: [SessionTranscriptEntry])] = [:]
     private var transcripts: [String: (stamp: FileStamp, snapshot: SessionTranscript.Snapshot)] = [:]
     private var watchers = SessionWatchers()
@@ -477,10 +515,13 @@ final class SessionRemote {
     }
 
     /// The merged sessions and open pages after a tick (value copies).
-    func update(sessions: [AgentSession], pending: [InterventionEvent]) {
+    /// `rateLimited`: session id → when its rate limit resets.
+    func update(sessions: [AgentSession], pending: [InterventionEvent], rateLimited: [String: Date] = [:]) {
         queue.async {
             self.sessions = sessions
             self.pending = pending
+            self.rateLimited = rateLimited
+            self.flightFacts = self.flightFacts.filter { id, _ in sessions.contains { $0.sessionId == id } }
             let ids = Set(sessions.map(\.sessionId))
             self.hosts = self.hosts.filter { ids.contains($0.key) }
             self.previews = self.previews.filter { ids.contains($0.key) }
@@ -650,6 +691,7 @@ final class SessionRemote {
         if enabled {
             refreshStatuses(t)
             probeIfNeeded(t)
+            probeFlightIfNeeded(t)
         }
         let rows = enabled ? currentRows(t) : []
         let body = Self.listBody(rows, enabled: enabled)
@@ -803,6 +845,39 @@ final class SessionRemote {
         }
     }
 
+    /// Re-reads the working sessions' card facts on the probe queue (files only),
+    /// a few seconds apart.
+    private func probeFlightIfNeeded(_ t: Date) {
+        let working = sessions.filter { state(of: $0) == .active }
+        guard !working.isEmpty else {
+            if !flightFacts.isEmpty { flightFacts = [:] }
+            return
+        }
+        guard !flightProbing, flightChecked.map({ t.timeIntervalSince($0) >= Self.flightInterval }) ?? true else { return }
+        flightChecked = t
+        flightProbing = true
+        let backends = self.backends
+        probeQueue.async { [weak self] in
+            let found = backends.flightFacts(working)
+            guard let self else { return }
+            self.queue.async {
+                self.flightProbing = false
+                self.flightFacts = found
+            }
+        }
+    }
+
+    /// Pure. The optional fields a working session's row carries, from what the
+    /// probe read and what the stuck watch and rate limit say about it.
+    static func workingFields(facts: InFlightFacts?, pending: [InterventionEvent], sessionId: String,
+                              rateLimitResetsAt: Date?, now: Date) -> WireFields? {
+        let stuck = pending
+            .filter { $0.sessionId == sessionId && StuckWatch.subtypes.contains($0.subtype ?? "") }
+            .max { $0.openedAt < $1.openedAt }
+            .map { NowModel.summaryLine(for: $0) }
+        return WireFields(InFlightWire.fields(facts: facts, stuckDetail: stuck, rateLimitResetsAt: rateLimitResetsAt, now: now))
+    }
+
     /// Pure. An empty `found` means the probe itself failed (no process
     /// table, e.g. `ps` timing out while the Mac is busy): every host keeps
     /// what it had and stays due, so a hiccup never flips the whole list to
@@ -847,7 +922,11 @@ final class SessionRemote {
                 ask: pendingQuestion(for: s, state: st, host: host, held: {
                     if held == nil { held = heldSessions() }
                     return held?.contains(s.sessionId) ?? false
-                })
+                }),
+                working: st == .active
+                    ? Self.workingFields(facts: flightFacts[s.sessionId], pending: pending, sessionId: s.sessionId,
+                                         rateLimitResetsAt: rateLimited[s.sessionId], now: t)
+                    : nil
             ))
         }
         return Self.ordered(rows)
@@ -1240,6 +1319,8 @@ final class SessionRemote {
 final class LiveSessionBackends: SessionRemoteBackends {
     private let claude: ClaudeBackend
     private let codex: CodexBackend
+    /// Reads working sessions' card facts; probe queue only.
+    private let flightProbe = FlightProbe()
 
     init(claude: ClaudeBackend, codex: CodexBackend) {
         self.claude = claude
@@ -1415,6 +1496,10 @@ final class LiveSessionBackends: SessionRemoteBackends {
             if let status = claude.remoteStatus(pid: s.pid) { out[s.sessionId] = status }
         }
         return out
+    }
+
+    func flightFacts(_ sessions: [AgentSession]) -> [String: InFlightFacts] {
+        flightProbe.facts(for: sessions, live: claude.remoteLiveSessions, transcriptFile: { [self] in transcriptFile(for: $0) })
     }
 
     func transcriptFile(for session: AgentSession) -> SessionTranscriptFile? {

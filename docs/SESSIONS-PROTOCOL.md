@@ -127,7 +127,13 @@ When it changes, the phone resets its `seq` tracking.
     "provider": "anthropic" | "ollama" | "lmStudio" | "otherLocal" | "cloudGateway" | "unknown",
     "lastActivityAt": "2026-10-24T12:00:00Z",
     "interventionId": "<open page id, if any>",
-    "preview": "Running the test suite…"
+    "preview": "Running the test suite…",
+    "ask": {
+      "id": "<tool_use id of the AskUserQuestion on screen>",
+      "hasPreview": false,
+      "questions": [ { "question": "Which branch?", "header": "Branch", "multi": false,
+                       "options": [ { "label": "main", "description": "The released code." } ] } ]
+    }
   } ] }
 ```
 
@@ -135,6 +141,48 @@ When it changes, the phone resets its `seq` tracking.
   redacted, giving the current activity: the last tool-call one-liner while
   `active`, otherwise the last assistant line.
 - `typeBlocker` is present only when `canType` is false.
+- `ask` is optional and present only while a Claude session is blocked on
+  exactly one pending AskUserQuestion call, read from its transcript: either
+  `waitingOn*` with the dialog on screen, or held by Page's own question hook
+  (PreToolUse on `AskUserQuestion`) after the user has been away for a while,
+  when the session still reads `active` and no dialog is drawn. In that second
+  case the phone answers the hook's page by text, with the option numbers as
+  `map_answers` in `hooks/page-notify.sh` reads them, and the Mac's `answer`
+  op refuses. (Observed on Claude Code 2.1.311: the assistant's tool call is in
+  the transcript while the dialog is up only when a PreToolUse hook is
+  installed for the tool, as Page's hook does; in a session with no hook it
+  was not written until the question was answered, and then there is no
+  `ask`.) Text is redacted and clipped (question 400, header
+  40, label 120, description 200 characters; at most 4 questions and 7
+  options each). For a dialog on screen the Mac sends `ask` only when it can
+  press keys in that session's terminal (`canType`, and a terminal whose keys it
+  has measured: tmux, including Claude Squad panes), so a phone never offers a
+  picker whose Submit would be refused; a hook-held question carries it on any
+  terminal, since nothing is pressed. A Mac that sends it also accepts `answer` (§5), so a phone
+  offers its picker only when `ask` is there and falls back to a text reply
+  (Esc, then the words) otherwise. `hasPreview` is true when an option carries
+  a `preview`: that dialog lays out differently and is answered at the Mac.
+  Phones ignore a malformed `ask` and keep the session.
+- **Working-session fields** (all optional, only on a row whose `state` is
+  `active`, each left out when the Mac doesn't know it; older phones ignore
+  them, and a phone that finds none shows the card it can from `preview`):
+  - `busySince` and `startedAt`: ISO 8601, when the running turn began (the
+    session file's busy-since) and when the Claude Code process started the
+    session. Absolute dates only: the phone computes "working 12m" and
+    "session 2h 10m", so a minute passing never changes the list.
+  - `model`: the conversation's model, short ("Opus 4.7").
+  - `recentSteps`: up to 3 strings, oldest first, the last the current step, in
+    plain words ("Running swift test", "Editing SessionRoom.swift"), redacted,
+    at most 100 characters each.
+  - `workflows`: up to 3 running workflows, `{ "name", "phase"?, "done",
+    "total", "running" }` (agents done / in the run / running now; name at most
+    60 characters, phase 40, redacted), and `workflowsRunning`: how many are
+    running in all.
+  - `health`: present only when it is not normal: `"stuck"` (Page's stuck
+    watch has a page open: a loop or no progress; `healthDetail` is its line),
+    `"rateLimited"` (`resetsAt`, ISO 8601), or `"longRunning"` (the current
+    step has run over 3 minutes; `stepSince`, ISO 8601). A missing `health`
+    reads as normal.
 - Order: needs-you first (`waitingOn*`), then `active`, then by
   `lastActivityAt` descending. At most 100 sessions.
 - **When it's sent:** immediately on `phones.status` going from 0 to more
@@ -263,7 +311,7 @@ folder). With "Let my phone start sessions" off, `enabled` is false and
 ```json
 { "kind": "result", "boot": "…", "seq": 14, "ts": …, "clientId": "…", "ok": true,
   "code": "delivered|queued|refused|failed",
-  "reason": "waiting|unknown_state|not_typable|draft|digit_while_busy|ended|codex_mid_turn|disabled|stale|replay|not_found|interrupt_unsupported|error",
+  "reason": "waiting|unknown_state|not_typable|draft|digit_while_busy|ended|codex_mid_turn|disabled|stale|replay|not_found|interrupt_unsupported|target_mismatch|question_changed|answer_unsupported|error",
   "detail": "Typed into cmux", "interventionId": "<when reason == waiting>" }
 ```
 
@@ -281,6 +329,7 @@ phone clock) and `viewer` (a random id per app install, persisted).
 | `refresh` | — | Sends a `list` now, plus the `transcript` for this viewer's watched session. No `result`. |
 | `input` | `sessionId`, `text` (1–8000 characters after trimming) | Runs the input gate, then delivers. Always replies with a `result`. |
 | `interrupt` | `sessionId` | Presses Esc in the session (`sendInterrupt`). Only when `canInterrupt` and state is `active`. Always replies with a `result`. |
+| `answer` | `sessionId`, `promptKey` (the `ask.id`), `answers` (below); optional `expectCwd` / `expectTitle` as for `input` | Answers the question dialog the session is blocked on, in one pass (see "Answering a question"). Always replies with a `result`. |
 | `diff` | `sessionId` | Replies with a `diff` (§4), or a `result` `refused/not_found` for a session that isn't running. |
 | `folders` | — | Replies with a `folders` (§4). |
 | `interruptAll` | — | Siri / Shortcuts "Stop my agents": presses Esc in every session that is `active` (skipping hosts where Esc can't be sent), each through the same gate as `interrupt`. Replies with one `result`: "Stopped 2 agents", "Stopped 1 of 2 agents" or "No agents were working". |
@@ -345,6 +394,63 @@ Allowed only for state `active` and a host where `sendInterrupt` works
 replies `refused/interrupt_unsupported`. Claude and Codex both treat Esc as
 "stop this turn".
 
+### Answering a question (`answer`)
+
+```json
+{ "op": "answer", "sessionId": "…", "promptKey": "toolu_…",
+  "answers": [ { "i": 0, "picks": [1] }, { "i": 1, "picks": [0, 2], "other": "kiwi pie" } ] }
+```
+
+`i` is the question's index; `picks` are 0-based option indices (one for a
+single-select, any number for a multi-select); `other` is the "Other" text
+(a single-select with `other` has no `picks`). Every question must be
+answered. The phone drafts all answers, shows what will be chosen and where,
+and sends once ("Submit all"). The Mac trusts only `promptKey`, the indices
+and the Other text: it re-reads the raw question from the transcript (the
+list's copy is redacted) and checks everything again.
+
+The key model (measured on Claude Code 2.1.311 in tmux): in a single-select a
+digit picks that option and advances (the last question goes to Review; one
+question submits at once); the Other row is `N+1`, its digit only focuses it,
+then the text and Enter. In a multi-select a digit toggles that option and Tab
+moves on; the Other row is reached with Down × N (its digit would tick an empty
+box), then the text, Tab (to Next) and Enter. On Review, `1` submits and `2`
+cancels. Esc cancels everything and "Chat about this" (`N+2`) rejects the tool:
+Page never sends either, and never `2` on Review.
+
+The Mac drives it one key at a time, never from a precomputed script:
+
+1. The session must still be `waiting`, exactly one tool call pending, that
+   call the AskUserQuestion named by `promptKey`, and no Page hook holding the
+   prompt; otherwise `refused/question_changed` (or `answer_unsupported`).
+2. It reads the terminal's screen before every key and parses the dialog (the
+   `N. label` rows, the question text with wrapping collapsed, the cursor row,
+   the `[✔]` ticks). Digits are sent only with the cursor on a real option row;
+   ticks are planned from what is on screen, so a half-answered dialog is
+   corrected, not toggled blindly. The dialog must be on its first question.
+3. After each key it waits (100 ms polls, 1.5 s) for the screen to show the
+   effect before sending the next. Before each key the process must still be
+   in front of its terminal, the status still `waiting` with the same
+   `statusUpdatedAt` (±0.5 s) and the same pending call.
+4. On Review, the listed answers must equal the intended ones exactly, then
+   `1` is sent.
+5. It reads `toolUseResult.answers` from the transcript and compares: the
+   `result` says "Answered 2 questions in tmux pane %0", or that Claude got
+   different answers, or that the dialog was dismissed first.
+
+Anything unexpected stops the run with a reason and leaves the dialog open
+for the Mac (`failed` with "part-filled at your Mac" when keys were already
+sent). Refused without pressing anything: previews (`hasPreview`), more than 7
+options, a screen the parser can't read (a narrow or short pane can scroll the
+question off the top: it fails closed), Terminal.app and cmux (no reading or no
+Tab key), and, off tmux, an Other in a multi-select (needs arrow keys, which
+only tmux is measured for). Results use the existing codes plus reasons
+`question_changed` and `answer_unsupported` (older phones show `detail`).
+
+Mac keystrokes: tmux `send-keys`; iTerm `write text` with ESC `[` `C` in one
+write; WezTerm `send-text --no-paste`; kitty `send-key`; Herdr `pane.send_keys`.
+Only tmux has been driven end to end.
+
 ## 6. Phone UX contract
 
 - **Tabs.** Inbox · Sessions · History · Settings. Stats moves into History
@@ -379,7 +485,10 @@ replies `refused/interrupt_unsupported`. Claude and Codex both treat Esc as
 | sessions per list | 100 |
 | transcript entries / entry text / plaintext | 40 / 2000 chars / 48 KiB |
 | `preview` | 160 chars |
+| `recentSteps` / `workflows` per row | 3 steps of 100 chars / 3 workflows |
 | input text | 8000 chars (phone 8000, Worker body 64 KiB) |
+| `answer`: questions / options each / Other text | 4 / 7 / 300 chars |
+| `answer` run: wait per key / whole run / read-back | 1.5 s / 12 s / 4 s (under the phone's 20 s) |
 | `sessions.update` payload at the Worker | 256 KiB |
 | list throttle / liveness refresh | 1 s / 20 s |
 | transcript throttle | 1.5 s per session |

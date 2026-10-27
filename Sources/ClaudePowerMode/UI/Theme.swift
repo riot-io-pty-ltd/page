@@ -98,6 +98,8 @@ enum NightWatch {
         static let xl: CGFloat = 20
         /// Menu-bar popover width (the spec's 380 pt).
         static let popoverWidth: CGFloat = 380
+        /// The popover's footer row.
+        static let panelFooterHeight: CGFloat = 38
     }
 
     enum Radius {

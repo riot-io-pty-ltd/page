@@ -31,10 +31,20 @@ struct TowerEnvironment {
     var beep: () -> Void = {}
     var log: (String) -> Void = { _ in }
 
+    /// Shows a Night Watch dialog and waits for a button (0 = the first), like
+    /// `NSAlert.runModal()`. The default presses Cancel, so a harness or test
+    /// that does not fake it never blocks and never confirms anything.
+    var runDialog: (_ spec: NWDialogSpec) -> Int = { $0.cancelIndex }
+
+    // Pages that were separate windows. Their defaults touch nothing: no
+    // ~/.claude, no Keychain, no cmux, no token. The live window fills them in.
+    /// The hook installer (and where its script is), made when the Phone approvals page first needs it.
+    var hookSource: () -> TowerHookSource? = { nil }
+    /// cmux's socket password in the Keychain (nil: the cmux page never probes).
+    var cmuxSecrets: SecretStore?
+    var pairing = TowerPairingBackend()
+
     // Entry points for other windows and files.
-    var pairPhone: () -> Void = {}
-    var setUpCmux: () -> Void = {}
-    var installHooks: () -> Void = {}
     var copyLocalDiagnostics: () -> Void = {}
     var openConfigFile: () -> Void = {}
     var openLog: () -> Void = {}
@@ -76,7 +86,21 @@ final class TowerStore: ObservableObject {
 
     // MARK: published state
 
-    @Published var selection: TowerSection = .power
+    @Published var selection: TowerSection = .power {
+        didSet {
+            guard selection != oldValue else { return }
+            // Leaving a page puts away what it opened: the pairing QR, and the cmux
+            // setup (unless an entry point is opening it, which sets `loading`).
+            if oldValue == .pairing { pairing.hide() }
+            guard !loading else { return }
+            if oldValue == .terminals { cmuxSetupOpen = false }
+            refreshVisiblePage()
+        }
+    }
+    /// The Terminals page shows the cmux setup in place of its list.
+    @Published var cmuxSetupOpen = false {
+        didSet { if cmuxSetupOpen && !oldValue && !loading { cmux.open() } }
+    }
     /// What the controls show.
     @Published var form: PreferencesForm
     /// What the controls showed when the window opened (or after Apply).
@@ -100,6 +124,14 @@ final class TowerStore: ObservableObject {
     /// The clock the pages read, so a render is deterministic.
     var now: () -> Date = Date.init
     var timeZone: TimeZone = .current
+
+    /// The three pages that used to be windows. Built on first use; each is
+    /// inert until the environment gives it something to read.
+    private(set) lazy var hooks = TowerHooksModel(store: self)
+    private(set) lazy var cmux = TowerCmuxModel(store: self)
+    private(set) lazy var pairing = TowerPairingModel(store: self)
+    /// True while `load` assigns the selection, which refreshes the page itself.
+    private var loading = false
 
     private var helperCheckGeneration = 0
     private var relayProbeGeneration = 0
@@ -167,9 +199,63 @@ final class TowerStore: ObservableObject {
         refreshLocalModels()
         checkHelper(refresh: true)
         terminalNotice = nil
-        if let section { selection = section }
+        loading = true
+        if let section {
+            selection = section
+            cmuxSetupOpen = false
+        }
+        loading = false
+        pairing.hide()
         if selection == .terminals { refreshTerminals() }
+        refreshVisiblePage()
     }
+
+    /// Looks again at what the page on screen shows (hook files, the cmux
+    /// version, the pairing QR). Only when the page is opened or the window is
+    /// brought back: never on the light timer or a new snapshot.
+    func refreshVisiblePage() {
+        switch selection {
+        case .phoneApprovals: hooks.refresh()
+        case .pairing: break // the QR waits for "Show pairing QR"
+        case .terminals: if cmuxSetupOpen { cmux.open() }
+        default: break
+        }
+    }
+
+    /// The window became key again: hook files edited elsewhere show up.
+    func windowBecameKey() {
+        if selection == .phoneApprovals { hooks.refresh() }
+    }
+
+    // MARK: entry points that used to open windows
+
+    /// Menu and buttons: the cmux setup, on the Terminals page.
+    func openCmuxSetup() {
+        loading = true
+        selection = .terminals
+        loading = false
+        let wasOpen = cmuxSetupOpen
+        cmuxSetupOpen = true
+        if wasOpen { cmux.open() }
+        refreshTerminals()
+    }
+
+    func closeCmuxSetup() { cmuxSetupOpen = false }
+
+    /// Menu and buttons: Install agent hooks…, on its page.
+    func openPhoneApprovals() { selection = .phoneApprovals }
+
+    /// Pair phone…, on its page.
+    func openPairing() { selection = .pairing }
+
+    /// The menu's Pair phone…: an explicit request, so the page opens with the QR showing.
+    func openPairingRevealed() {
+        selection = .pairing
+        pairing.reveal()
+    }
+
+    /// Runs a dialog through the environment (the live window shows it over the Tower).
+    func ask(_ spec: NWDialogSpec) -> Int { env.runDialog(spec) }
 
     private static func usageStatus(_ s: UsageCapture.State) -> UsageCaptureStatus {
         switch s {
@@ -214,7 +300,7 @@ final class TowerStore: ObservableObject {
     /// Set up… on a row.
     func setUp(_ id: TerminalCatalog.ID) {
         switch id {
-        case .cmux: env.setUpCmux()
+        case .cmux: openCmuxSetup()
         case .kitty: setUpKitty()
         default: break
         }

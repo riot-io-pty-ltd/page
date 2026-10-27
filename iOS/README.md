@@ -224,7 +224,7 @@ Page/
   Info.plist                   Versions from build settings, camera usage, page:// scheme
   Page.entitlements            Default (no push) entitlements
   Page-Push.entitlements       aps-environment, for paid teams
-  Design/                      Theme (adaptive colours, Dynamic Type fonts), PulseMark, PillTabBar
+  Design/NightWatch/          The Night Watch design system: tokens (NWTheme), glass, controls, every screen
   Models/                      Foundation-only: Intervention + lenient decoding, pairing
                                validation, ordering, presence, stats, notification decisions,
                                live sessions (decoding, crypto, delivery, availability)

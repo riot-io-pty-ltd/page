@@ -22,6 +22,8 @@ final class SessionLocalCommandTests: XCTestCase {
         var folders: [SessionStarter.Folder] = []
         var starts: [(folder: String, prompt: String)] = []
         var interrupts: [String] = []
+        /// Every `input` the backend was asked to type: (session, text).
+        var inputs: [(session: String, text: String)] = []
 
         func probeHosts(_ sessions: [AgentSession]) -> [String: SessionHostInfo] { [:] }
         func liveStatuses(_ sessions: [AgentSession]) -> [String: ClaudeSessionStatus] { [:] }
@@ -30,7 +32,8 @@ final class SessionLocalCommandTests: XCTestCase {
         func readScreen(_ source: SessionScreen.Source) -> String? { nil }
         func input(_ session: AgentSession, clientId: String, text: String, interventionId: String?,
                    completion: @escaping (SessionCommandResult) -> Void) {
-            completion(.refused(.notTypable, "not in this test"))
+            inputs.append((session.sessionId, text))
+            completion(SessionCommandResult(code: .queued, reason: nil, detail: SessionInputGate.queuedMessage))
         }
         func interrupt(_ session: AgentSession, interventionId: String?,
                        completion: @escaping (SessionCommandResult) -> Void) {
@@ -120,5 +123,40 @@ final class SessionLocalCommandTests: XCTestCase {
                                  text: "", folder: dir.path)
         XCTAssertEqual(run(cmd)?.code, .delivered)
         XCTAssertEqual(backends.starts.first?.prompt, "")
+    }
+
+    // MARK: typing from an In-flight row
+
+    private func working(_ cwd: String) -> AgentSession {
+        AgentSession(backend: .claude, sessionId: "sess-page", cwd: cwd, title: nil, source: .terminal,
+                     state: .active, lastActivityAt: nil, activeFlags: [], supportsRemoteReply: true)
+    }
+
+    func testTypingFromAnInFlightRowReachesTheInputGateAsAPlainMessageAndNeverInterrupts() {
+        let s = working("/Users/roy/projects/page")
+        remote.update(sessions: [s], pending: [])
+        let target = InFlightTarget(session: s)
+        let r = run(target.command(text: "also run the Stuck tests", ts: 0))
+        XCTAssertEqual(r?.code, .queued)
+        XCTAssertEqual(backends.inputs.count, 1)
+        XCTAssertEqual(backends.inputs.first?.session, "sess-page")
+        XCTAssertEqual(backends.inputs.first?.text, "also run the Stuck tests")
+        XCTAssertTrue(backends.interrupts.isEmpty, "typing to a busy session must never press Esc")
+        remote.waitUntilIdle()
+        XCTAssertTrue(sink.sent.isEmpty, "nothing is sealed or sent for a local command")
+    }
+
+    func testTypingIsRefusedWhenTheSessionMovedToAnotherFolder() {
+        let shown = working("/Users/roy/projects/page")
+        remote.update(sessions: [working("/Users/roy/projects/other")], pending: [])
+        let r = run(InFlightTarget(session: shown).command(text: "hello", ts: 0))
+        XCTAssertEqual(r?.reason, .targetMismatch)
+        XCTAssertTrue(backends.inputs.isEmpty, "nothing is typed into a session that no longer matches the row")
+    }
+
+    func testTypingIntoASessionThatHasEndedIsRefusedAndTypesNothing() {
+        let r = run(InFlightTarget(session: working("/Users/roy/projects/page")).command(text: "hello", ts: 0))
+        XCTAssertEqual(r?.reason, .notFound)
+        XCTAssertTrue(backends.inputs.isEmpty)
     }
 }

@@ -38,6 +38,10 @@ struct ClaudeSessionRecord: Equatable {
     var statusUpdatedAt: Date?
     var kind: String?
     var entrypoint: String?
+    /// When the Claude Code process started the session (`startedAt`, ms).
+    var startedAt: Date?
+    /// The session's own name (`name`): what Claude Code calls it, often the folder.
+    var name: String?
 }
 
 /// A Claude Code process that is running right now, with the session it hosts.
@@ -57,6 +61,10 @@ struct ClaudeLiveSession: Equatable {
     /// settings files (`ModelProviderClassifier.claude`). `.unknown` until
     /// the registry fills it in, or when the environment can't be read.
     var provider: ModelProvider = .unknown
+    /// When this Claude Code process started the session. nil without a sessions file.
+    var startedAt: Date? = nil
+    /// The session's own name from the sessions file, if it has one.
+    var name: String? = nil
 
     var devTTY: String? { tty.map { "/dev/" + $0 } }
 }
@@ -384,6 +392,10 @@ final class ClaudeSessionRegistry {
         }
         r.kind = obj["kind"] as? String
         r.entrypoint = obj["entrypoint"] as? String
+        if let ms = obj["startedAt"] as? NSNumber, !(obj["startedAt"] is Bool), ms.doubleValue > 0 {
+            r.startedAt = Date(timeIntervalSince1970: ms.doubleValue / 1000)
+        }
+        r.name = (obj["name"] as? String).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty ? nil : String($0.prefix(120)) }
         return r
     }
 
@@ -426,7 +438,9 @@ final class ClaudeSessionRegistry {
                 status: ClaudeSessionStatus(raw: r.status),
                 statusUpdatedAt: r.statusUpdatedAt,
                 tty: row.flatMap { normalizedTTY($0.tty) },
-                hasSessionFile: true
+                hasSessionFile: true,
+                startedAt: r.startedAt,
+                name: r.name
             ))
         }
 

@@ -209,6 +209,9 @@ final class NowPanelController: NSObject {
         let vf = (screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let centerX = anchor?.midX ?? (vf.maxX - NightWatch.Space.popoverWidth / 2 - 12)
         let top = (anchor?.minY ?? vf.maxY) - 6
+        // The panel hangs under the menu bar and must end above the screen's bottom edge:
+        // the In-flight cards scroll instead of pushing the footer off screen.
+        store.bodyBudget = max(320, top - vf.minY - 8 - NWAuroraHeader.headerHeight - NightWatch.Space.panelFooterHeight)
         panel.place(content: host, width: NightWatch.Space.popoverWidth, centerX: centerX, top: top, screen: screen)
         panel.makeKeyAndOrderFront(nil)
         store.animates = true

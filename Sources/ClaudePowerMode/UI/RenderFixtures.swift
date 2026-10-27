@@ -145,6 +145,46 @@ enum NightWatchFixtures {
         return i
     }
 
+    /// One page waiting and two sessions in flight (the situation that led to
+    /// the In-flight rows): "page" in cmux running tests, "llm-play" in tmux
+    /// editing a file. `blocked` adds a Terminal session Page can't type
+    /// into and a busy local model, to show the buttons that cannot act.
+    static func oneWaitingTwoInFlight(now: Date = boardNow(), blocked: Bool = false) -> NowInputs {
+        func working(_ name: String, since minutes: Double) -> AgentSession {
+            AgentSession(backend: .claude, sessionId: "sess-\(name)", cwd: "/Users/roy/projects/\(name)", title: nil,
+                         source: .terminal, state: .active, lastActivityAt: now.addingTimeInterval(-minutes * 60),
+                         activeFlags: [], supportsRemoteReply: true)
+        }
+        var sessions = [session("bottle-flip", state: .waitingOnApproval), working("page", since: 4), working("llm-play", since: 52)]
+        var hosts: [String: SessionHostInfo] = [
+            "sess-page": SessionHostInfo(host: "cmux", canType: true, typeBlocker: nil, canInterrupt: true),
+            "sess-llm-play": SessionHostInfo(host: "tmux", canType: true, typeBlocker: nil, canInterrupt: true)
+        ]
+        var activity = [
+            "sess-page": "Bash: swift test --filter StuckWatchTests",
+            "sess-llm-play": "Edit: Sources/Agent/Planner.swift"
+        ]
+        var local: [LocalActivity] = []
+        if blocked {
+            sessions.append(working("payments-api", since: 9))
+            hosts["sess-payments-api"] = .blocked("Ghostty", "Page can't type into Ghostty yet")
+            activity["sess-payments-api"] = "Read: Package.swift"
+            local = [LocalActivity(id: "ollama", displayName: "Ollama", kind: .server, busy: true, signal: .exact,
+                                   detail: "generating · exact")]
+        }
+        var snap = snapshot(sessions: sessions, pending: [
+            event("bottle-flip", kind: .permission, context: "[Bash] git push origin feat/alerts\nPush the branch",
+                  openedAt: now.addingTimeInterval(-70))])
+        snap.localModels = local
+        var i = NowInputs(snapshot: snap, now: now, macName: "Studio MBP", idleSeconds: 5)
+        i.route = route
+        i.hosts = hosts
+        i.activity = activity
+        i.busySince = Dictionary(uniqueKeysWithValues: sessions.compactMap { s in
+            s.lastActivityAt.map { (s.sessionId, $0) } })
+        return i
+    }
+
     /// Folders for the Dispatch panel.
     static let folders: [SessionStarter.Folder] = ["page", "bottle-flip", "llm-play"].map {
         SessionStarter.Folder(path: "/Users/roy/projects/\($0)", name: $0, lastUsedAt: nil)

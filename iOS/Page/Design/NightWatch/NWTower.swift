@@ -33,6 +33,8 @@ struct TowerScreenActions {
     var turnOnNotifications: () -> Void = {}
     var setGlow: (CardGlow) -> Void = { _ in }
     var openHistory: () -> Void = {}
+    /// "Show the tips again": every first-time tip comes back.
+    var resetTips: () -> Void = {}
     var refresh: () async -> Void = {}
 }
 
@@ -54,6 +56,7 @@ struct NWTowerScreen: View {
                     section(.budget) { budget }
                     section(.macs) { macs }
                     section(.attention) { attention }
+                    section(.gestures) { gestures }
                     section(.terminals) { terminals }
                     section(.pairing) { pairing }
                     section(.appearance) { appearance }
@@ -253,6 +256,40 @@ struct NWTowerScreen: View {
             towerRow(icon: "moon", tint: NightWatch.Palette.textTertiary, title: "Quiet hours and when to page", detail: "set in Page on your Mac, where they apply",
                      trailing: nil, chevron: false, action: nil)
         }
+    }
+
+    // MARK: Gestures & shortcuts
+
+    /// Every gesture and what it does, from `GestureGuide`: the same lines the first-time tips use.
+    private var gestures: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            card {
+                ForEach(Array(GestureGuide.entries.enumerated()), id: \.element.id) { i, e in
+                    if i > 0 { divider }
+                    gestureRow(e)
+                }
+            }
+            Text("Everything here can also be done without the gesture: VoiceOver offers each one as an action on the row.")
+                .font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
+                .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
+            card {
+                ForEach(Array(GestureGuide.shortcuts.enumerated()), id: \.element.id) { i, e in
+                    if i > 0 { divider }
+                    towerRowBody(icon: e.symbol, tint: NightWatch.Palette.teal, title: e.gesture, detail: "\(e.context) · \(e.effect)", trailing: nil, chevron: false)
+                }
+            }
+            Button(action: actions.resetTips) {
+                Text(GestureGuide.showAgainLabel).font(NightWatch.Typo.captionStrong).foregroundColor(NightWatch.Palette.teal.color)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(Capsule().fill(Color.white.opacity(0.06)))
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func gestureRow(_ e: GestureEntry) -> some View {
+        towerRowBody(icon: e.symbol, tint: NightWatch.Palette.teal, title: "\(e.gesture) \(e.context)", detail: e.effect, trailing: nil, chevron: false)
     }
 
     // MARK: Works with

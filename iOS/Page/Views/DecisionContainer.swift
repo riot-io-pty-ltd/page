@@ -18,6 +18,7 @@ struct DecisionContainer: View {
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var coordinator: ActionCoordinator
+    @EnvironmentObject var tips: TipStore
     @Environment(\.dismiss) private var dismiss
 
     /// Last known copy, so content stays readable after the page closes.
@@ -33,6 +34,8 @@ struct DecisionContainer: View {
     @State private var showingDiff = false
     /// When an Irreversible approve passed biometrics in this sheet (the hold ring's burst).
     @State private var holdCommittedAt: Date?
+    /// The first-time tip was on screen: it is spent when this sheet closes.
+    @State private var showedTip = false
 
     private var live: Intervention? { api.inbox.first { $0.id == interventionId } }
     private var intervention: Intervention? { live ?? snapshot }
@@ -58,6 +61,7 @@ struct DecisionContainer: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onDisappear { if showedTip { tips.retire(.willType) } }
         .task { await lookUp() }
         .task {
             // Fast while a ring runs, slow otherwise.
@@ -99,6 +103,7 @@ struct DecisionContainer: View {
         state.receipt = ReceiptThreadInput(pending: coordinator.pending[iv.id], delivery: api.deliveries[iv.id],
                                            localProblem: coordinator.localProblems[iv.id], changedAt: api.deliveryTimes[iv.id])
         state.holdCommittedAt = holdCommittedAt
+        state.tip = tips.book.decisionTip(hasPreview: row.focusPreview != nil && row.action(.openOnMac) == nil)
         // A question the session is blocked on, answerable by tapping: only for the page the Mac has open
         // for it (a hook-held page is answered through its own text reply).
         // A page Claude's question hook holds has no dialog on screen: its answers go as text through the hook.
@@ -148,6 +153,8 @@ struct DecisionContainer: View {
         a.viewChanges = { showingDiff = true }
         a.copy = { UIPasteboard.general.string = iv.context }
         a.close = { dismiss() }
+        a.dismissTip = { tips.retire($0) }
+        a.tipShown = { _ in showedTip = true }
         return a
     }
 

@@ -45,11 +45,11 @@ struct NightWatchRoot: View {
         .sheet(item: router.sheetBinding, onDismiss: router.sheetDismissed) { sheet in
             SheetHost(sheet: sheet)
         }
-        .confirmationDialog("Unpair \(pairing.pairedMac?.name ?? "this Mac")?", isPresented: $router.confirmingUnpair, titleVisibility: .visible) {
+        .confirmationDialog(UnpairCopy.title(mac: pairing.pairedMac?.name), isPresented: $router.confirmingUnpair, titleVisibility: .visible) {
             Button("Unpair", role: .destructive) { pairing.unpair() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This iPhone will stop receiving pages until you scan a pairing code again. On your Mac, open Page → Pair phone… and scan the new code.")
+            Text(UnpairCopy.message)
         }
     }
 }
@@ -81,26 +81,16 @@ private struct SheetHost: View {
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         case .history:
-            HistorySheet()
+            HistoryContainer()
+                .presentationDragIndicator(.visible)
         }
     }
 }
 
-/// Everything Settled, and the day's stats: the old History screen, reached
-/// from Settled's "See all" and from the Tower.
-private struct HistorySheet: View {
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            HistoryView()
-            Button { dismiss() } label: {
-                Image(systemName: "xmark").font(.system(.body, weight: .semibold))
-                    .foregroundStyle(Theme.Colour.text)
-                    .frame(width: 44, height: 44)
-            }
-            .padding(.top, 14).padding(.trailing, 14)
-            .accessibilityLabel("Close")
-        }
-        .preferredColorScheme(.dark)
-    }
+/// The unpair confirmation, worded once. The root presents it for Now, Sky
+/// and the Tower's own button alike (the Tower sheet covers the root, so it
+/// presents the same dialog itself); both read this copy.
+enum UnpairCopy {
+    static func title(mac: String?) -> String { "Unpair \(mac ?? "this Mac")?" }
+    static let message = "This iPhone will stop receiving pages until you scan a pairing code again. On your Mac, open Page → Pair phone… and scan the new code."
 }

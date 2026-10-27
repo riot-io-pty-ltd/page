@@ -24,6 +24,8 @@ struct NWHorizon: View {
     /// The counts behind the pulse (its breath and rings); the style's
     /// default when nil.
     var model: PulseModel? = nil
+    /// "2 working" in the subline is a button that goes to the In flight cards.
+    var workingJump: (jump: String, rest: String, action: () -> Void)? = nil
 
     @Environment(\.nwMotion) private var pin
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -56,11 +58,7 @@ struct NWHorizon: View {
                     .multilineTextAlignment(.center)
                     .minimumScaleFactor(0.7)
                     .lineLimit(2)
-                Text(subline)
-                    .font(NightWatch.Typo.subline)
-                    .foregroundColor(NightWatch.Palette.textSecondary.color)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
+                sublineView
                     .padding(.bottom, footnote == nil ? 14 : 0)
                 if let footnote {
                     Text(footnote).font(NightWatch.Typo.subline)
@@ -76,6 +74,9 @@ struct NWHorizon: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(headline). \(subline)"))
         .accessibilityAddTraits(.isHeader)
+        .accessibilityActions {
+            if let workingJump { Button(HeaderJump.accessibilityName) { workingJump.action() } }
+        }
         .onChange(of: pulseModel.mode) { old, new in
             guard !reduceMotion, PulseModel.exhales(from: old, to: new) else { return }
             exhaleAt = Date().timeIntervalSinceReferenceDate
@@ -103,6 +104,32 @@ struct NWHorizon: View {
             guard dawnAt != nil else { return }
             try? await Task.sleep(nanoseconds: UInt64((DawnModel.sweepDuration + DawnModel.settle) * 1_000_000_000))
             if !Task.isCancelled { dawnAt = nil }
+        }
+    }
+
+    /// The Horizon's second line. With working sessions on screen its count is
+    /// a button: it scrolls to the In flight cards.
+    @ViewBuilder private var sublineView: some View {
+        if let j = workingJump {
+            HStack(spacing: 0) {
+                Button(action: j.action) {
+                    Text(j.jump).underline(true, color: NightWatch.Palette.teal.opacity(0.7).color)
+                        .foregroundColor(NightWatch.Palette.teal.color)
+                        .padding(.vertical, 12).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.vertical, -12)
+                .accessibilityHidden(true)
+                Text(j.rest).foregroundColor(NightWatch.Palette.textSecondary.color).lineLimit(2)
+            }
+            .font(NightWatch.Typo.subline)
+            .multilineTextAlignment(.center)
+        } else {
+            Text(subline)
+                .font(NightWatch.Typo.subline)
+                .foregroundColor(NightWatch.Palette.textSecondary.color)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
         }
     }
 

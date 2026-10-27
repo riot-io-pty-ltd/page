@@ -45,7 +45,7 @@ MainActor.assumeIsolated {
         let time = timed.count > 1 ? Double(timed[1]) : nil
         let glows: [CardGlow] = parts.count > 1 ? [CardGlow(argument: parts[1]) ?? .off] : [.off, .subtle, .full]
         // Tall screens get the whole scroll content in one frame.
-        let h: CGFloat = name.hasPrefix("now") ? 2200 : (name.hasPrefix("tower") ? 2300 : (name == "settled" || name == "gallery" ? 1400 : 852))
+        let h: CGFloat = name.hasPrefix("now") ? 2200 : (name.hasPrefix("tower") ? 2300 : (name == "settled" || name == "gallery" ? 1400 : (name.hasPrefix("history") ? 1500 : 852)))
         for g in glows {
             let a = RenderArguments(screen: name, glow: g, time: time)
             let stem = time.map { "\(name)@\(String(format: "%.2f", $0))" } ?? name

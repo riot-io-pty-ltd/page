@@ -56,8 +56,6 @@ targets:
     sources:
       - path: PageWidget
       - path: Page/Models
-      - path: Page/Design/Theme.swift
-      - path: Page/Design/UsageRing.swift
       # The widgets' faces: the Night Watch tokens, the aurora, the Runway.
       - path: Page/Design/NightWatch/NWTheme.swift
       - path: Page/Design/NightWatch/NWAurora.swift

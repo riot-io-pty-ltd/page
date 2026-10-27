@@ -10,6 +10,7 @@ struct NowContainer: View {
     @EnvironmentObject var notifications: NotificationService
     @EnvironmentObject var coordinator: ActionCoordinator
     @EnvironmentObject var activity: ActivityStore
+    @EnvironmentObject var tips: TipStore
     @Environment(\.scenePhase) private var scenePhase
 
     /// Ids on screen, so the order never re-sorts under a finger.
@@ -22,6 +23,8 @@ struct NowContainer: View {
     @State private var lastRows: [NowRow] = []
     /// Bumped when a ghost's time is up, to draw the stream without it.
     @State private var ghostTick = 0
+    /// "Show all N" is open in In flight.
+    @State private var inFlightExpanded = false
 
     var body: some View {
         // Ages, presence and the arm ring re-evaluate every few seconds even when no data changes.
@@ -89,7 +92,9 @@ struct NowContainer: View {
         var d = NowScreenData(model: model, log: SettledLog.build(history: api.history, now: now, calendar: .current), chip: MacChipModel.build(macName: macName, status: api.macStatus, now: now),
                               now: now)
         d.queuedNew = queued
-        d.strands = InFlightStrand.build(sessions: sessions.sessions, workflows: sessions.workflows, now: now)
+        d.inFlight = InFlightSection.build(sessions: sessions.sessions, hasSessionList: sessions.hasList, workflows: sessions.workflows,
+                                           stuck: FlightHealth.stuckSessionIds(api.inbox), now: now, expanded: inFlightExpanded)
+        d.biometry = BiometricGate.displayName
         d.pending = coordinator.pending
         var outcomes: [String: CardOutcome] = [:]
         var receipts: [String: ReceiptThreadInput] = [:]
@@ -103,6 +108,9 @@ struct NowContainer: View {
         }
         d.outcomes = outcomes
         d.receipts = receipts
+        // One first-time tip at a time, under the first row of its kind that has nothing under way.
+        d.tip = tips.book.nowTip(NowTipInputs(rows: model.rows.map { ($0.id, $0.chip) }, inFlight: d.inFlight.rows.map(\.id),
+                                              busy: Set(outcomes.keys).union(coordinator.pending.keys)))
         d.answerable = Set(model.rows.filter { row in
             let page = api.inbox.first { $0.id == row.id }
             return row.chip == .question && AnswerPicker.ask(for: sessions.session(row.sessionId), pageIsQuestion: true,
@@ -143,8 +151,14 @@ struct NowContainer: View {
     private func actions(model: NowModel) -> NowScreenActions {
         var a = NowScreenActions()
         a.open = { router.open(interventionId: $0) }
-        a.approve = { coordinator.begin(row: $0, kind: .approve) }
-        a.holdComplete = { coordinator.commitHold(row: $0, macName: macName) }
+        a.approve = { row in
+            if row.chip == .undoable { tips.retire(.swipeToApprove) }
+            coordinator.begin(row: row, kind: .approve)
+        }
+        a.holdComplete = { row in
+            tips.retire(.holdToApprove)
+            coordinator.commitHold(row: row, macName: macName)
+        }
         a.deny = { coordinator.begin(row: $0, kind: .deny) }
         a.looksGood = { coordinator.begin(row: $0, kind: .carryOn) }
         a.steer = { router.open(interventionId: $0.id) }
@@ -153,8 +167,14 @@ struct NowContainer: View {
             if coordinator.isArming(id) { coordinator.cancel(id) } else { router.open(interventionId: id) }
         }
         a.tapChip = { router.openTower() }
+        a.openSettings = { router.openTower() }
         a.tapRunway = { router.openTower(.budget) }
-        a.tapStrand = { router.openSession($0) }
+        a.openRoom = { id, entry in
+            tips.retire(.inFlight)
+            router.openSession(id, entry: entry)
+        }
+        a.toggleInFlight = { inFlightExpanded.toggle() }
+        a.dismissTip = { tips.retire($0) }
         a.toSky = { withAnimation { router.destination = .sky } }
         a.toggleBrief = { briefExpanded.toggle() }
         a.dismissBrief = { away.dismissBrief(); briefExpanded = false }

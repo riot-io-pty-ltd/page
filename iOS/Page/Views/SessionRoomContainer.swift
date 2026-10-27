@@ -40,6 +40,10 @@ struct SessionRoomContainer: View {
     @State private var diffRequestedAt = Date.distantPast
     /// The receipt (by clientId) the user closed.
     @State private var dismissedReceipt: String?
+    /// Opened with Type: the composer takes the keyboard (a keyboard, nothing sent).
+    @State private var focusComposer = false
+    /// Opened with Stop: the room says what holding its stop button does, for a few seconds.
+    @State private var stopHint = false
 
     struct AgentRef: Identifiable, Equatable {
         let runId: String
@@ -74,6 +78,18 @@ struct SessionRoomContainer: View {
         .onAppear {
             if let live { snapshot = live }
             requestChanges()
+            // How the row that opened this room asked for it (Screen, Type, Stop). Read once.
+            let entry = router.takeRoomEntry(for: sessionId)
+            if entry != .story {
+                lens = entry.lens
+                focusComposer = entry.focusesComposer
+                stopHint = entry.showsStopHint
+            }
+        }
+        .task(id: stopHint) {
+            guard stopHint else { return }
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            if !Task.isCancelled { stopHint = false }
         }
         .onChange(of: live) { old, new in
             if let new { snapshot = new }
@@ -138,7 +154,7 @@ struct SessionRoomContainer: View {
         let data = SessionRoomData.make(inputs)
         return NWSessionRoom(data: data, actions: actions(row: row, data: data),
                              lens: Binding(get: { RoomLens.resolve(lens, offered: data.lenses) }, set: { setLens($0) }),
-                             draft: $draft, runId: $runId)
+                             draft: $draft, runId: $runId, focusComposer: focusComposer, stopHint: stopHint)
             .onChange(of: draft) { _, _ in if composerProblem != nil { composerProblem = nil } }
     }
 

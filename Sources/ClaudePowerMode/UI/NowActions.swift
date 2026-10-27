@@ -169,8 +169,16 @@ struct NowKeyPress: Equatable {
 /// The panel's keyboard state.
 struct NowPanelState: Equatable {
     struct Composer: Equatable {
+        /// What Return sends. `.reply` answers a page (Esc, the text, Return);
+        /// `.type` is a plain message to a working session (the text and
+        /// Return, never Esc: Esc would interrupt it).
+        enum Kind: Equatable { case reply, type }
+
         let rowId: String
         var text: String = ""
+        var kind: Kind = .reply
+        /// The session a `.type` message is for, captured when the composer opened.
+        var target: InFlightTarget? = nil
     }
 
     /// The row the keys act on. nil: nothing selected, so Esc closes the panel
@@ -180,6 +188,12 @@ struct NowPanelState: Equatable {
     var expanded = false
     var composer: Composer?
     var hold: HoldGesture?
+    /// The In-flight group shows only its header (names and count).
+    var inFlightCollapsed = false
+    /// All in-flight rows shown (otherwise the first `InFlightLayout.cap`).
+    var inFlightExpanded = false
+    /// The shortcuts sheet is up in place of the rows.
+    var showShortcuts = false
 }
 
 /// What the controller should do after a key.
@@ -196,6 +210,11 @@ enum NowEffect: Equatable {
     case openTerminal(rowId: String)
     /// Esc, then `text`, then Return.
     case send(rowId: String, text: String)
+    /// Focus a working session's terminal; types nothing.
+    case openSession(sessionId: String, backend: AgentBackendID)
+    /// Type `text` and Return into a working session through the local
+    /// session input path: no Esc, no digits of its own.
+    case typeInto(InFlightTarget, text: String)
     case newSession
     /// ⌘, : Preferences (the Tower).
     case preferences
@@ -209,21 +228,23 @@ enum NowKeys {
     /// Pure. The selection after the rows change: kept by id, and dropped (never
     /// moved to a neighbour) when its row is gone, so a key can never act on a
     /// row the person did not choose. An open composer for a vanished row closes.
-    static func reconcile(_ state: NowPanelState, rows: [DecideRow]) -> NowPanelState {
+    static func reconcile(_ state: NowPanelState, rows: [DecideRow], flights: [InFlightRow] = []) -> NowPanelState {
         var s = state
-        let ids = Set(rows.map(\.id))
+        let ids = Set(rows.map(\.id)).union(flights.map(\.id))
         if let id = s.selectedId, !ids.contains(id) { s.selectedId = nil }
         if let c = s.composer, !ids.contains(c.rowId) { s.composer = nil }
         if let h = s.hold, case .approve(let id) = h.kind, !ids.contains(id) { s.hold = nil }
         if rows.count <= NowModel.visibleRows { s.expanded = false }
+        if flights.count <= InFlightLayout.cap { s.inFlightExpanded = false }
         return s
     }
 
     /// Pure. A key against the panel's state and the current rows.
-    static func handle(_ press: NowKeyPress, state: NowPanelState, rows: [DecideRow],
+    static func handle(_ press: NowKeyPress, state: NowPanelState, rows: [DecideRow], flights: [InFlightRow] = [],
                        now: Date) -> (state: NowPanelState, effect: NowEffect) {
-        var s = reconcile(state, rows: rows)
+        var s = reconcile(state, rows: rows, flights: flights)
         let selected = s.selectedId.flatMap { id in rows.first { $0.id == id } }
+        let selectedFlight = s.selectedId.flatMap { id in flights.first { $0.id == id } }
 
         // Releasing the key (or Command) ends a hold that has not filled.
         if press.phase == .up {
@@ -252,6 +273,16 @@ enum NowKeys {
             }
         }
 
+        // The shortcuts sheet takes Esc or its own key to close; nothing else acts under it.
+        if s.showShortcuts {
+            switch press.key {
+            case .esc: s.showShortcuts = false
+            case .char(let c) where isHelpKey(c): s.showShortcuts = false
+            default: break
+            }
+            return (s, .none)
+        }
+
         // The composer owns the keyboard: a typed "1" is text, not an approval.
         if let c = s.composer {
             switch press.key {
@@ -262,6 +293,11 @@ enum NowKeys {
                 let text = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty, !press.isRepeat else { return (s, .none) }
                 s.composer = nil
+                if c.kind == .type {
+                    // A plain message to a working session. The row stays selected, so its receipt shows.
+                    guard let target = c.target else { return (s, .none) }
+                    return (s, .typeInto(target, text: text))
+                }
                 s.selectedId = nil
                 return (s, .send(rowId: c.rowId, text: text))
             default:
@@ -274,7 +310,8 @@ enum NowKeys {
         case .up, .down:
             // Moving cancels a hold: it was for the row you left.
             s.hold = nil
-            let ids = rows.map(\.id)
+            // Pages first, then working sessions (none while that group is collapsed).
+            let ids = rows.map(\.id) + (s.inFlightCollapsed ? [] : flights.map(\.id))
             guard !ids.isEmpty else { return (s, .none) }
             let current = s.selectedId.flatMap { ids.firstIndex(of: $0) }
             let next: Int
@@ -287,11 +324,14 @@ enum NowKeys {
             }
             s.selectedId = ids[next]
             // Reaching a row past the compact list opens the rest.
-            if next >= NowModel.visibleRows { s.expanded = true }
+            if next >= NowModel.visibleRows && next < rows.count { s.expanded = true }
+            if next >= rows.count && next - rows.count >= InFlightLayout.cap { s.inFlightExpanded = true }
             return (s, .none)
 
         case .esc:
             if s.hold != nil { s.hold = nil; return (s, .none) }
+            // A working session has nothing to deny: Esc lets go of its row (it never interrupts it).
+            if selectedFlight != nil { s.selectedId = nil; return (s, .none) }
             guard let row = selected else { return (s, .close) }
             if row.keys.contains(where: { $0.action == .deny }) || row.moreKeys.contains(where: { $0.action == .deny }) {
                 s.selectedId = nil
@@ -316,6 +356,23 @@ enum NowKeys {
         case .char(let raw):
             // Not tied to a row, so the footer's menu is reachable from the keyboard.
             if raw.lowercased() == "m" { return (s, press.isRepeat ? .none : .more) }
+            if isHelpKey(raw) {
+                if !press.isRepeat { s.showShortcuts = true; s.hold = nil }
+                return (s, .none)
+            }
+            if let fl = selectedFlight {
+                switch raw.lowercased() {
+                case PanelKeys.type.lowercased():
+                    guard fl.actions.canType, let target = fl.target else { return (s, .none) }
+                    s.composer = NowPanelState.Composer(rowId: fl.id, kind: .type, target: target)
+                    return (s, .none)
+                case PanelKeys.open.lowercased():
+                    guard fl.actions.canOpen, fl.kind == .session, let backend = fl.backend, !press.isRepeat else { return (s, .none) }
+                    return (s, .openSession(sessionId: fl.sessionId, backend: backend))
+                default:
+                    return (s, .none)
+                }
+            }
             guard let c = raw.lowercased().first, let row = selected else { return (s, .none) }
             let all = row.keys + row.moreKeys
             switch c {
@@ -343,6 +400,9 @@ enum NowKeys {
         }
     }
 
+    /// "?" (and "/", the same key without Shift on a US layout) opens the shortcuts sheet.
+    static func isHelpKey(_ c: Character) -> Bool { c == "?" || c == "/" }
+
     /// Pure. A hold that has filled turns into its effect (and ends); one that
     /// has not is left running.
     static func tick(state: NowPanelState, now: Date) -> (state: NowPanelState, effect: NowEffect) {
@@ -354,6 +414,19 @@ enum NowKeys {
         case .approve(let id):
             s.selectedId = nil
             return (s, .approveAfterAuth(rowId: id))
+        }
+    }
+
+    /// Pure. A click on one of a working session's two buttons. Steering is not
+    /// here: it opens the composer (the store does that), and sends only when
+    /// Return is pressed in it.
+    static func effect(forFlightClick action: InFlightAction, row: InFlightRow) -> NowEffect {
+        switch action {
+        case .open:
+            guard row.actions.canOpen, row.kind == .session, let backend = row.backend else { return .none }
+            return .openSession(sessionId: row.sessionId, backend: backend)
+        case .steer:
+            return .none
         }
     }
 

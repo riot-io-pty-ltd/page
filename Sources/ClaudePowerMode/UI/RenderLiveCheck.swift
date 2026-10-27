@@ -14,7 +14,7 @@ enum RenderLiveCheck {
     @MainActor
     static func run() -> Never {
         NSApp.setActivationPolicy(.accessory)
-        let store = NowStore(model: NowModel.build(NightWatchFixtures.needsYou()))
+        let store = NowStore(model: NowModel.build(NightWatchFixtures.needsYou()), prefs: .ephemeral().dismissingTip())
         let gate = NWMotionGate()
         let panel = NWPanel(allowsKey: false)
         let host = NSHostingView(rootView: AnyView(

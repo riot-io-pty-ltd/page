@@ -966,7 +966,7 @@ final class ClaudeBackend: AgentBackend {
                 backend: id,
                 sessionId: s.sessionId,
                 cwd: s.cwd,
-                title: s.cwd.map { InterventionDetector.projectName(forCwd: $0) } ?? "Claude",
+                title: s.cwd.map { InterventionDetector.projectName(forCwd: $0, fallback: s.name) } ?? s.name ?? "Claude",
                 source: .terminal,
                 state: state,
                 lastActivityAt: s.statusUpdatedAt ?? mtime,
@@ -1199,7 +1199,7 @@ extension ClaudeBackend: BatteryPausable {
             }
             let pausedAt = w.escSent ? w.pausedAt : Date()
             let cwd = w.session.cwd ?? ""
-            let projectName = cwd.isEmpty ? "Claude" : InterventionDetector.projectName(forCwd: cwd)
+            let projectName = cwd.isEmpty ? (w.session.name ?? "Claude") : InterventionDetector.projectName(forCwd: cwd, fallback: w.session.name)
             // Local model: the Esc was the whole pause — no message typed,
             // so the model doesn't spend battery writing a summary.
             if w.session.provider.isLocal {

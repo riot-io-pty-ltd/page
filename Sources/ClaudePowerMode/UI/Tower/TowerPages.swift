@@ -27,6 +27,7 @@ struct NWTowerPageContent: View {
         case .macsPhones: NWMacsPhonesPage(store: store)
         case .attention: NWAttentionPage(store: store)
         case .agents: NWAgentsPage(store: store)
+        case .phoneApprovals: NWPhoneApprovalsPage(store: store)
         case .terminals: NWTerminalsPage(store: store)
         case .shortcuts: NWShortcutsPage()
         case .pairing: NWPairingPage(store: store)
@@ -415,7 +416,7 @@ struct NWMacsPhonesPage: View {
                         .padding(.horizontal, 16).padding(.bottom, 12)
                 }
             }
-            NWNote(text: "Deploy the relay Worker once (Cloudflare/README.md), paste its URL here, then use “Pair phone…” under Pairing & encryption.")
+            NWNote(text: "Deploy the relay Worker once (Cloudflare/README.md), paste its URL here, then scan the QR under Pairing & encryption.")
                 .padding(.horizontal, 4).padding(.top, -10)
             NWCard(title: "WHAT YOUR PHONE MAY DO") {
                 NWToggleRow(title: "Show my live sessions on my phone",
@@ -558,11 +559,11 @@ struct NWAgentsPage: View {
                 }
                 NWDivider()
                 NWRow(title: "cmux", detail: "lets Page type into your cmux panes, and start sessions there") {
-                    NWButton(title: "Set up cmux…", kind: .secondary) { store.env.setUpCmux() }
+                    NWButton(title: "Set up cmux…", kind: .secondary) { store.openCmuxSetup() }
                 }
                 NWDivider()
                 NWRow(title: "Agent hooks", detail: "phone approvals for Claude Code and Codex, with a diff and a backup first") {
-                    NWButton(title: "Install agent hooks…", kind: .secondary) { store.env.installHooks() }
+                    NWButton(title: "Install agent hooks…", kind: .secondary) { store.openPhoneApprovals() }
                 }
                 NWDivider()
                 NWRow(title: "Local-model diagnostics", detail: "copies what Page sees, for a bug report") {
@@ -590,40 +591,6 @@ struct NWShortcutsPage: View {
             }
             NWNote(text: "Page approves by typing option 1, denies with Esc, and sends only what you write. It never presses 2, never offers “Yes, and don’t ask again”, and has no auto-allow or auto-deny.")
                 .padding(.horizontal, 4)
-        }
-    }
-}
-
-// MARK: - Pairing & encryption
-
-struct NWPairingPage: View {
-    @ObservedObject var store: TowerStore
-
-    var body: some View {
-        let chip = TowerPhone.relayChip(store.snapshot?.relayState)
-        NWPage(section: .pairing) {
-            NWCard(title: "PAIR A PHONE") {
-                NWRow(title: "Pair phone…", detail: "scan a QR with Page on your phone. Needs the phone relay (Macs & phones).") {
-                    NWButton(title: "Pair phone…", kind: .primary) { store.env.pairPhone() }
-                }
-                NWDivider()
-                NWRow(title: "Relay", detail: nil) {
-                    NWStateChip(text: chip.text, color: chip.tone == .good ? P.teal : (chip.tone == .quiet ? P.textTertiary : P.amber), symbol: nil)
-                }
-            }
-            NWCard(title: "WHO CAN READ WHAT") {
-                NWRow(title: "Sessions are end-to-end encrypted", detail: "with the key in the pairing QR. The relay carries the messages but can’t read them.") {
-                    Image(systemName: "lock.fill").foregroundColor(P.teal.color)
-                }
-                NWDivider()
-                NWRow(title: "Phones paired before encryption", detail: "need to scan the QR again.") {
-                    Image(systemName: "qrcode").foregroundColor(P.textTertiary.color)
-                }
-                NWDivider()
-                NWRow(title: "Retire a pairing", detail: "open Pair phone… and choose “Regenerate token…”. Phones on the old token stop receiving pages until they scan the new QR.") {
-                    Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(P.textTertiary.color)
-                }
-            }
         }
     }
 }

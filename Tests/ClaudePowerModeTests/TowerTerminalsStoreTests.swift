@@ -21,7 +21,6 @@ final class TowerTerminalsStoreTests: XCTestCase {
         var automationCalls: [C.ID] = []
         var automationDone: [(TerminalProbe.Automation) -> Void] = []
         var opened: [URL] = []
-        var cmuxSetups = 0
         var visible = true
     }
 
@@ -50,7 +49,6 @@ final class TowerTerminalsStoreTests: XCTestCase {
         }
         env.showAlert = { r.alerts.append((title: $0, text: $1)) }
         env.openURL = { r.opened.append($0) }
-        env.setUpCmux = { r.cmuxSetups += 1 }
         env.windowVisible = { r.visible }
         return (TowerStore(config: Config(), macName: "Studio", env: env), r)
     }
@@ -261,12 +259,15 @@ final class TowerTerminalsStoreTests: XCTestCase {
         XCTAssertEqual(r.opened, [url])
     }
 
-    func testSetUpOnCmuxOpensItsWindowAndOnOtherHostsDoesNothing() {
+    func testSetUpOnCmuxOpensItsPageAndOnOtherHostsDoesNothing() {
         let (s, r) = makeStore()
+        s.selection = .agents
         s.perform(.setUp(label: "Set up…"), on: .cmux)
-        XCTAssertEqual(r.cmuxSetups, 1)
+        XCTAssertTrue(s.cmuxSetupOpen)
+        XCTAssertEqual(s.selection, .terminals, "the cmux page lives under Terminals")
+        s.closeCmuxSetup()
         s.perform(.setUp(label: "Set up…"), on: .wezterm)
-        XCTAssertEqual(r.cmuxSetups, 1)
+        XCTAssertFalse(s.cmuxSetupOpen)
         XCTAssertTrue(r.alerts.isEmpty)
     }
 

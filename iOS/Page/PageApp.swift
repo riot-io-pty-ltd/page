@@ -41,6 +41,7 @@ struct LiveApp: View {
     @StateObject private var stop = StopCoordinator()
     @StateObject private var activity = ActivityStore()
     @StateObject private var away = AwayStore()
+    @StateObject private var tips = TipStore()
 
     var body: some View {
         RootView()
@@ -54,6 +55,7 @@ struct LiveApp: View {
             .environmentObject(stop)
             .environmentObject(activity)
             .environmentObject(away)
+            .environmentObject(tips)
             // The one place every glass surface reads the Card glow from.
             .environment(\.nwCardGlow, glow.glow)
             .onOpenURL { url in

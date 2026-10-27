@@ -185,6 +185,18 @@ struct NWDecideCard: View {
             }
             .buttonStyle(.plain)
             .accessibilityHint(Text("Opens the decision"))
+            // The buttons below are the visible way; these are the same, named, for VoiceOver.
+            .accessibilityActions {
+                // Same condition as the visible buttons: Deny present, Approve beside it.
+                if outcome == .none, row.action(.deny) != nil {
+                    Button("Deny") { onDeny() }
+                    if row.action(.approve) != nil {
+                        // The hold's own path: it still asks the phone to confirm before anything is sent.
+                        if irreversible { Button("Approve, then confirm with your device") { onHoldComplete() } }
+                        else { Button("Approve") { onApprove() } }
+                    }
+                }
+            }
             actions(irreversible: irreversible)
         }
         .padding(NightWatch.Space.lg)
@@ -404,6 +416,7 @@ struct NWLookCard: View {
         .background(NWGlassBackground(radius: NightWatch.Radius.card, tint: NightWatch.Palette.amber))
         .accessibilityElement(children: .contain)
         .accessibilityAction(named: Text("Open")) { onOpen() }
+        .accessibilityActions { if outcome == .none, let steer = row.action(.tellInstead) { Button(steer.label) { onSteer() } } }
     }
 
     /// "cargo test failed 6× · since 00:58" style: the summary, then how long.
@@ -445,6 +458,13 @@ struct NWReviewCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityHint(Text("Opens the finished turn"))
+            .accessibilityActions {
+                if outcome == .none {
+                    if row.action(.carryOn) != nil { Button("Looks good") { onLooksGood() } }
+                    if let steer = row.action(.tellInstead) { Button(steer.label) { onSteer() } }
+                }
+            }
             if outcome != .none {
                 NWOutcomeStrip(outcome: outcome, pending: pending, receipt: receipt, onCancel: onCancel)
             } else {

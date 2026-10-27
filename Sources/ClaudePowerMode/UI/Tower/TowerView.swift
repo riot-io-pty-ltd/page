@@ -66,7 +66,11 @@ struct NWTowerSidebar: View {
                 ForEach(TowerSection.allCases) { section in
                     NWSidebarRow(section: section, selected: store.selection == section,
                                  badge: section == .attention ? card.attentionBadge : 0)
-                        .onTapGesture { store.selection = section }
+                        .onTapGesture {
+                            // Clicking Terminals while on its cmux page goes back to the list.
+                            if section == .terminals, store.selection == .terminals { store.closeCmuxSetup() }
+                            store.selection = section
+                        }
                 }
             }
             .padding(.horizontal, 14)
@@ -501,7 +505,7 @@ struct NWFieldRow: View {
 }
 
 struct NWButton: View {
-    enum Kind { case primary, secondary, quiet }
+    enum Kind { case primary, secondary, quiet, destructive }
     var title: String
     var kind: Kind = .secondary
     var enabled = true
@@ -521,7 +525,7 @@ struct NWButton: View {
                 .frame(height: 30)
                 .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(fill))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(kind == .secondary ? Color.white.opacity(0.14) : Color.clear, lineWidth: 1))
+                    .strokeBorder(border, lineWidth: 1))
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
@@ -533,6 +537,15 @@ struct NWButton: View {
         case .primary: return Color(red: 0.02, green: 0.10, blue: 0.10)
         case .secondary: return P.textPrimary.color
         case .quiet: return P.textSecondary.color
+        case .destructive: return P.red.mixed(with: P.amber, 0.2).color
+        }
+    }
+
+    private var border: Color {
+        switch kind {
+        case .secondary: return Color.white.opacity(0.14)
+        case .destructive: return P.red.mixed(with: P.amber, 0.2).opacity(0.45).color
+        case .primary, .quiet: return Color.clear
         }
     }
 
@@ -541,6 +554,7 @@ struct NWButton: View {
         case .primary: return AnyShapeStyle(LinearGradient(colors: [P.teal.color, P.green.color], startPoint: .leading, endPoint: .trailing))
         case .secondary: return AnyShapeStyle(Color.white.opacity(0.07))
         case .quiet: return AnyShapeStyle(Color.clear)
+        case .destructive: return AnyShapeStyle(P.red.opacity(0.16).color)
         }
     }
 }

@@ -124,7 +124,7 @@ enum NWMotionFixtures {
 
     @MainActor
     static func store(_ inputs: NowInputs, at now: Date = t0) -> NowStore {
-        let st = NowStore(model: NowModel.build(inputs))
+        let st = NowStore(model: NowModel.build(inputs), prefs: .ephemeral().dismissingTip())
         st.now = { now }
         return st
     }

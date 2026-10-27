@@ -126,7 +126,7 @@ struct HarnessMotion: View {
         case "motion-approach": d.pinnedArrival = "p1"
         default: break
         }
-        if d.model.rows.isEmpty { d.strands = [] }
+        if d.model.rows.isEmpty { d.inFlight = .empty }
         return d
     }
 

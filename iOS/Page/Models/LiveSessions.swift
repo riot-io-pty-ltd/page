@@ -112,6 +112,10 @@ struct LiveSession: Identifiable, Hashable {
     /// The AskUserQuestion this session is blocked on, when the Mac sent it
     /// (a Mac that sends it also accepts `answer`).
     var ask: SessionAsk? = nil
+    /// What a working session is doing, for the In flight card. Every one is
+    /// an optional field of the Mac's list (docs/SESSIONS-PROTOCOL.md); an
+    /// older Mac sends none and the card shows what it has.
+    var flight: SessionFlight? = nil
 
     static let defaultBlocker = "Page can't type into this session."
 
@@ -133,6 +137,7 @@ extension LiveSession: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id, backend, title, cwd, state, host, canType, typeBlocker, canInterrupt
         case provider, lastActivityAt, interventionId, preview, ask
+        case busySince, startedAt, model, recentSteps, health, healthDetail, healthNote, workflows, workflowsRunning, resetsAt, stepSince
     }
 
     /// Lenient like `Intervention`: only `id` is required. A malformed
@@ -167,6 +172,13 @@ extension LiveSession: Decodable {
         interventionId = iv.isEmpty || iv.count > 200 ? nil : iv
         preview = String((c.lenientString(.preview) ?? "").prefix(300))
         ask = (try? c.decodeIfPresent(SessionAsk.self, forKey: .ask)) ?? nil
+        flight = SessionFlight.make(
+            busySince: LenientDate.decode(c, .busySince), startedAt: LenientDate.decode(c, .startedAt),
+            model: c.lenientString(.model), recentSteps: ((try? c.decodeIfPresent(LossyList<SessionFlight.Step>.self, forKey: .recentSteps)) ?? nil)?.elements.map(\.text) ?? [],
+            health: c.lenientString(.health), healthNote: c.lenientString(.healthDetail) ?? c.lenientString(.healthNote),
+            workflows: ((try? c.decodeIfPresent(LossyList<WorkflowBrief>.self, forKey: .workflows)) ?? nil)?.elements ?? [],
+            workflowsRunning: (try? c.decodeIfPresent(Int.self, forKey: .workflowsRunning)) ?? nil,
+            resetsAt: LenientDate.decode(c, .resetsAt), stepSince: LenientDate.decode(c, .stepSince))
     }
 }
 

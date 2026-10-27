@@ -70,9 +70,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// What Page has delivered (or failed to) from the panel, newest last.
     private var receipts: [DeliveryReceipt] = []
     /// Where each pending page's session runs, probed off main.
-    private struct RouteInfo { let label: String?; let blocker: String?; let at: Date }
+    private struct RouteInfo { let label: String?; let blocker: String?; let host: SessionHostInfo?; let at: Date }
     private var routes: [String: RouteInfo] = [:]
     private var probingRoutes = false
+    /// What each working session is doing now (its last tool step), read off main while the panel is up.
+    private var flightFacts: [String: InFlightFacts] = [:]
+    private var activityCheckedAt: Date = .distantPast
+    /// When the step and busy-since last came back from a probe; the classic menu
+    /// leaves them out when they are older than `activityFreshFor`.
+    private var activityReadAt: Date = .distantPast
+    private static let activityFreshFor: TimeInterval = 10
+    private var probingActivity = false
     /// Paused sessions whose transcript shows the summary Page asked for.
     private var summarised: Set<String> = []
     private var summaryCheckedAt: Date = .distantPast
@@ -359,8 +367,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         awayLedger?.observe(pending: pending)
         rebuildModel()
         refreshRoutes(snap)
+        refreshActivity(snap)
         refreshSummaryEvidence(snap)
-        updatePairingStatus()
     }
 
     /// Builds the model from the latest snapshot and what Page has delivered,
@@ -382,6 +390,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         inputs.day = dayLedger.stats
         inputs.summarised = summarised
         let routes = self.routes
+        inputs.hosts = routes.compactMapValues(\.host)
+        inputs.facts = flightFacts
         inputs.route = { routes[$0.sessionId]?.label }
         inputs.blocker = { routes[$0.sessionId]?.blocker }
         let model = NowModel.build(inputs)
@@ -420,6 +430,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             guard shown else { return }
             if let snap = self?.lastSnapshot {
                 self?.refreshRoutes(snap, force: true)
+                self?.refreshActivity(snap, force: true)
                 self?.refreshSummaryEvidence(snap, force: true)
             }
             self?.rebuildModel()
@@ -455,6 +466,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if hotKey == nil { Logger.shared.log("Option-Command-P is taken by another app — the panel opens from the menu bar only") }
 
         presenceTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in self?.pollPresence() }
+        // Keep polling while a Tower dialog is open (it runs the modal loop).
+        if let t = presenceTimer { RunLoop.main.add(t, forMode: .common) }
     }
 
     @objc private func statusItemClicked(_ sender: Any?) {
@@ -513,6 +526,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             approveIrreversible(rowId: id)
         case .openTerminal(let id):
             openTerminal(rowId: id)
+        case .openSession(let sessionId, let backend):
+            openSession(sessionId: sessionId, backend: backend)
+        case .typeInto(let target, let text):
+            typeInto(target, text: text)
         case .newSession:
             showDispatch()
         case .preferences:
@@ -614,14 +631,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             nowStore.notice = NowStore.Notice(text: "That page is gone · Review again", failed: true)
             return
         }
+        openSession(sessionId: target.sessionId, backend: target.backend)
+    }
+
+    /// "Open terminal" for a session: the exact pane, through the same
+    /// TerminalFocus path as O on a page. Types nothing.
+    private func openSession(sessionId: String, backend: AgentBackendID) {
         nowStore.notice = NowStore.Notice(text: "Finding the terminal…", failed: false)
         probeQueue.async { [weak self] in
             guard let self else { return }
-            let outcome = self.coordinator.focusTerminal(sessionId: target.sessionId, backend: target.backend)
+            let outcome = self.coordinator.focusTerminal(sessionId: sessionId, backend: backend)
             DispatchQueue.main.async {
                 self.nowStore.notice = NowStore.Notice(text: outcome.detail, failed: !outcome.ok)
                 if outcome.ok { self.nowPanel.close(restoreFocus: false) }
             }
+        }
+    }
+
+    /// "Type…" for a working session: the message goes through the local
+    /// session input path (the phone's `input` command), and the result
+    /// becomes the receipt in the row.
+    private func typeInto(_ target: InFlightTarget, text: String) {
+        coordinator.typeIntoSession(target, text: text) { [weak self] result in
+            DispatchQueue.main.async { self?.nowStore.finishTyping(sessionId: target.sessionId, result: result) }
         }
     }
 
@@ -690,12 +722,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         // Only while the panel is up: nothing here is needed otherwise.
         guard force || nowPanel.isShown else { return }
         let now = Date()
-        let wanted = Set(snap.pendingInterventions.map(\.sessionId))
+        // Pages' sessions, and the working ones the In-flight rows open and type into.
+        let working = snap.sessions.filter { $0.state == .active }
+        let wanted = Set(snap.pendingInterventions.map(\.sessionId)).union(working.map(\.sessionId))
         routes = routes.filter { wanted.contains($0.key) }
         let stale = wanted.filter { id in force || routes[id].map { now.timeIntervalSince($0.at) > 30 } ?? true }
         guard !stale.isEmpty, !probingRoutes else { return }
         let sessions = snap.sessions.filter { stale.contains($0.sessionId) }
-        let projects = Dictionary(snap.pendingInterventions.map { ($0.sessionId, $0.projectName) }, uniquingKeysWith: { a, _ in a })
+        let projects = Dictionary(snap.pendingInterventions.map { ($0.sessionId, $0.projectName) }
+                                  + working.map { ($0.sessionId, NowModel.projectName(of: $0)) }, uniquingKeysWith: { a, _ in a })
         guard !sessions.isEmpty else { return }
         probingRoutes = true
         probeQueue.async { [weak self] in
@@ -707,13 +742,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 for s in sessions {
                     // Unknown stays unknown for a while (no probe on every tick).
                     guard let info = hosts[s.sessionId] else {
-                        self.routes[s.sessionId] = RouteInfo(label: nil, blocker: nil, at: at)
+                        self.routes[s.sessionId] = RouteInfo(label: nil, blocker: nil, host: nil, at: at)
                         continue
                     }
                     self.routes[s.sessionId] = RouteInfo(
                         label: info.canType ? TerminalFocus.routeLabel(host: info.host, project: projects[s.sessionId] ?? "") : nil,
-                        blocker: info.canType ? nil : info.typeBlocker, at: at)
+                        blocker: info.canType ? nil : info.typeBlocker, host: info, at: at)
                 }
+                self.rebuildModel()
+            }
+        }
+    }
+
+    /// What each working session is doing now, read from its transcript tail
+    /// (the same preview the phone's session list shows) every few seconds
+    /// while the panel is up. Files are read off main.
+    private func refreshActivity(_ snap: Coordinator.Snapshot, force: Bool = false) {
+        guard force || nowPanel.isShown else { return }
+        let working = snap.sessions.filter { $0.state == .active }
+        guard !working.isEmpty else {
+            if !flightFacts.isEmpty { flightFacts = [:] }
+            return
+        }
+        let now = Date()
+        guard !probingActivity, force || now.timeIntervalSince(activityCheckedAt) > 3 else { return }
+        activityCheckedAt = now
+        probingActivity = true
+        probeQueue.async { [weak self] in
+            let facts = self?.coordinator.inFlightFacts(for: working) ?? [:]
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.probingActivity = false
+                self.activityReadAt = Date()
+                guard facts != self.flightFacts else { return }
+                self.flightFacts = facts
                 self.rebuildModel()
             }
         }
@@ -797,6 +859,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 }
                 if n > 5 { addInfo(menu, "   … and \(n - 5) more") }
             }
+            // Working sessions: one submenu each, with the two things the panel's rows do.
+            // The step and elapsed time are read only while the panel is up: older than a
+            // few seconds they are left out, never shown from an earlier turn.
+            let fresh = nowPanel.isShown || Date().timeIntervalSince(activityReadAt) < Self.activityFreshFor
+            let flight = InFlightMenu.entries(nowStore.model.flight, fresh: fresh)
+            if !flight.isEmpty {
+                addInfo(menu, "\(InFlightMenu.sectionTitle) · \(flight.count):")
+                for entry in flight { menu.addItem(inFlightMenuItem(entry)) }
+            }
             menu.addItem(.separator())
 
             switch s.relayState {
@@ -862,6 +933,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         addAction(menu, "Reload Config", #selector(reloadConfig), key: "r")
         menu.addItem(.separator())
         addAction(menu, "Quit Page", #selector(quit), key: "q")
+    }
+
+    /// "   page — cmux › page · 4m" with "Open terminal" and "Type…" under it.
+    private func inFlightMenuItem(_ e: InFlightMenuEntry) -> NSMenuItem {
+        let item = NSMenuItem(title: "   \(e.title)", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.autoenablesItems = false
+        let doing = NSMenuItem(title: e.doing, action: nil, keyEquivalent: "")
+        doing.isEnabled = false
+        sub.addItem(doing)
+        sub.addItem(.separator())
+        let open = NSMenuItem(title: InFlightMenu.openTitle, action: #selector(openInFlightFromMenu(_:)), keyEquivalent: "")
+        open.target = self
+        open.representedObject = e.sessionId
+        open.isEnabled = e.openEnabled
+        open.toolTip = e.openNote ?? "Shows its terminal pane. Types nothing."
+        sub.addItem(open)
+        let type = NSMenuItem(title: InFlightMenu.typeTitle, action: #selector(typeInFlightFromMenu(_:)), keyEquivalent: "")
+        type.target = self
+        type.representedObject = e.sessionId
+        type.isEnabled = e.typeEnabled
+        type.toolTip = e.typeNote ?? "Opens the panel with a message box for this session."
+        sub.addItem(type)
+        item.submenu = sub
+        return item
+    }
+
+    /// Open terminal, from the classic menu: the same TerminalFocus path as the panel's button.
+    @objc private func openInFlightFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let row = nowStore.model.flight.first(where: { $0.sessionId == id }), let backend = row.backend else { return }
+        probeQueue.async { [weak self] in
+            guard let self else { return }
+            let outcome = self.coordinator.focusTerminal(sessionId: id, backend: backend)
+            DispatchQueue.main.async {
+                if !outcome.ok { self.postSimpleNotification(title: "Couldn't open the terminal", body: outcome.detail) }
+            }
+        }
+    }
+
+    /// Type…, from the classic menu: the panel opens with that row's composer
+    /// open. Typing itself still goes through the panel's composer and Return.
+    @objc private func typeInFlightFromMenu(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        // After the menu has closed (it closes the panel as it goes).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            if !self.nowPanel.isShown { self.nowPanel.show() }
+            self.nowStore.requestComposer(forSessionId: id)
+        }
     }
 
     /// What Page is doing about sleep right now, in the user's terms.
@@ -963,12 +1084,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         coordinator.resumePausedSessionsNow()
     }
 
+    /// The cmux setup now lives on the Tower's Terminals page.
     @objc private func openCmuxSetup() {
-        CmuxSetupWindowController.shared.show()
+        showTower(section: .terminals)
+        prefsController?.store.openCmuxSetup()
     }
 
+    /// Phone approvals (the hook installer) is a Tower page.
     @objc private func openHookInstaller() {
-        HookInstallerWindowController.shared.show()
+        showTower(section: .phoneApprovals)
     }
 
     /// What Page sees of Ollama / LM Studio / llama.cpp / MLX and terminal
@@ -990,16 +1114,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             if !coordinator.setLidClosedOnBattery(false) { lidSettingFailed() }
             return
         }
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Keep agents running with the lid closed on battery?"
-        alert.informativeText = "While an agent is mid-turn, Page will stop the Mac sleeping when you close the lid on battery. "
-            + "At your low-battery level it asks the agents to pause, then lets the Mac sleep. "
-            + "A closed MacBook in a bag will stay awake and warm while agents work."
-            + (coordinator.sleepGuardHelperMissing ? "\n\nmacOS will ask for your password once to allow this." : "")
-        alert.addButton(withTitle: "Turn On")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let confirm = NWDialogSpec.confirm(
+            "Keep agents running with the lid closed on battery?",
+            "While an agent is mid-turn, Page will stop the Mac sleeping when you close the lid on battery. "
+                + "At your low-battery level it asks the agents to pause, then lets the Mac sleep. "
+                + "A closed MacBook in a bag will stay awake and warm while agents work."
+                + (coordinator.sleepGuardHelperMissing ? "\n\nmacOS will ask for your password once to allow this." : ""),
+            ok: "Turn On", tone: .warning)
+        guard NWDialog.run(confirm, over: prefsController?.window) == 0 else { return }
 
         installingPowerHelper = true
         coordinator.checkPowerHelper(refresh: true) { [weak self] status in
@@ -1031,12 +1153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func showSimpleAlert(_ title: String, _ text: String) {
-        NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.alertStyle = .warning
-        alert.runModal()
+        NWDialog.run(.notice(title, text), over: prefsController?.window)
     }
 
     @objc private func openResumeLog(_ sender: NSMenuItem) {
@@ -1051,7 +1168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     /// The relay and phone settings: where "Phone relay: off — set up…" and
-    /// the pairing window's "Open Preferences…" land.
+    /// the Pairing page's "Go to Macs & phones" land.
     @objc private func openPreferencesPhone() {
         showTower(section: .macsPhones)
     }
@@ -1060,234 +1177,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if prefsController == nil {
             prefsController = PreferencesWindowController(
                 coordinator: coordinator, macName: macName,
-                pairPhone: { [weak self] in self?.showPairingQR() },
                 copyDiagnostics: { [weak self] in self?.copyLocalModelDiagnostics() })
         }
         prefsController?.store.update(snapshot: lastSnapshot, model: nowStore.model)
         prefsController?.showAndFocus(section: section)
     }
 
-    private var pairingWindow: NSWindow?
-    private var pairingPayloadCached: String = ""
-    private weak var pairingHealthLabel: NSTextField?
-    private weak var pairingMacLabel: NSTextField?
-    private var healthProbeGeneration = 0
-
+    /// The QR, the relay check and the token now live on the Tower's Pairing
+    /// page: Pair phone… opens it.
     @objc private func showPairingQR() {
-        if pairingWindow == nil {
-            let w = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 440, height: 600),
-                styleMask: [.titled, .closable],
-                backing: .buffered, defer: false
-            )
-            w.title = "Pair your iPhone"
-            w.isReleasedWhenClosed = false
-            pairingWindow = w
-        }
-        guard let window = pairingWindow else { return }
-
-        let cfg = coordinator.config
-        let stack: NSStackView
-        if cfg.relayIsUsable, let base = cfg.relayBaseURL {
-            stack = pairingContent(base: base)
-        } else {
-            // A QR pointing at a disabled relay or the placeholder URL pairs
-            // "successfully" and then nothing ever arrives on the phone.
-            pairingPayloadCached = ""
-            stack = setupNeededContent(cfg)
-        }
-
-        let content = NSView()
-        content.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: content.topAnchor),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor)
-        ])
-        window.contentView = content
-        window.setContentSize(NSSize(width: 440, height: max(260, stack.fittingSize.height)))
-        NSApp.activate(ignoringOtherApps: true)
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    private func makeStack() -> NSStackView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        return stack
-    }
-
-    private func wrappingLabel(_ text: String, size: CGFloat = 12, color: NSColor = .secondaryLabelColor) -> NSTextField {
-        let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: size)
-        label.alignment = .center
-        label.textColor = color
-        label.preferredMaxLayoutWidth = 380
-        return label
-    }
-
-    private func setupNeededContent(_ cfg: Config) -> NSStackView {
-        let stack = makeStack()
-        let icon = NSImageView(image: NSImage(systemSymbolName: "antenna.radiowaves.left.and.right.slash",
-                                              accessibilityDescription: nil) ?? NSImage())
-        icon.symbolConfiguration = .init(pointSize: 40, weight: .regular)
-        let title = NSTextField(labelWithString: "Set up your relay first")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-
-        let reason: String
-        if !cfg.relayEnabled {
-            reason = "Phone paging is turned off. In Preferences → Macs & phones, turn on “Send pages to my phone” and enter your relay’s URL."
-        } else {
-            reason = (cfg.relayURLProblem?.message ?? "The relay URL isn’t valid.")
-                + " Enter your Worker’s URL in Preferences → Macs & phones."
-        }
-        let detail = wrappingLabel(reason, size: 12, color: .labelColor)
-        let hint = wrappingLabel("The relay is a small Cloudflare Worker you deploy once (see Cloudflare/README.md in the Page repository). Pairing needs it so your phone and this Mac can reach each other.")
-
-        let prefsBtn = NSButton(title: "Open Preferences…", target: self, action: #selector(openPreferencesFromPairing))
-        prefsBtn.bezelStyle = .rounded
-        prefsBtn.keyEquivalent = "\r"
-
-        [icon, title, detail, hint, prefsBtn].forEach { stack.addArrangedSubview($0) }
-        return stack
-    }
-
-    private func pairingContent(base: URL) -> NSStackView {
-        let stack = makeStack()
-        let payload = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base,
-                                                             sessionKey: PairingTokenManager.currentSessionKey())
-        pairingPayloadCached = payload
-
-        if let qr = QRCode.image(from: payload, size: CGSize(width: 300, height: 300)) {
-            let qrView = NSImageView(image: qr)
-            qrView.imageScaling = NSImageScaling.scaleProportionallyUpOrDown
-            qrView.translatesAutoresizingMaskIntoConstraints = false
-            qrView.widthAnchor.constraint(equalToConstant: 300).isActive = true
-            qrView.heightAnchor.constraint(equalToConstant: 300).isActive = true
-            stack.addArrangedSubview(qrView)
-        }
-
-        let title = NSTextField(labelWithString: "Scan this QR with Page on your iPhone")
-        title.font = .systemFont(ofSize: 14, weight: .semibold)
-        title.alignment = .center
-        stack.addArrangedSubview(title)
-
-        let relayLabel = wrappingLabel("Relay: \(base.host ?? base.absoluteString)")
-        stack.addArrangedSubview(relayLabel)
-
-        let health = wrappingLabel("Checking the relay…")
-        stack.addArrangedSubview(health)
-        pairingHealthLabel = health
-
-        let mac = wrappingLabel("")
-        stack.addArrangedSubview(mac)
-        pairingMacLabel = mac
-        updatePairingStatus()
-
-        let simHint = wrappingLabel("Simulator can’t use a camera — use Copy pairing JSON and paste it into the app’s manual-pair screen.", size: 11)
-        stack.addArrangedSubview(simHint)
-
-        let copyBtn = NSButton(title: "Copy pairing JSON", target: self, action: #selector(copyPairingJSON))
-        copyBtn.bezelStyle = .rounded
-        copyBtn.keyEquivalent = "c"
-        copyBtn.keyEquivalentModifierMask = [.command]
-
-        let regenBtn = NSButton(title: "Regenerate token…", target: self, action: #selector(regenerateToken))
-        regenBtn.bezelStyle = .rounded
-
-        let buttonRow = NSStackView(views: [copyBtn, regenBtn])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 12
-        stack.addArrangedSubview(buttonRow)
-
-        probeRelayHealth(base: base)
-        return stack
-    }
-
-    /// GET <relay>/health — proves the URL points at a live Page relay
-    /// before the user scans (the endpoint needs no token).
-    private func probeRelayHealth(base: URL) {
-        healthProbeGeneration += 1
-        let generation = healthProbeGeneration
-        var request = URLRequest(url: base.appendingPathComponent("health"), timeoutInterval: 8)
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            let text: String
-            let ok: Bool
-            if let error {
-                text = "✗ Can’t reach the relay: \(error.localizedDescription)"
-                ok = false
-            } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                let json = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
-                if json?["ok"] as? Bool == true {
-                    text = "✓ Relay is reachable"
-                    ok = true
-                } else {
-                    text = "⚠ Reached \(base.host ?? "the server"), but it doesn’t look like a Page relay"
-                    ok = false
-                }
-            } else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-                text = "✗ The relay answered HTTP \(code)"
-                ok = false
-            }
-            DispatchQueue.main.async {
-                guard let self, generation == self.healthProbeGeneration else { return }
-                self.pairingHealthLabel?.stringValue = text
-                self.pairingHealthLabel?.textColor = ok ? .systemGreen : .systemRed
-            }
-        }.resume()
-    }
-
-    private func updatePairingStatus() {
-        guard let label = pairingMacLabel else { return }
-        switch lastSnapshot?.relayState {
-        case .connected?: label.stringValue = "This Mac is connected to the relay."
-        case .connecting?: label.stringValue = "This Mac is connecting to the relay…"
-        case .off?, .misconfigured?: label.stringValue = "This Mac isn’t using the relay."
-        case nil: label.stringValue = ""
-        }
-    }
-
-    @objc private func openPreferencesFromPairing() {
-        pairingWindow?.close()
-        openPreferencesPhone()
-    }
-
-    @objc private func copyPairingJSON() {
-        guard !pairingPayloadCached.isEmpty else { return }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(pairingPayloadCached, forType: .string)
-        // The payload carries the relay token. These markers (nspasteboard.org
-        // convention) ask clipboard managers not to record or sync it.
-        pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
-        pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-    }
-
-    @objc private func regenerateToken() {
-        let alert = NSAlert()
-        alert.messageText = "Regenerate the pairing token?"
-        alert.informativeText = "Phones paired with the current token stop receiving pages until they scan the new QR code. Page asks the relay to retire the old token, so (on an up-to-date relay) those phones are told to re-pair. This Mac reconnects with the new token right away."
-        alert.addButton(withTitle: "Regenerate")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        let proceed: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            // Posts tokenDidChange; the Coordinator reconnects the relay.
-            PairingTokenManager.regenerate()
-            self?.showPairingQR()
-        }
-        if let window = pairingWindow, window.isVisible {
-            alert.beginSheetModal(for: window, completionHandler: proceed)
-        } else {
-            proceed(alert.runModal())
-        }
+        showTower(section: .pairing)
+        prefsController?.store.openPairingRevealed()
     }
 
     @objc private func openConfig() {

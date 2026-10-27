@@ -789,7 +789,7 @@ final class InterventionDetector {
             id: Self.interventionId(sessionId: session.sessionId, kind: p.kind, stateStart: start),
             sessionId: session.sessionId,
             cwd: cwd,
-            projectName: cwd.isEmpty ? "Claude" : Self.projectName(forCwd: cwd),
+            projectName: cwd.isEmpty ? (session.name ?? "Claude") : Self.projectName(forCwd: cwd, fallback: session.name),
             kind: p.kind,
             openedAt: start,
             // Parts were redacted before clipping; this pass covers anything
@@ -831,7 +831,23 @@ final class InterventionDetector {
     /// If nothing matches and the cwd's basename looks like a generic
     /// subdirectory (`iOS`, `src`, ...), backs up one level. Otherwise
     /// returns the basename as-is. Cached per cwd (it stats up to ~400 paths).
-    static func projectName(forCwd cwd: String) -> String {
+    static func projectName(forCwd cwd: String, fallback: String? = nil, home: String = NSHomeDirectory()) -> String {
+        // The home folder is "~", and the root folder has no name of its own: neither
+        // may come back as a bare "/" (or the user name), whatever the walk would say.
+        let trimmed = cwd.count > 1 && cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        if !home.isEmpty, home != "/", trimmed == home { return "~" }
+        let usableFallback = fallback.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.flatMap { $0.isEmpty || $0 == "/" ? nil : $0 }
+        if trimmed.isEmpty || trimmed == "/" { return usableFallback ?? "root" }
+        let walked = walkedProjectName(forCwd: trimmed)
+        if walked.isEmpty || walked == "/" {
+            // A generic folder straight under the root ("/src"): its own name beats "/".
+            let base = (trimmed as NSString).lastPathComponent
+            return usableFallback ?? (base.isEmpty || base == "/" ? "root" : base)
+        }
+        return walked
+    }
+
+    private static func walkedProjectName(forCwd cwd: String) -> String {
         projectNameLock.lock()
         if let cached = projectNameCache[cwd] { projectNameLock.unlock(); return cached }
         projectNameLock.unlock()

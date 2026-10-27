@@ -333,9 +333,12 @@ enum CodexInjector {
         return cleaned
     }
 
-    static func projectName(forCwd cwd: String) -> String {
-        let name = (cwd as NSString).lastPathComponent
-        return name.isEmpty ? "Codex" : name
+    static func projectName(forCwd cwd: String, home: String = NSHomeDirectory()) -> String {
+        // The home folder is "~" and the root folder has no name: never a bare "/".
+        let trimmed = cwd.count > 1 && cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
+        if !home.isEmpty, home != "/", trimmed == home { return "~" }
+        let name = (trimmed as NSString).lastPathComponent
+        return name.isEmpty || name == "/" ? "Codex" : name
     }
 
     // MARK: Delivery

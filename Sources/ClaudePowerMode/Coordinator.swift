@@ -901,7 +901,9 @@ final class Coordinator {
         lastSnapshots = backends.map { $0.currentSnapshot }
         evaluatePower(p, cfg: cfg)
         let visible = lastSnapshots.filter { isEnabled($0.backendID) }
-        sessionRemote.update(sessions: visible.flatMap(\.sessions), pending: visible.flatMap(\.pendingInterventions))
+        sessionRemote.update(sessions: visible.flatMap(\.sessions), pending: visible.flatMap(\.pendingInterventions),
+                             rateLimited: Dictionary(visible.compactMap(\.currentRateLimit).map { ($0.sessionId, $0.resetTime) },
+                                                     uniquingKeysWith: { a, b in max(a, b) }))
 
         hasTicked = true
         maybeSync()
@@ -1592,6 +1594,25 @@ final class Coordinator {
             SessionCommand(op: "interruptAll", clientId: "mac-\(UUID().uuidString)",
                            ts: Date().timeIntervalSince1970 * 1000, viewer: nil, sessionId: nil, text: nil),
             completion: completion)
+    }
+
+    /// Types a message into a working session from the panel's In-flight
+    /// row, through the phone's `input` command (the same session check, the
+    /// same input gate, the same delivery: a plain message that a busy turn
+    /// reads after its current step). Never a reply to a page, never Esc.
+    func typeIntoSession(_ target: InFlightTarget, text: String, completion: @escaping (SessionCommandResult) -> Void) {
+        sessionRemote.performLocal(target.command(text: text, ts: Date().timeIntervalSince1970 * 1000), completion: completion)
+    }
+
+    /// What each working session's card shows: its last steps and model (the
+    /// transcript tail), when its turn and the session began (the sessions
+    /// file), and the workflows running in it. Reads files: probe queue only,
+    /// one caller at a time (the probe keeps its caches unlocked).
+    private let flightProbe = FlightProbe()
+
+    func inFlightFacts(for sessions: [AgentSession]) -> [String: InFlightFacts] {
+        flightProbe.facts(for: sessions, live: claudeBackend.remoteLiveSessions,
+                          transcriptFile: { [liveBackends] in liveBackends.transcriptFile(for: $0) })
     }
 
     /// Starts a new Claude session from the Mac's Dispatch panel, through

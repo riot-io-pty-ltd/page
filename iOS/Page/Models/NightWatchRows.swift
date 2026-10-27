@@ -249,7 +249,10 @@ enum NowRowBuilder {
         let section = section(of: iv)
         let backend = iv.backend ?? .claude
         let host = session?.host ?? (iv.source.flatMap { $0 == .unknown ? nil : $0.label })
-        let route = DeliveryPreview.route(host: host, project: session?.title ?? iv.projectName)
+        // A page from "/" has no folder to name it: the session's own name stands in, never a bare slash.
+        let projectName = ProjectLabel.isBare(iv.cwd) || iv.projectName == "Unknown project"
+            ? ProjectLabel.name(cwd: iv.cwd, fallback: session?.title ?? "") : iv.projectName
+        let route = DeliveryPreview.route(host: host, project: session?.title ?? projectName)
         let blocker: String? = (session.map { !$0.canType } ?? false) ? session?.blockerText : nil
         let hook = iv.isBlockingHook
         // An agent Page has no adapter for (the relay named a backend that
@@ -343,7 +346,7 @@ enum NowRowBuilder {
         }
 
         return NowRow(
-            id: iv.id, sessionId: iv.sessionId, projectName: iv.projectName, agentName: iv.agentName,
+            id: iv.id, sessionId: iv.sessionId, projectName: projectName, agentName: iv.agentName,
             section: section, chip: chip, headline: headline(for: iv), summary: summaryLine(for: iv),
             actions: actions, commit: commit, waitingSince: iv.openedAt,
             reversibility: iv.kind == .approval ? (verdict?.level ?? .considered) : nil,

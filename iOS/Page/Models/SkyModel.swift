@@ -188,10 +188,10 @@ struct SkyModel: Equatable {
     }
 
     /// The project's name: the folder's last component.
+    /// A cwd of "/" or the home folder is never shown as a bare slash: it is
+    /// the session's name, or "~" (`ProjectLabel`).
     static func projectName(cwd: String, fallback: String) -> String {
-        let trimmed = cwd.hasSuffix("/") ? String(cwd.dropLast()) : cwd
-        if let last = trimmed.split(separator: "/").last, last != "~" { return String(last) }
-        return fallback
+        ProjectLabel.name(cwd: cwd, fallback: fallback)
     }
 
     /// The fleet as constellations. `interventions` are the open pages

@@ -205,65 +205,6 @@ extension NightWatch.AuroraPalette {
     }
 }
 
-/// "IN FLIGHT 5 ›": one strand per working session, in a horizontal ribbon.
-/// Tapping a strand opens that session; the header goes to Sky.
-struct NWInFlightRibbon: View {
-    var strands: [InFlightStrand]
-    var onStrand: (String) -> Void = { _ in }
-    var onHeader: () -> Void = {}
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button(action: onHeader) {
-                HStack(spacing: 8) {
-                    Text("IN FLIGHT").font(NightWatch.Typo.labelLarge).kerning(1.2).foregroundColor(NightWatch.Palette.teal.color)
-                    Text("\(strands.count)").font(NightWatch.Typo.labelLarge).foregroundColor(NightWatch.Palette.textTertiary.color)
-                    Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
-                    Image(systemName: "chevron.right").font(.system(.caption2, weight: .bold)).foregroundColor(NightWatch.Palette.textTertiary.color)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityHint(Text("Goes to Sky"))
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(strands) { s in
-                        Button { onStrand(s.id) } label: { strand(s) }.buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .padding(.horizontal, -16)
-        }
-    }
-
-    private func strand(_ s: InFlightStrand) -> some View {
-        HStack(spacing: 10) {
-            ZStack {
-                NWStarGlyph(seed: s.seed, color: s.hue.color, size: 30)
-                if let w = s.workflow, w.total > 0 {
-                    NWRing(progress: Double(w.done) / Double(w.total), color: NightWatch.Palette.teal, lineWidth: 2, size: 34)
-                }
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(s.project).font(NightWatch.Typo.monoSmall).foregroundColor(NightWatch.Palette.textPrimary.color).lineLimit(1)
-                Text(s.lastAction).font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.textTertiary.color).lineLimit(1)
-                HStack(spacing: 6) {
-                    if let w = s.workflow { Text("\(w.done) of \(w.total)").font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.teal.color) }
-                    if let a = s.age { Text(a).font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.textQuiet.color) }
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .frame(width: 190, height: 72, alignment: .leading)
-        .background(NWGlassBackground(radius: NightWatch.Radius.row, fill: NightWatch.Palette.surface.opacity(0.85)))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("\(s.project), \(s.lastAction)"))
-    }
-}
-
 /// "New ↑ 1": arrivals held back while you are touching or scrolling the stream.
 struct NWNewPill: View {
     var count: Int

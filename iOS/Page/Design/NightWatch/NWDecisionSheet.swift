@@ -31,6 +31,8 @@ struct DecisionScreenState {
     /// When an Irreversible approve passed biometrics here (it outlives the
     /// pending action, so the burst is not cut short by a quick relay).
     var holdCommittedAt: Date? = nil
+    /// The first-time tip for the delivery preview ("Will type … shows exactly what lands on your Mac"), while it is unseen.
+    var tip: NWTip? = nil
 }
 
 struct DecisionScreenActions {
@@ -48,6 +50,10 @@ struct DecisionScreenActions {
     var copy: () -> Void = {}
     var close: () -> Void = {}
     var retry: () -> Void = {}
+    /// The first-time tip was dismissed.
+    var dismissTip: (NWTip) -> Void = { _ in }
+    /// The first-time tip is on screen (it is retired when the sheet closes).
+    var tipShown: (NWTip) -> Void = { _ in }
 }
 
 /// The sheet's own surface: near-black, tinted by the card's class, with the
@@ -117,7 +123,7 @@ struct NWDecisionScreen: View {
             .scrollDismissesKeyboard(.interactively)
             VStack(spacing: 10) {
                 if pinsAsk { pinnedAsk }
-                if let p = previewText { NWDeliveryPreview(text: p) }
+                if let p = previewText { previewTip; NWDeliveryPreview(text: p) }
                 statusBlock
             }
             .padding(.horizontal, NightWatch.Space.xl)
@@ -137,7 +143,7 @@ struct NWDecisionScreen: View {
                 header
                 askBlock
                 if let n = c.screenNote { screenNoteView(n) }
-                if let p = previewText { NWDeliveryPreview(text: p) }
+                if let p = previewText { previewTip; NWDeliveryPreview(text: p) }
                 statusBlock
                 controls
                 reasonBlock
@@ -305,6 +311,16 @@ struct NWDecisionScreen: View {
                     .accessibilityElement(children: .combine)
                 }
             }
+        }
+    }
+
+    /// The tip that points down at the delivery preview, once.
+    @ViewBuilder private var previewTip: some View {
+        if let tip = state.tip {
+            NWTipCallout(text: tip.text(biometry: state.biometry), symbol: tip.symbol, pointer: .down,
+                         onDismiss: { actions.dismissTip(tip) })
+                .transition(.opacity)
+                .onAppear { actions.tipShown(tip) }
         }
     }
 

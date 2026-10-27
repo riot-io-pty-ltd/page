@@ -182,10 +182,10 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let coordinator: Coordinator
     let store: TowerStore
 
-    /// `pairPhone` and `copyDiagnostics` live in AppDelegate (the pairing
-    /// window and a notification); the cmux and hook windows are singletons.
+    /// `copyDiagnostics` lives in AppDelegate (a notification). Pairing, the
+    /// cmux setup and the hook installer are pages of this window.
     init(coordinator: Coordinator, macName: String = "this Mac",
-         pairPhone: @escaping () -> Void = {}, copyDiagnostics: @escaping () -> Void = {}) {
+         copyDiagnostics: @escaping () -> Void = {}) {
         self.coordinator = coordinator
         self.store = TowerStore(config: coordinator.config, macName: macName)
         let window = NSWindow(
@@ -205,12 +205,12 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         window.contentView = NSHostingView(rootView: NWTowerView(store: store))
-        store.env = makeEnvironment(pairPhone: pairPhone, copyDiagnostics: copyDiagnostics)
+        store.env = makeEnvironment(copyDiagnostics: copyDiagnostics)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    private func makeEnvironment(pairPhone: @escaping () -> Void, copyDiagnostics: @escaping () -> Void) -> TowerEnvironment {
+    private func makeEnvironment(copyDiagnostics: @escaping () -> Void) -> TowerEnvironment {
         var env = TowerEnvironment()
         let coordinator = self.coordinator
         env.loadConfig = { Config.loadResult() }
@@ -225,22 +225,17 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         env.setUsageCapture = { on in try UsageCapture().set(on)?.lastPathComponent }
         env.localModelLines = { LocalActivity.menuLines(coordinator.localActivities) }
         env.probeRelay = { base, done in Self.probeRelay(base, done) }
-        env.showAlert = { [weak self] title, text in self?.showAlert(title, text) }
-        env.confirmReplaceBrokenConfig = { info in
-            let alert = NSAlert()
-            alert.messageText = "config.json couldn’t be read"
-            alert.informativeText = info
-            alert.addButton(withTitle: "Replace config.json")
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .warning
-            return alert.runModal() == .alertFirstButtonReturn
+        env.runDialog = { [weak self] spec in self?.runDialog(spec) ?? spec.cancelIndex }
+        env.showAlert = { [weak self] title, text in _ = self?.runDialog(.notice(title, text)) }
+        env.confirmReplaceBrokenConfig = { [weak self] info in
+            self?.runDialog(.confirm("config.json couldn’t be read", info, ok: "Replace config.json", tone: .warning, destructive: true)) == 0
         }
         env.close = { [weak self] in self?.window?.close() }
         env.beep = { NSSound.beep() }
         env.log = { Logger.shared.log($0) }
-        env.pairPhone = pairPhone
-        env.setUpCmux = { CmuxSetupWindowController.shared.show() }
-        env.installHooks = { HookInstallerWindowController.shared.show() }
+        env.hookSource = { [weak self] in self?.hookSource }
+        env.cmuxSecrets = KeychainSecretStore.cmuxSocketPassword
+        env.pairing = Self.makePairingBackend(coordinator)
         env.copyLocalDiagnostics = copyDiagnostics
         env.openConfigFile = { NSWorkspace.shared.open(Config.configURL) }
         env.openLog = { NSWorkspace.shared.open(Logger.logURL) }
@@ -262,15 +257,8 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
                 DispatchQueue.main.async { done(access) }
             }
         }
-        env.confirm = { title, text, okTitle in
-            let alert = NSAlert()
-            alert.messageText = title
-            alert.informativeText = text
-            alert.addButton(withTitle: okTitle)
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .informational
-            NSApp.activate(ignoringOtherApps: true)
-            return alert.runModal() == .alertFirstButtonReturn
+        env.confirm = { [weak self] title, text, okTitle in
+            self?.runDialog(.confirm(title, text, ok: okTitle, tone: .info)) == 0
         }
         env.openURL = { NSWorkspace.shared.open($0) }
         env.windowVisible = { [weak self] in self?.window?.isVisible == true }
@@ -302,13 +290,57 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         }.resume()
     }
 
-    private func showAlert(_ title: String, _ text: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.alertStyle = .warning
-        if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+    /// A Night Watch dialog, centred over the Tower.
+    private func runDialog(_ spec: NWDialogSpec) -> Int {
+        NWDialog.run(spec, over: window)
     }
+
+    /// The hook installer, made the first time the Phone approvals page asks
+    /// (this is where `locateScript` runs).
+    private lazy var hookSource: TowerHookSource = {
+        let located = HookInstaller.locateScript()
+        return TowerHookSource(
+            installer: HookInstaller(homeDirectory: FileManager.default.homeDirectoryForCurrentUser, scriptPath: located ?? ""),
+            scriptPath: located)
+    }()
+
+    /// What the pairing page reads: the running config, the pairing payload,
+    /// the relay's /health, the pasteboard and the token.
+    private static func makePairingBackend(_ coordinator: Coordinator) -> TowerPairingBackend {
+        var backend = TowerPairingBackend()
+        backend.info = {
+            let cfg = coordinator.config
+            if cfg.relayIsUsable, let base = cfg.relayBaseURL {
+                let payload = PairingTokenManager.pairingPayloadJSON(relayBaseURL: base,
+                                                                     sessionKey: PairingTokenManager.currentSessionKey())
+                return .ready(base: base, payload: payload)
+            }
+            return .setupNeeded(reason: TowerPairingModel.setupReason(relayEnabled: cfg.relayEnabled,
+                                                                      urlProblem: cfg.relayURLProblem?.message))
+        }
+        backend.probeHealth = { base, done in
+            var request = URLRequest(url: base.appendingPathComponent("health"), timeoutInterval: 8)
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            URLSession.shared.dataTask(with: request) { data, response, error in
+                let result = TowerPairingModel.healthText(base: base, data: data, response: response, error: error)
+                DispatchQueue.main.async { done(result.text, result.ok) }
+            }.resume()
+        }
+        backend.copy = { payload in
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(payload, forType: .string)
+            // The payload carries the relay token. These markers (nspasteboard.org
+            // convention) ask clipboard managers not to record or sync it.
+            pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+            pb.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        }
+        backend.regenerate = { PairingTokenManager.regenerate() }
+        return backend
+    }
+
+    // Hook files edited elsewhere (by hand, by Claude Code) show up on return.
+    func windowDidBecomeKey(_ notification: Notification) { store.windowBecameKey() }
 
     /// Reloads every control from disk, so Cancel always reverts and edits
     /// made to config.json by hand show up. `section` picks the page.

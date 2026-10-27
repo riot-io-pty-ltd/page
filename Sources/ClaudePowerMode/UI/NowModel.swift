@@ -149,6 +149,12 @@ struct DecideRow: Equatable, Identifiable {
 
     /// The line shown under the focused row.
     var focusPreview: String? { approvePreview ?? tellPreview ?? denyPreview }
+
+    /// What this row's button for `action` says: Esc on a question dismisses
+    /// the dialog, so it reads "Dismiss"; everywhere else the action's own name.
+    func buttonTitle(for action: KeyHint.Action) -> String {
+        action == .deny && chip == .question ? "Dismiss" : action.title
+    }
 }
 
 // MARK: - Runway
@@ -317,6 +323,18 @@ struct NowInputs {
     var blocker: (InterventionEvent) -> String? = { _ in nil }
     /// Paused sessions whose transcript shows the summary Page asked for.
     var summarised: Set<String> = []
+    /// Where each working session runs, by session id (probed off main while
+    /// the panel is up). A session with no entry is "checking".
+    var hosts: [String: SessionHostInfo] = [:]
+    /// What each working session is doing now, by session id: its last tool
+    /// step from the transcript tail ("Bash: swift test").
+    var activity: [String: String] = [:]
+    /// When each working Claude session's turn began (its session file's
+    /// busy-since). Absent where Page can't tell: no elapsed time is shown.
+    var busySince: [String: Date] = [:]
+    /// What each working session's card shows, by session id: its last steps,
+    /// model, session start, running workflows (the probe's read).
+    var facts: [String: InFlightFacts] = [:]
     var timeZone: TimeZone = .current
 }
 
@@ -368,6 +386,9 @@ struct NowModel: Equatable {
     var macName: String
     /// Sessions working now (the In-flight strip), longest-running first is unknown, so by name.
     var inFlight: [InFlightAgent] = []
+    /// The same sessions as clickable rows (project, route, what it is doing,
+    /// how long), longest-running first; busy local models included.
+    var flight: [InFlightRow] = []
     /// Sessions Stop all would press Esc in.
     var stoppableCount: Int = 0
     /// Spoken by VoiceOver on the status item.
@@ -473,15 +494,15 @@ struct NowModel: Equatable {
             rows: rows, runway: runway, receiptLine: receipt, receiptFailed: latestReceipt.map { $0.outcome != .delivered } ?? false,
             paused: pausedAgents, canResumeNow: !s.battery.paused.isEmpty,
             phoneLine: phoneLine, rings: i.day?.rings ?? [], glyph: glyph, macName: i.macName,
-            inFlight: inFlight(s), stoppableCount: s.sessions.filter { $0.state == .active }.count,
+            inFlight: inFlight(s), flight: InFlightRows.build(s, hosts: i.hosts, activity: i.activity, busySince: i.busySince, facts: i.facts, now: i.now),
+            stoppableCount: s.sessions.filter { $0.state == .active }.count,
             accessibilityLabel: "Page — \(headline)", configProblem: s.configProblem)
     }
 
     /// Pure. Working sessions by project name, one entry per session.
     static func inFlight(_ s: Coordinator.Snapshot) -> [InFlightAgent] {
         s.sessions.filter { $0.state == .active }.map { a in
-            let name = a.cwd.map { InterventionDetector.projectName(forCwd: $0) } ?? a.title ?? a.sessionId
-            return InFlightAgent(id: a.sessionId, project: name, backend: a.backend)
+            InFlightAgent(id: a.sessionId, project: projectName(of: a), backend: a.backend)
         }.sorted { ($0.project, $0.id) < ($1.project, $1.id) }
     }
 
@@ -691,16 +712,25 @@ struct NowModel: Equatable {
         }
 
         return DecideRow(
-            id: ev.id, sessionId: ev.sessionId, projectName: ev.projectName, backend: ev.backend,
+            id: ev.id, sessionId: ev.sessionId, projectName: displayProject(ev.projectName, cwd: ev.cwd), backend: ev.backend,
             section: section, chip: chip, summary: summaryLine(for: ev), keys: keys, moreKeys: more,
             returnAction: returnAction, approvePreview: approve, denyPreview: deny, tellPreview: tellPreview,
             waitingSince: ev.openedAt, reversibility: verdict?.level, tags: verdict?.tags ?? [],
             reason: verdict?.reason ?? "")
     }
 
+    /// Pure. The name a row goes by: the page's project, but never a bare "/"
+    /// (a session started in the root folder) or an empty name: the home folder
+    /// reads "~", the root folder "root".
+    static func displayProject(_ name: String, cwd: String) -> String {
+        let t = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.isEmpty || t == "/" else { return t }
+        return InterventionDetector.projectName(forCwd: cwd, fallback: nil)
+    }
+
     static func rateLimitRow(_ rl: RateLimitEvent, timeZone: TimeZone) -> DecideRow {
         DecideRow(
-            id: "ratelimit-\(rl.uniqueId)", sessionId: rl.sessionId, projectName: rl.projectName, backend: rl.backend,
+            id: "ratelimit-\(rl.uniqueId)", sessionId: rl.sessionId, projectName: displayProject(rl.projectName, cwd: rl.cwd), backend: rl.backend,
             section: .look, chip: .rateLimited,
             summary: "resets \(clock(rl.resetTime, timeZone: timeZone))",
             keys: [KeyHint(label: "O", action: .openTerminal)], moreKeys: [], returnAction: nil,

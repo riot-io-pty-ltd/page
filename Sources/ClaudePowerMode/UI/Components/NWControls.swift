@@ -40,18 +40,21 @@ struct NWChip: View {
 struct NWKeyCap: View {
     var label: String
     var emphasised = false
+    /// The small cap beside a button's name ("Open terminal  O").
+    var compact = false
 
     var body: some View {
         Group {
             if label == "↵" {
-                Image(systemName: "return").font(Font.system(size: 11, weight: .semibold))
+                Image(systemName: "return").font(Font.system(size: compact ? 9 : 11, weight: .semibold))
             } else {
-                Text(label).font(NightWatch.Typo.monoSmall)
+                // Compact caps use the proportional face: in a monospaced one "O" reads as a zero.
+                Text(label).font(compact ? Font.system(size: 10, weight: .semibold) : NightWatch.Typo.monoSmall)
             }
         }
             .foregroundColor(NightWatch.Palette.textPrimary.opacity(emphasised ? 1 : 0.78).color)
-            .padding(.horizontal, 8)
-            .frame(minWidth: 26, minHeight: 24)
+            .padding(.horizontal, compact ? 5 : 8)
+            .frame(minWidth: compact ? 17 : 26, minHeight: compact ? 16 : 24)
             .background(
                 RoundedRectangle(cornerRadius: NightWatch.Radius.keycap, style: .continuous)
                     .fill(Color.white.opacity(emphasised ? 0.14 : 0.09))
@@ -231,5 +234,54 @@ struct NWReceiptLine: View {
         .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
         .background((failed ? NightWatch.Palette.amber : NightWatch.Palette.teal).opacity(0.07).color)
         .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Labelled action
+
+/// What an action button looks like: its name in words, nothing else. A key
+/// is never drawn beside it (that was a guessing game); the key lives in the
+/// button's tooltip and the shortcuts sheet. `fills` stretches it across the
+/// space it is given (the In-flight card's Open and Steer).
+struct NWActionLabel: View {
+    var title: String
+    var enabled = true
+    var emphasised = false
+    var fills = false
+
+    var body: some View {
+        Text(title)
+            .font(Font.system(size: 12, weight: emphasised ? .semibold : .medium))
+            .foregroundColor(NightWatch.Palette.textPrimary.opacity(enabled ? (emphasised ? 1 : 0.92) : 0.5).color)
+            .lineLimit(1)
+            .padding(.horizontal, 13)
+            .frame(maxWidth: fills ? .infinity : nil, minHeight: 28)
+            .background(RoundedRectangle(cornerRadius: NightWatch.Radius.keycap + 1, style: .continuous)
+                .fill(Color.white.opacity(emphasised ? 0.14 : 0.08)))
+            .overlay(RoundedRectangle(cornerRadius: NightWatch.Radius.keycap + 1, style: .continuous)
+                .strokeBorder(Color.white.opacity(emphasised ? 0.18 : 0.10), lineWidth: 1))
+            .opacity(enabled ? 1 : 0.45)
+            .contentShape(RoundedRectangle(cornerRadius: NightWatch.Radius.keycap + 1, style: .continuous))
+    }
+}
+
+/// A button for one action: `NWActionLabel` with a tooltip (which carries the
+/// key) and a VoiceOver name.
+struct NWActionButton: View {
+    var title: String
+    var enabled = true
+    var emphasised = false
+    var fills = false
+    var help: String
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            NWActionLabel(title: title, enabled: enabled, emphasised: emphasised, fills: fills)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
+        .accessibilityLabel(Text(title))
     }
 }

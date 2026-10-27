@@ -15,12 +15,14 @@ enum RenderHarness {
     static let screens = [
         "now", "now-quiet", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
         "now-receipt", "now-banner", "now-new",
+        "now-inflight", "now-inflight-long", "now-tip-undoable", "now-tip-irreversible", "now-tip-inflight",
+        "now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-flight-quiet",
         "decision-irreversible", "decision-hold", "decision-considered", "decision-undoable", "decision-question", "decision-stuck",
         "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
-        "decision-failed",
+        "decision-failed", "decision-tip",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
         "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
-        "tower", "tower-budget", "tower-glow", "tower-terminals",
+        "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
@@ -28,7 +30,7 @@ enum RenderHarness {
         "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
         "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
         "widgets",
-    ] + RenderHarnessAnswers.screens + RenderHarnessMotion.screens
+    ] + RenderHarnessAnswers.screens + RenderHarnessMotion.screens + RenderHarnessHistory.screens
 
     /// The clock the fixtures pretend it is: Tue 27 Oct 2026, 01:12 UTC.
     static let now = Date(timeIntervalSince1970: 1_793_063_520)
@@ -167,8 +169,61 @@ enum RenderFixtures {
                   timeZone: RenderHarness.timeZone, calendar: RenderHarness.calendar)
     }
 
+    /// The sessions a Now screen shows. The In flight and tip screens are staged by hand: one waiting page and
+    /// two working sessions, a long list, or exactly the one thing a tip is about.
+    static func nowSessions(_ screen: String) -> [LiveSession] {
+        func pick(_ ids: [String], from all: [LiveSession]) -> [LiveSession] { ids.compactMap { id in all.first { $0.id == id } } }
+        switch screen {
+        case "now-flight", "now-flight-two", "now-flight-header", "now-flight-jump":
+            return pick(["sess-p1", "w1", "sess-p3"], from: sessionsWithFlight)
+        case "now-flight-old": return pick(["sess-p1", "w1", "sess-p3"], from: sessions)
+        case "now-flight-quiet": return pick(["w1", "sess-p3"], from: sessionsWithFlight)
+        case "now-inflight", "now-tip-irreversible": return pick(["sess-p1", "w1", "w2"], from: sessions)
+        case "now-inflight-long": return pick(["sess-p2", "w1", "w2", "w3", "w5", "c2", "c3", "c5", "c7"], from: crowdedSessions)
+        case "now-tip-undoable": return pick(["sess-p2"], from: sessions)
+        case "now-tip-inflight": return pick(["w1", "w2"], from: sessions)
+        default: return sessions
+        }
+    }
+
+    /// The Mac's richer list rows for the two working sessions: one with workflows, one it calls stuck.
+    static var sessionsWithFlight: [LiveSession] {
+        sessions.map { s in
+            var s = s
+            switch s.id {
+            case "w1":
+                s.flight = SessionFlight.make(
+                    busySince: now.addingTimeInterval(-12 * 60), startedAt: now.addingTimeInterval(-(2 * 3600 + 10 * 60)), model: "Opus 4.7",
+                    recentSteps: ["Reading Session.swift", "Editing SessionRoom.swift", "Running swift build"],
+                    health: nil, healthNote: nil,
+                    workflows: [WorkflowBrief(name: "Review changes", phase: "Reviewing", done: 3, total: 5, status: "running"),
+                                WorkflowBrief(name: "Docs sweep", phase: "Writing", done: 1, total: 4, status: "running")],
+                    workflowsRunning: 2)
+            case "sess-p3":
+                s.flight = SessionFlight.make(
+                    busySince: now.addingTimeInterval(-41 * 60), startedAt: now.addingTimeInterval(-5 * 3600), model: "Sonnet 4.5",
+                    recentSteps: ["Reading lib.rs", "Running cargo test", "Running cargo test"], health: "stuck", healthNote: "the same test failed 6 times",
+                    workflows: [])
+            default: break
+            }
+            return s
+        }
+    }
+
     static func model(_ screen: String) -> NowModel {
         switch screen {
+        case "now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump":
+            return NowModel.build(inputs(open: [open[0]], sessions: nowSessions(screen)))
+        case "now-flight-quiet":
+            var st = status; st.onAC = true; st.forecast = nil
+            return NowModel.build(inputs(open: [], status: st, sessions: nowSessions(screen)))
+        case "now-inflight", "now-tip-irreversible":
+            return NowModel.build(inputs(open: [open[0]], sessions: nowSessions(screen)))
+        case "now-inflight-long", "now-tip-undoable":
+            return NowModel.build(inputs(open: [open[1]], sessions: nowSessions(screen)))
+        case "now-tip-inflight":
+            var st = status; st.onAC = true; st.forecast = nil
+            return NowModel.build(inputs(open: [], status: st, sessions: nowSessions(screen)))
         case "now-quiet", "now-brief-quiet":
             var st = status; st.working = 0; st.forecast = nil; st.usage = nil; st.onAC = true
             return NowModel.build(inputs(open: [], status: st, sessions: sessions.filter { $0.state != .waitingOnApproval }))
@@ -251,10 +306,19 @@ enum RenderFixtures {
     static func nowData(_ screen: String) -> NowScreenData {
         let m = model(screen)
         var chipStatus = status
-        if screen == "now-quiet" || screen == "now-brief-quiet" || screen == "now-working" { chipStatus.onAC = true }
-        var d = NowScreenData(model: m, log: log, chip: MacChipModel.build(macName: mac, status: chipStatus, now: now),
-                              strands: InFlightStrand.build(sessions: sessions, workflows: [:], now: now), now: now)
-        if screen == "now-quiet" || screen == "now-brief-quiet" { d.strands = InFlightStrand.build(sessions: sessions.filter { $0.state == .active }, workflows: [:], now: now) }
+        if screen == "now-quiet" || screen == "now-brief-quiet" || screen == "now-working" || screen == "now-flight-quiet" { chipStatus.onAC = true }
+        var d = NowScreenData(model: m, log: log, chip: MacChipModel.build(macName: mac, status: chipStatus, now: now), now: now)
+        d.inFlight = InFlightSection.build(sessions: nowSessions(screen), hasSessionList: true, now: now)
+        // Only the tip screens show a tip, and the real picker chooses it: a fresh phone, the rows as staged.
+        if screen.hasPrefix("now-tip") {
+            d.tip = TipBook().nowTip(NowTipInputs(rows: m.rows.map { ($0.id, $0.chip) }, inFlight: d.inFlight.rows.map(\.id)))
+            // Frame the row the tip points at, with the tip under it.
+            if let t = d.tip { d.scrollTo = t.tip == .inFlight ? "inflight-\(t.anchorId)" : t.anchorId }
+        }
+        if screen == "now-inflight" { d.scrollTo = "inflight-w1" }
+        if ["now-flight", "now-flight-old", "now-flight-jump"].contains(screen) { d.scrollToId = HeaderJump.sectionId }
+        if screen == "now-flight-two" { d.scrollTo = "inflight-sess-p3" }
+        if screen == "now-inflight-long", let last = d.inFlight.rows.last { d.scrollTo = "inflight-\(last.id)" }
         if screen == "now-brief" { d.brief = brief(urgent: true); d.briefExpanded = false }
         if screen == "now-brief-quiet" { d.brief = brief(urgent: false); d.briefExpanded = true }
         if screen == "now-arming" {
@@ -294,6 +358,7 @@ enum RenderFixtures {
         var draft = ""
         switch screen {
         case "decision-hold": st.fixedHold = 0.62
+        case "decision-tip": st.tip = TipBook().decisionTip(hasPreview: row.focusPreview != nil)
         case "decision-composer": composer = true; draft = "Use the staging bucket instead"
         case "decision-delivered":
             st.phase = .delivered(nil); st.outcome = .delivered("typed into cmux › page")
@@ -333,6 +398,8 @@ struct RenderHarnessRoot: View {
         switch s {
         case _ where s.hasPrefix("ask-"):
             HarnessAnswers(screen: s)
+        case _ where s.hasPrefix("history"):
+            HarnessHistory(screen: s)
         case _ where s.hasPrefix("room-"):
             HarnessRoom(screen: s)
         case _ where s.hasPrefix("welcome") || s.hasPrefix("scan") || s.hasPrefix("pair"):
@@ -456,7 +523,7 @@ struct HarnessTower: View {
     let screen: String
     let glow: CardGlow
     var body: some View {
-        NWTowerScreen(data: RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : (screen == "tower-terminals" ? .terminals : nil)), glow: glow))
+        NWTowerScreen(data: RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : (screen == "tower-terminals" ? .terminals : (screen == "tower-gestures" ? .gestures : nil))), glow: glow))
             .padding(.top, 50)
     }
 }

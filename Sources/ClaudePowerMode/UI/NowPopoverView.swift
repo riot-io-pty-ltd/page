@@ -197,17 +197,18 @@ struct NWDecideRowView: View {
                         .truncationMode(.tail)
                 }
                 Spacer(minLength: 6)
-                HStack(spacing: 5) {
-                    ForEach(Array(row.keys.enumerated()), id: \.offset) { _, key in
-                        keyCap(key, authenticating: authenticating)
-                    }
-                }
             }
             .opacity(sending || f != nil ? 0.5 : 1)
             if let f {
                 NWReceiptStrip(frame: f, authenticating: authenticating)
                     .padding(.leading, 9)
-            } else if focused, let preview = row.focusPreview {
+            } else if !sending, !(row.keys + row.moreKeys).isEmpty {
+                // Every action in words, always there: Approve, Deny, Steer, Open. The keys
+                // work too, and live in each button's tooltip and the shortcuts sheet.
+                actionStrip(authenticating: authenticating)
+                    .padding(.leading, 15)
+            }
+            if f == nil, focused, let preview = row.focusPreview {
                 // While held, a short lead-in; the end of the line is what gets cut, so
                 // "Will type 1 · <route>" always stays readable.
                 Text(holdProgress != nil ? "Hold · Touch ID · \(preview)" : preview)
@@ -234,27 +235,42 @@ struct NWDecideRowView: View {
         .accessibilityLabel(Text("\(row.projectName), \(row.chip.title.capitalized), \(row.summary)"))
     }
 
+    /// The row's actions as buttons in words. Return is marked on the one it
+    /// does (a brighter button); an Irreversible approval keeps its press-and-hold.
+    @ViewBuilder
+    private func actionStrip(authenticating: Bool) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array((row.keys + row.moreKeys).enumerated()), id: \.offset) { _, key in
+                stripButton(key, authenticating: authenticating)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private func stripButton(_ key: KeyHint, authenticating: Bool) -> some View {
+        let title = row.buttonTitle(for: key.action)
+        let help = key.action.tooltip(key: key.label)
+        let label = NWActionLabel(title: title, emphasised: key.action == row.returnAction)
+        if key.isHold {
+            label.overlay(holdRing(authenticating: authenticating))
+                .gesture(DragGesture(minimumDistance: 0)
+                .onChanged { _ in onHoldBegan() }
+                .onEnded { _ in onHoldEnded() })
+                .help(help)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(Text("\(title), hold key 1"))
+        } else {
+            NWActionButton(title: title, emphasised: key.action == row.returnAction, help: help) { onKey(key.action) }
+        }
+    }
+
     private var borderColor: Color {
         if irreversible { return tint.opacity(focused ? 0.85 : 0.5).color }
         return focused ? NightWatch.Palette.glass.opacity(0.75).color : Color.white.opacity(0.06)
     }
 
-    @ViewBuilder
-    private func keyCap(_ key: KeyHint, authenticating: Bool) -> some View {
-        let cap = NWKeyCap(label: key.label, emphasised: key.action == row.returnAction)
-        if key.isHold {
-            // Press and hold on the cap does what holding 1 does.
-            cap.overlay(holdRing(authenticating: authenticating))
-                .gesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in onHoldBegan() }   // the store latches: once per press
-                .onEnded { _ in onHoldEnded() })
-        } else {
-            Button { onKey(key.action) } label: { cap }
-                .buttonStyle(.plain)
-        }
-    }
-
-    /// The ring on the hold cap (signature motion 4): filling while held, full
+    /// The ring on the hold button (signature motion 4): filling while held, full
     /// while Touch ID is up, bursting once it passes, unwinding when let go early.
     @ViewBuilder
     private func holdRing(authenticating: Bool) -> some View {
@@ -320,39 +336,6 @@ struct NWComposer: View {
     }
 }
 
-// MARK: - In flight
-
-/// The In-flight strip: which agents are working right now.
-struct NWInFlightStrip: View {
-    var agents: [NowModel.InFlightAgent]
-    var maxNames = 3
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle().fill(NightWatch.Palette.teal.color).frame(width: 6, height: 6)
-            Text("IN FLIGHT").nwLabel()
-            Text(names)
-                .font(NightWatch.Typo.monoMicro)
-                .foregroundColor(NightWatch.Palette.textSecondary.color)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer(minLength: 0)
-            Text("\(agents.count)")
-                .font(NightWatch.Typo.monoMicro)
-                .foregroundColor(NightWatch.Palette.textTertiary.color)
-        }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("\(agents.count) working: \(names)"))
-    }
-
-    /// Pure. "bottle-flip · page · llm-play" (the first few; the count follows at the right).
-    var names: String {
-        agents.prefix(maxNames).map(\.project).joined(separator: " · ")
-    }
-}
-
 // MARK: - The panel
 
 /// The menu-bar panel: aurora header, runway, ranked rows, in-flight strip,
@@ -375,10 +358,14 @@ struct NWNowPopover: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            switch model.mood {
-            case .dusk: duskBody
-            default:
-                if store.shownRows.isEmpty && store.queuedNew == 0 { quietBody } else { rowsBody }
+            if store.state.showShortcuts {
+                NWShortcutsSheet { store.toggleShortcuts() }
+            } else {
+                switch model.mood {
+                case .dusk: duskBody
+                default:
+                    if store.shownRows.isEmpty && store.queuedNew == 0 { quietBody } else { rowsBody }
+                }
             }
             configNotice
             stopStrip
@@ -430,7 +417,10 @@ struct NWNowPopover: View {
             let look = NowSky.look(model: model, motion: store.motion, now: now, reduceMotion: reduceMotion)
             let words = NowSky.lines(model: model, motion: store.motion, now: now, reduceMotion: reduceMotion)
             NWAuroraHeader(palette: look.palette, headline: words.headline, subline: words.subline,
-                           pulse: model.mood.pulse, pulseInputs: pulseInputs, sky: look.sky)
+                           pulse: model.mood.pulse, pulseInputs: pulseInputs, sky: look.sky,
+                           // "N working" jumps to the cards; the pulse opens Settings (the Tower).
+                           onWorkingTap: store.flightRows.isEmpty ? nil : { store.jumpToInFlight() },
+                           onPulseTap: { store.command(.preferences) })
         }
     }
 
@@ -446,11 +436,16 @@ struct NWNowPopover: View {
         VStack(spacing: 0) {
             NWRunwayBar(model: model.runway)
                 .padding(.top, 2)
+            tip.padding(.horizontal, 10).padding(.top, 8)
             rowList
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
                 .padding(.bottom, 10)
-            if !model.inFlight.isEmpty { NWInFlightStrip(agents: model.inFlight) }
+            if !store.flightRows.isEmpty {
+                NWInFlightGroup(store: store, maxCardsHeight: store.flightCardsMaxHeight)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+            }
             statusLine
         }
     }
@@ -494,7 +489,7 @@ struct NWNowPopover: View {
             ScrollViewReader { proxy in
                 // Four and a half rows: the half row, and the scroller, say there is more.
                 ScrollView(.vertical, showsIndicators: true) { content.padding(.trailing, 4) }
-                    .frame(height: 4.5 * 69)
+                    .frame(height: 4.5 * 96)
                     .onChange(of: store.selectedId) { id in
                         if let id { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo(id) } }
                     }
@@ -617,6 +612,12 @@ struct NWNowPopover: View {
         }
     }
 
+    /// The first-run tip: shown once, the first time there is a row to act on.
+    @ViewBuilder
+    private var tip: some View {
+        if store.tipVisible { NWTipStrip(text: PanelTip.text) { store.dismissTip() } }
+    }
+
     // MARK: all quiet
 
     private var quietBody: some View {
@@ -627,7 +628,8 @@ struct NWNowPopover: View {
                     .font(NightWatch.Typo.subline)
                     .foregroundColor(NightWatch.Palette.textTertiary.color)
             }
-            if !model.inFlight.isEmpty { NWInFlightStrip(agents: model.inFlight).padding(.horizontal, -16) }
+            tip
+            if !store.flightRows.isEmpty { NWInFlightGroup(store: store, maxCardsHeight: store.flightCardsMaxHeight) }
             statusLine.padding(.horizontal, -16)
         }
         .padding(.horizontal, 16)
@@ -781,13 +783,22 @@ struct NWNowPopover: View {
                     .onChanged { _ in store.mouseHoldBegan(.stopAll) }
                     .onEnded { _ in store.mouseHoldEnded() })
             Spacer(minLength: 8)
+            Button { store.toggleShortcuts() } label: {
+                Image(systemName: store.state.showShortcuts ? "questionmark.circle.fill" : "questionmark.circle")
+                    .font(Font.system(size: 12, weight: .medium))
+                    .foregroundColor(store.state.showShortcuts ? NightWatch.Palette.teal.color : NightWatch.Palette.textTertiary.color)
+                    .frame(width: 26, height: 26)
+            }
+            .buttonStyle(.plain)
+            .help("Every keyboard shortcut (\(PanelKeys.help))")
+            .accessibilityLabel(Text("Keyboard shortcuts"))
             Button { store.command(.preferences) } label: {
                 Image(systemName: "gearshape").font(Font.system(size: 12, weight: .medium))
                     .frame(width: 26, height: 26)
             }
             .buttonStyle(.plain)
-            .help("Preferences…")
-            .accessibilityLabel(Text("Preferences"))
+            .help("Settings…")
+            .accessibilityLabel(Text("Settings"))
             Button { store.command(.more) } label: {
                 Image(systemName: "ellipsis").font(Font.system(size: 13, weight: .bold))
                     .frame(width: 26, height: 26)

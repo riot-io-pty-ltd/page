@@ -11,6 +11,7 @@ struct TowerContainer: View {
     @EnvironmentObject var notifications: NotificationService
     @EnvironmentObject var glowStore: CardGlowStore
     @EnvironmentObject var router: AppRouter
+    @EnvironmentObject var tips: TipStore
     @Environment(\.dismiss) private var dismiss
     @State private var addingMac = false
     @State private var removingMac: SavedMac?
@@ -38,11 +39,11 @@ struct TowerContainer: View {
             .environmentObject(pairing)
             .environmentObject(api)
         }
-        .confirmationDialog("Unpair \(pairing.pairedMac?.name ?? "this Mac")?", isPresented: $confirmingUnpair, titleVisibility: .visible) {
+        .confirmationDialog(UnpairCopy.title(mac: pairing.pairedMac?.name), isPresented: $confirmingUnpair, titleVisibility: .visible) {
             Button("Unpair", role: .destructive) { pairing.unpair() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This iPhone will stop receiving pages until you scan a pairing code again.")
+            Text(UnpairCopy.message)
         }
         .confirmationDialog("Remove \(removingMac?.name ?? "this Mac")?",
                             isPresented: Binding(get: { removingMac != nil }, set: { if !$0 { removingMac = nil } }),
@@ -89,6 +90,7 @@ struct TowerContainer: View {
         a.turnOnNotifications = { Task { await notifications.requestAuthorizationIfNeeded() } }
         a.setGlow = { glowStore.glow = $0 }
         a.openHistory = { router.openHistory() }
+        a.resetTips = { tips.resetAll() }
         a.refresh = {
             await api.refreshAll()
             await notifications.refreshAuthorization()

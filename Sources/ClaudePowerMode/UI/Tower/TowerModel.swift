@@ -8,7 +8,7 @@ import Foundation
 
 /// The sidebar sections, in board order (board 41).
 enum TowerSection: String, CaseIterable, Identifiable, Equatable {
-    case power, budget, macsPhones, attention, agents, terminals, shortcuts, pairing, about
+    case power, budget, macsPhones, attention, agents, phoneApprovals, terminals, shortcuts, pairing, about
 
     var id: String { rawValue }
 
@@ -19,6 +19,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "Macs & phones"
         case .attention: return "Attention"
         case .agents: return "Agents"
+        case .phoneApprovals: return "Phone approvals"
         case .terminals: return "Terminals"
         case .shortcuts: return "Shortcuts"
         case .pairing: return "Pairing & encryption"
@@ -34,6 +35,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "Where Page sends pages, and what your phone may do on this Mac."
         case .attention: return "What is worth interrupting you for, and when."
         case .agents: return "Which agents Page watches, and the tools it works with."
+        case .phoneApprovals: return "Approve, deny or reply from your phone in any app, when you’re away."
         case .terminals: return "Where Page can reply, approve and stop agents for you, and what each terminal needs."
         case .shortcuts: return "Every key Page answers to. Page only ever approves, denies or sends your own words."
         case .pairing: return "How your phone and this Mac find each other, and who can read what."
@@ -49,6 +51,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "laptopcomputer"
         case .attention: return "bell.badge"
         case .agents: return "terminal"
+        case .phoneApprovals: return "iphone"
         case .terminals: return "macwindow"
         case .shortcuts: return "keyboard"
         case .pairing: return "key"
@@ -466,12 +469,14 @@ enum ShortcutCatalog {
             TowerShortcut(keys: ["⌘", "N"], title: "New session", detail: "Opens Dispatch: pick a folder, write the prompt")
         ]),
         TowerShortcutGroup(title: "IN THE NOW PANEL", items: [
-            TowerShortcut(keys: ["↑", "↓"], title: "Move between pages", detail: "Selects a row; nothing is sent by moving"),
+            TowerShortcut(keys: ["↑", "↓"], title: "Move between rows", detail: "Pages first, then the sessions in flight. Selects a row; nothing is sent by moving"),
             TowerShortcut(keys: ["1"], title: "Approve", detail: "Types option 1 into the session. On an irreversible item, hold it, then Touch ID (or your password)"),
             TowerShortcut(keys: ["↵"], title: "Approve an undoable item", detail: "Does nothing on irreversible ones, where it opens the terminal instead"),
             TowerShortcut(keys: ["esc"], title: "Deny", detail: "Presses Esc in the session. With nothing selected it closes the panel"),
-            TowerShortcut(keys: ["T"], title: "Tell it instead", detail: "Esc first, then your text, then Return"),
-            TowerShortcut(keys: ["O"], title: "Open the session’s terminal", detail: "Claude: the session’s own Terminal, iTerm2, cmux or tmux pane. Codex: brings your terminal forward. Never types"),
+            TowerShortcut(keys: [PanelKeys.type], title: "Steer: reply to a waiting page, or type to a session", detail: "On a waiting page: Esc first, then your text, then Return. On a session in flight: just your text and Return, read after its current step"),
+            TowerShortcut(keys: [PanelKeys.open], title: "Open the session’s terminal", detail: "Pages and sessions in flight. Claude: the session’s own Terminal, iTerm2, cmux or tmux pane. Codex: brings your terminal forward. Never types"),
+            TowerShortcut(keys: [PanelKeys.help], title: "Show every shortcut", detail: "The ? button in the panel’s footer does the same"),
+            TowerShortcut(keys: ["click"], title: "Click a card in flight to open it", detail: "Its Open and Steer buttons do what O and T do. “N working” in the header jumps to the cards, and the pulse opens Settings"),
             TowerShortcut(keys: ["hold", "⌘", "."], title: "Stop all agents", detail: "Hold for a moment; sends Esc to every busy session"),
             TowerShortcut(keys: ["M"], title: "More…", detail: "The classic menu: Pair phone, Open Log, Reload Config, Quit"),
             TowerShortcut(keys: ["tab"], title: "Move between the buttons", detail: "With Full Keyboard Access on; space presses the focused one")
@@ -548,14 +553,14 @@ enum TowerControlMap {
         .init(old: "action: power helper Install / Check again", oldTab: "Power", section: .power, newControl: "Power helper row"),
         .init(old: "action: Reset to defaults", oldTab: "window", section: .about, newControl: "Reset to defaults (footer)"),
         .init(old: "action: Cancel / Apply", oldTab: "window", section: .about, newControl: "Cancel and Apply (footer)"),
-        .init(old: "action: Set up cmux…", oldTab: "menu", section: .agents, newControl: "Set up cmux… button (also on the Terminals page)"),
+        .init(old: "action: Set up cmux…", oldTab: "menu", section: .terminals, newControl: "cmux row: Set up… opens the cmux setup page (also the Agents page's Set up cmux… button and the menu): version and socket mode, Let Page type into cmux, password, Test connection"),
         .init(old: "action: Terminals list", oldTab: "(new)", section: .terminals, newControl: "Terminals page: every supported terminal, its status chip and one action"),
         .init(old: "action: Set up kitty remote control", oldTab: "(new)", section: .terminals, newControl: "kitty row: Set up… adds two lines to kitty.conf (backed up), Undo"),
         .init(old: "action: Allow Terminal / iTerm2 automation", oldTab: "(new)", section: .terminals, newControl: "Terminal and iTerm2 rows: Allow… asks macOS for Automation permission"),
         .init(old: "action: Get a terminal", oldTab: "(new)", section: .terminals, newControl: "Not-installed rows: Get it ↗ opens the official site"),
-        .init(old: "action: Install agent hooks…", oldTab: "menu", section: .agents, newControl: "Install agent hooks… button"),
+        .init(old: "action: Install agent hooks…", oldTab: "menu", section: .phoneApprovals, newControl: "Phone approvals page: Claude Code and Codex rows with Install… / Uninstall…, the reply-to-continue toggle and the diff preview (the Agents and Terminals pages' Install agent hooks… buttons and the menu open it)"),
         .init(old: "action: Copy local-model diagnostics", oldTab: "menu", section: .agents, newControl: "Copy local-model diagnostics button"),
-        .init(old: "action: Pair phone…", oldTab: "menu", section: .pairing, newControl: "Pair phone… button"),
+        .init(old: "action: Pair phone…", oldTab: "menu", section: .pairing, newControl: "Pairing page: the QR, relay health, Copy pairing JSON and Regenerate token… (the menu's Pair phone… opens it)"),
         .init(old: "action: Open Config File…", oldTab: "menu", section: .about, newControl: "Open Config File… button"),
         .init(old: "action: Open Log", oldTab: "menu", section: .about, newControl: "Open Log button"),
         .init(old: "action: Reload Config", oldTab: "menu", section: .about, newControl: "Reload Config button"),

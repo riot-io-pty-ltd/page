@@ -131,11 +131,15 @@ struct NWSessionRoom: View {
     @Binding var draft: String
     /// The workflow run shown by the Workflows lens.
     @Binding var runId: String?
+    /// The room was opened with Type: the composer takes the keyboard once it is on screen.
+    var focusComposer = false
+    /// The room was opened with Stop: say what holding the stop button does.
+    var stopHint = false
     @Environment(\.nwTopInset) private var topInsetOverride
     /// Seconds the Stop button has been held, nil when it is not pressed.
     @State private var stopHeld: TimeInterval?
 
-    private var stopShown: Bool { stopHeld != nil || data.fixedStop != nil }
+    private var stopShown: Bool { stopHeld != nil || data.fixedStop != nil || stopHint }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -151,7 +155,7 @@ struct NWSessionRoom: View {
             .padding(.top, topInsetOverride ?? 0)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            NWRoomComposer(data: data, draft: $draft, actions: actions)
+            NWRoomComposer(data: data, draft: $draft, actions: actions, focusOnAppear: focusComposer)
         }
     }
 
@@ -415,7 +419,10 @@ struct NWRoomComposer: View {
     var data: SessionRoomData
     @Binding var draft: String
     var actions: SessionRoomActions
+    /// Take the keyboard once, after the room has finished opening (the Type button on Now).
+    var focusOnAppear = false
     @FocusState private var focused: Bool
+    @State private var didFocus = false
 
     private var hasText: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -441,6 +448,12 @@ struct NWRoomComposer: View {
         .padding(.horizontal, NightWatch.Space.lg)
         .padding(.top, 8)
         .padding(.bottom, 8)
+        .task(id: data.composer.acceptsText) {
+            // After the sheet has settled, and only once there is a field to focus (the mode can still be arriving).
+            guard focusOnAppear, !didFocus, data.composer.acceptsText else { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            if !Task.isCancelled { focused = true; didFocus = true }
+        }
         // Content scrolls under the composer, so it sits on a fade to the page colour.
         // Solid behind the chips and the field (nothing shows through them), with the fade just above.
         .background(alignment: .top) {

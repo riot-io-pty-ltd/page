@@ -4,7 +4,7 @@ import Foundation
 /// set. Legacy Claude vocab (permission / plan / question) is decoded into
 /// the canonical set so pages from older Macs and hooks still render.
 ///
-/// Foundation-only on purpose (colours live in Theme.swift) so the model and
+/// Foundation-only on purpose (colours live in NWTheme.swift) so the model and
 /// its decoding can be compiled and tested outside the app target.
 enum InterventionKind: String, CaseIterable {
     case approval
@@ -158,7 +158,7 @@ extension Intervention: Decodable {
         openedAt = try c.decode(Date.self, forKey: .openedAt)
         cwd = c.lenientString(.cwd) ?? ""
         let project = c.lenientString(.projectName) ?? ""
-        projectName = project.isEmpty ? (cwd.split(separator: "/").last.map(String.init) ?? "Unknown project") : project
+        projectName = ProjectLabel.clean(project, cwd: cwd)
         kind = InterventionKind(wire: c.lenientString(.kind))
         context = c.lenientString(.context) ?? ""
         closedAt = try? c.decodeIfPresent(Date.self, forKey: .closedAt)

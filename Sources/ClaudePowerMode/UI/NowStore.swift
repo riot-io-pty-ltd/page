@@ -50,6 +50,23 @@ final class NowStore: ObservableObject {
     @Published private(set) var shownRows: [DecideRow] = []
     /// Arrivals waiting behind the "New ↑" pill while the order is held.
     @Published private(set) var queuedNew = 0
+    /// What happened to a message typed from an In-flight row, by row id:
+    /// shown in the row itself (typed, queued, or refused with the reason).
+    @Published private(set) var flightReceipts: [String: InFlightReceipt] = [:]
+    /// The first-run tip was dismissed (remembered in UserDefaults).
+    @Published private(set) var tipDismissed = false
+    /// Bumped by "N working" in the header: the cards scroll to the top.
+    @Published private(set) var flightJumpToken = 0
+    /// The height the panel can give everything between its header and its
+    /// footer: what is left of the screen (set by the panel when it opens).
+    var bodyBudget: CGFloat = 760
+
+    /// The tallest the In-flight cards may grow before they scroll: the body's
+    /// budget less the rows above them and the runway, tip and status around them.
+    var flightCardsMaxHeight: CGFloat {
+        let rows = CGFloat(min(model.rows.count, NowModel.visibleRows)) * 100
+        return max(260, bodyBudget - rows - 110)
+    }
 
     var perform: (NowEffect) -> Void = { _ in }
     var command: (NowCommand) -> Void = { _ in }
@@ -64,6 +81,15 @@ final class NowStore: ObservableObject {
         didSet { if pointerInList != oldValue { refreshShown() } }
     }
 
+    /// What the panel remembers between launches (UserDefaults, never config.json).
+    let prefs: NowPrefs
+    /// In-flight rows as last seen, so a row keeps its place while a draft or
+    /// receipt is open after its turn ends.
+    private var lastFlight: [String: InFlightRow] = [:]
+    /// "Type…" asked for from the classic menu before the host was probed:
+    /// the composer opens when the probe answers.
+    private var wantedComposer: (sessionId: String, until: Date)?
+
     private var timer: Timer?
     /// Row ids already on screen (or seen while the panel was closed), so only
     /// genuinely new ones fly in.
@@ -73,8 +99,12 @@ final class NowStore: ObservableObject {
     /// The paused agents, kept through dusk so dawn can relight their stars.
     private var lastPaused: [NowModel.PausedAgent] = []
 
-    init(model: NowModel) {
+    init(model: NowModel, prefs: NowPrefs = .standard) {
         self.model = model
+        self.prefs = prefs
+        tipDismissed = prefs.tipDismissed
+        state.inFlightCollapsed = prefs.inFlightCollapsed
+        for r in model.flight { lastFlight[r.id] = r }
         shownRows = model.rows
         shownIds = model.rows.map(\.id)
         knownIds = Set(shownIds)
@@ -90,13 +120,31 @@ final class NowStore: ObservableObject {
     func update(_ model: NowModel) {
         let old = self.model
         if self.model != model { self.model = model }
-        let reconciled = NowKeys.reconcile(state, rows: model.rows)
+        for r in model.flight { lastFlight[r.id] = r }
+        let reconciled = NowKeys.reconcile(state, rows: model.rows, flights: flightRows)
         if reconciled != state { state = reconciled }
+        let kept = Set(flightRows.map(\.id))
+        lastFlight = lastFlight.filter { kept.contains($0.key) }
+        resolveWantedComposer()
         let still = sending.intersection(Set(model.rows.map(\.id)))
         if still != sending { sending = still }
         noteMotion(from: old, to: model)
         pruneSettledThreads()
         refreshShown()
+    }
+
+    /// The working sessions' rows as drawn: the model's, plus any whose turn
+    /// ended while a draft or a receipt is still open (so typing is never
+    /// lost, and the receipt has a row to sit in).
+    var flightRows: [InFlightRow] {
+        var rows = model.flight
+        let live = Set(rows.map(\.id))
+        var keep = Set(flightReceipts.keys)
+        if let c = state.composer { keep.insert(c.rowId) }
+        for id in keep.sorted() where !live.contains(id) {
+            if let r = lastFlight[id], r.kind == .session { rows.append(r.finished) }
+        }
+        return rows
     }
 
     var selectedId: String? { state.selectedId }
@@ -117,9 +165,10 @@ final class NowStore: ObservableObject {
     @discardableResult
     func handle(_ press: NowKeyPress) -> Bool {
         let before = state
-        let r = NowKeys.handle(press, state: state, rows: keyRows, now: now())
+        let r = NowKeys.handle(press, state: state, rows: keyRows, flights: flightRows, now: now())
         apply(r.state, effect: r.effect)
         if press.phase == .up { return before.hold != nil }
+        explainFlightKey(press, before: before, result: r)
         // ⌘N, ⌘. and ⌘, are ours; every other ⌘ combination (⌘Q, ⌘C, ⌘V …) goes on to the responders.
         if press.command {
             switch press.key {
@@ -138,8 +187,26 @@ final class NowStore: ObservableObject {
         return true
     }
 
+    /// O or T on a selected working row that did nothing: say why, as the
+    /// button's click does, instead of staying silent.
+    private func explainFlightKey(_ press: NowKeyPress, before: NowPanelState, result r: (state: NowPanelState, effect: NowEffect)) {
+        guard r.effect == .none, r.state.composer == nil, before.composer == nil, !before.showShortcuts,
+              !press.hasModifiers, !press.isRepeat, case .char(let raw) = press.key,
+              let id = before.selectedId, let row = flightRows.first(where: { $0.id == id }) else { return }
+        switch raw.lowercased() {
+        case PanelKeys.type.lowercased():
+            if row.kind == .localModel { notice = Notice(text: "Local model · Page can't steer it", failed: true) }
+            else { openFlightComposer(row) }
+        case PanelKeys.open.lowercased():
+            if row.kind == .localModel { notice = Notice(text: "Local model · Page can't open it", failed: true) }
+            else if !row.actions.canOpen { notice = Notice(text: row.actions.openBlocker ?? "Page can't open this one", failed: true) }
+        default: break
+        }
+    }
+
     func select(_ id: String) {
-        guard model.rows.contains(where: { $0.id == id }), state.composer == nil else { return }
+        guard model.rows.contains(where: { $0.id == id }) || flightRows.contains(where: { $0.id == id }),
+              state.composer == nil else { return }
         var s = state
         s.selectedId = id
         s.hold = nil
@@ -150,6 +217,163 @@ final class NowStore: ObservableObject {
         var s = state
         s.expanded = on
         state = s
+    }
+
+    // MARK: in flight
+
+    /// The pointer moved onto a working session's row: it becomes the
+    /// selected row, so the keys O and T act on the row the buttons are on.
+    /// Selecting sends nothing, and nothing on a working row sends without a
+    /// composer and a Return. A draft or a hold is never moved off its row.
+    ///
+    /// `pointer` (the screen position of the mouse) tells a real move from rows
+    /// shifting under a still pointer: with the same position as the last hover,
+    /// nothing is selected, so a decision row you were on keeps the keys. The
+    /// first hover only takes the selection when no decision row has it.
+    func hoverFlight(_ id: String, pointer: CGPoint? = nil) {
+        guard state.composer == nil, state.hold == nil, state.selectedId != id else { return }
+        if let p = pointer {
+            let previous = lastHoverPointer
+            lastHoverPointer = p
+            let onDecision = state.selectedId.map { sid in !flightRows.contains { $0.id == sid } } ?? false
+            if let q = previous { guard hypot(p.x - q.x, p.y - q.y) > 0.5 else { return } }
+            else if onDecision { return }
+        }
+        select(id)
+    }
+
+    /// Where the mouse was at the last card hover (see `hoverFlight`).
+    private var lastHoverPointer: CGPoint?
+
+    /// "N working" in the header: shows the In-flight cards (opening the group
+    /// if it was collapsed, closing the shortcuts sheet if it covers them),
+    /// selects the first and scrolls to the group. Sends nothing.
+    func jumpToInFlight() {
+        guard let plan = InFlightJump.plan(rows: flightRows, state: state) else { return }
+        var s = state
+        if plan.closeShortcuts { s.showShortcuts = false }
+        if plan.uncollapse {
+            s.inFlightCollapsed = false
+            prefs.inFlightCollapsed = false
+        }
+        // A half-typed message is never moved off its card.
+        if s.composer == nil { s.selectedId = plan.selectId }
+        s.hold = nil
+        state = s
+        flightJumpToken += 1
+    }
+
+    func setInFlightCollapsed(_ on: Bool) {
+        var s = state
+        s.inFlightCollapsed = on
+        if on, let id = s.selectedId, flightRows.contains(where: { $0.id == id }) { s.selectedId = nil }
+        if on, let c = s.composer, c.kind == .type { s.composer = nil }
+        state = s
+        prefs.inFlightCollapsed = on
+    }
+
+    func setInFlightExpanded(_ on: Bool) {
+        var s = state
+        s.inFlightExpanded = on
+        state = s
+    }
+
+    /// A click on one of a working session's buttons.
+    func clickFlight(_ action: InFlightAction, on row: InFlightRow) {
+        guard flightRows.contains(where: { $0.id == row.id }) else { return }
+        if state.composer != nil && action == .steer && state.composer?.rowId == row.id { return }
+        // A half-typed reply is never thrown away by a click elsewhere.
+        if let c = state.composer, !c.text.isEmpty {
+            notice = Notice(text: "Finish or close your message first · Esc closes it", failed: false)
+            return
+        }
+        cancelComposer()
+        select(row.id)
+        switch action {
+        case .open:
+            let effect = NowKeys.effect(forFlightClick: .open, row: row)
+            if effect == .none {
+                notice = Notice(text: row.actions.openBlocker ?? "Page can't open this one", failed: true)
+            } else {
+                apply(state, effect: effect)
+            }
+        case .steer:
+            openFlightComposer(row)
+        }
+    }
+
+    /// Opens the one-line composer in a working session's row, if Page can type there.
+    @discardableResult
+    func openFlightComposer(_ row: InFlightRow) -> Bool {
+        guard row.actions.canType, let target = row.target else {
+            notice = Notice(text: row.actions.checking ? "Checking where it runs · try again in a moment"
+                                                        : "Can't steer here · \(row.actions.typeBlocker ?? "Page can't type into this session")",
+                            failed: !row.actions.checking)
+            return false
+        }
+        var s = state
+        s.selectedId = row.id
+        s.composer = NowPanelState.Composer(rowId: row.id, kind: .type, target: target)
+        s.hold = nil
+        state = s
+        composerFocusToken += 1
+        return true
+    }
+
+    /// "Type…" from the classic menu: opens the composer on that session's
+    /// row, waiting a moment for the host probe if it has not answered.
+    func requestComposer(forSessionId id: String) {
+        wantedComposer = (id, now().addingTimeInterval(4))
+        resolveWantedComposer()
+    }
+
+    private func resolveWantedComposer() {
+        guard let w = wantedComposer else { return }
+        if let row = flightRows.first(where: { $0.sessionId == w.sessionId && $0.kind == .session }) {
+            if row.actions.canType || !row.actions.checking {
+                wantedComposer = nil
+                openFlightComposer(row)
+                return
+            }
+        }
+        if now() > w.until { wantedComposer = nil }
+    }
+
+    /// The input path answered (or timed out): the receipt goes in the row.
+    func finishTyping(sessionId: String, result: SessionCommandResult) {
+        let id = InFlightRow.idPrefix + sessionId
+        let route = flightRows.first { $0.id == id }?.route
+        setReceipt(InFlightReceipt.from(result, route: route, at: now()), for: id)
+    }
+
+    private func setReceipt(_ r: InFlightReceipt, for id: String) {
+        flightReceipts[id] = r
+        guard r.outcome != .sending else { return }
+        let linger: TimeInterval = r.outcome == .typed ? 12 : 20
+        DispatchQueue.main.asyncAfter(deadline: .now() + linger) { [weak self] in
+            guard let self, self.flightReceipts[id] == r else { return }
+            self.flightReceipts[id] = nil
+            self.lastFlight = self.lastFlight.filter { k, _ in self.flightRows.contains { $0.id == k } }
+        }
+    }
+
+    // MARK: shortcuts sheet and the first-run tip
+
+    func toggleShortcuts() {
+        var s = state
+        s.showShortcuts.toggle()
+        if s.showShortcuts { s.composer = nil; s.hold = nil }
+        state = s
+    }
+
+    /// The first-run tip, until it is dismissed once.
+    var tipVisible: Bool {
+        PanelTip.shouldShow(dismissed: tipDismissed, hasDecisionRows: !model.rows.isEmpty, hasInFlightRows: !model.flight.isEmpty)
+    }
+
+    func dismissTip() {
+        tipDismissed = true
+        prefs.tipDismissed = true
     }
 
     /// A click on one of a row's key caps. A cap that types (1, Return, Esc)
@@ -200,7 +424,12 @@ final class NowStore: ObservableObject {
     func reset() {
         endHold()
         state = NowPanelState()
+        state.inFlightCollapsed = prefs.inFlightCollapsed
         notice = nil
+        // A typed message's receipt stays through a close, as a pending reply's thread does: the
+        // answer may land after the panel is gone, and it must still be there when it opens again.
+        // Its own timers expire it.
+        wantedComposer = nil
         // Threads still waiting on the Mac stay (the reply is still on its way).
         motion = NowMotion(threads: motion.threads.filter { $0.value.resolvedAt == nil })
         knownIds = Set(model.rows.map(\.id))
@@ -328,6 +557,18 @@ final class NowStore: ObservableObject {
             sending.insert(id)
             beginThread(rowId: id, authenticating: false)
             perform(effect)
+        case .typeInto(let target, _):
+            // Not a page reply: no receipt thread, no Esc. The row says what happened.
+            let id = InFlightRow.idPrefix + target.sessionId
+            let route = flightRows.first { $0.id == id }?.route
+            let started = InFlightReceipt(outcome: .sending, route: route, at: now())
+            setReceipt(started, for: id)
+            perform(effect)
+            // The input path always answers; if it somehow does not, the row says so.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+                guard let self, self.flightReceipts[id] == started else { return }
+                self.setReceipt(InFlightReceipt(outcome: .unconfirmed, route: route, at: self.now()), for: id)
+            }
         default:
             perform(effect)
         }
@@ -388,6 +629,11 @@ final class NowStore: ObservableObject {
     func previewMotion(_ edit: (inout NowMotion) -> Void) {
         edit(&motion)
         refreshShown()
+    }
+
+    /// For the render harness: a receipt in an In-flight row without a delivery.
+    func previewFlightReceipt(_ r: InFlightReceipt, forSessionId id: String) {
+        flightReceipts[InFlightRow.idPrefix + id] = r
     }
 
     /// The "New ↑" pill: let the held arrivals in now.

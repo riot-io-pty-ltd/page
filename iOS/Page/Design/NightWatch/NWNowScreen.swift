@@ -9,7 +9,12 @@ struct NowScreenData {
     var banners: [NowBanner] = []
     var brief: ReturnBrief? = nil
     var briefExpanded = false
-    var strands: [InFlightStrand] = []
+    /// The working sessions, one row each.
+    var inFlight: InFlightSection = .empty
+    /// The one first-time tip showing, and the row it points at.
+    var tip: NowTipTarget? = nil
+    /// How this phone confirms ("Face ID"), for the hold tip.
+    var biometry = "Face ID"
     var now: Date
     /// New arrivals held behind the "New ↑" pill.
     var queuedNew = 0
@@ -25,6 +30,8 @@ struct NowScreenData {
     var problem: ProblemState? = nil
     /// Scrolls this row to the middle on appear (the render harness, to frame a card below the fold).
     var scrollTo: String? = nil
+    /// Scrolls this element (a section) to the top on appear: the state after "2 working" is tapped.
+    var scrollToId: String? = nil
     /// Each action's delivery state, drawn as its Receipt thread.
     var receipts: [String: ReceiptThreadInput] = [:]
     /// Rows that have left with their reply confirmed, kept while the thread
@@ -51,8 +58,13 @@ struct NowScreenActions {
     var cancel: (String) -> Void = { _ in }
     var tapChip: () -> Void = {}
     var tapRunway: () -> Void = {}
-    var tapStrand: (String) -> Void = { _ in }
+    /// Opens a working session's room: on Story, Screen, the composer, or where Stop is held.
+    var openRoom: (String, RoomEntry) -> Void = { _, _ in }
+    var toggleInFlight: () -> Void = {}
+    var dismissTip: (NWTip) -> Void = { _ in }
     var toSky: () -> Void = {}
+    /// The orb in the corner: the Tower (Settings).
+    var openSettings: () -> Void = {}
     var toggleBrief: () -> Void = {}
     var dismissBrief: () -> Void = {}
     var reviewFinished: () -> Void = {}
@@ -103,6 +115,10 @@ struct NWNowScreen: View {
             .onAppear { if seen == nil, data.inboxLoaded { seen = Set(rowIds) } }
             .onChange(of: data.inboxLoaded) { _, loaded in if loaded, seen == nil { seen = Set(rowIds) } }
             .onChange(of: rowIds) { _, ids in if seen != nil { seen = Set(ids) } }
+            .onAppear {
+                guard let id = data.scrollToId else { return }
+                DispatchQueue.main.async { proxy.scrollTo(id, anchor: .top) }
+            }
             .onAppear {
                 guard let id = data.scrollTo else { return }
                 // After the first layout, so the row exists to be found.
@@ -163,13 +179,12 @@ struct NWNowScreen: View {
                       headline: p?.title ?? data.handover ?? m.headline,
                       subline: p?.subtitle ?? (data.handover == nil ? m.subline : m.headline),
                       footnote: p == nil && quiet && m.headline == "All quiet" ? "Page is keeping watch. Go to sleep." : nil,
-                      height: height, topInset: inset, model: pulseModel)
+                      height: height, topInset: inset, model: pulseModel,
+                      workingJump: workingJump(problem: p).map { j in (j.jump, j.rest, { scrollRequest = HeaderJump.sectionId }) })
             HStack(alignment: .top) {
                 NWMacChip(model: data.chip, onTap: actions.tapChip)
                 Spacer()
-                NWConcentricRings(rings: m.rings, size: 46)
-                    .padding(.top, 4)
-                    .accessibilityHidden(m.rings.isEmpty)
+                settingsOrb(rings: m.rings)
             }
             .padding(.horizontal, NightWatch.Space.gutter)
             .padding(.top, inset + 6)
@@ -179,6 +194,34 @@ struct NWNowScreen: View {
         .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { v in
             if NWDestination.afterDrag(from: .now, translation: Double(v.translation.width), vertical: Double(v.translation.height)) == .sky { actions.toSky() }
         })
+    }
+
+    /// "2 working" scrolls to the In flight cards, while the subline is that sentence.
+    private func workingJump(problem: ProblemState?) -> (jump: String, rest: String)? {
+        guard problem == nil, data.handover == nil,
+              HeaderJump.target(working: data.model.workingCount, inFlightShown: data.inFlight.rows.count) != nil else { return nil }
+        return HeaderJump.split(subline: data.model.subline, working: data.model.workingCount)
+    }
+
+    /// The round glyph in the corner is the way to Settings (the Tower): the
+    /// day's rings when there are some, a plain ring when there are none.
+    private func settingsOrb(rings: [RingStat]) -> some View {
+        Button(action: actions.openSettings) {
+            ZStack {
+                if rings.isEmpty {
+                    Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 4).frame(width: 40, height: 40)
+                } else {
+                    NWConcentricRings(rings: rings, size: 46)
+                }
+            }
+            .frame(width: 56, height: 56)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, -2)
+        .accessibilityLabel(Text("Settings"))
+        .accessibilityValue(Text(rings.map { "\($0.kind.rawValue) \($0.detail)" }.joined(separator: ", ")))
+        .accessibilityHint(Text("Opens the Tower"))
     }
 
     // MARK: Stream
@@ -201,6 +244,8 @@ struct NWNowScreen: View {
         }
         if data.queuedNew > 0 { NWNewPill(count: data.queuedNew, onTap: actions.showNew).frame(maxWidth: .infinity) }
         ForEach(sections, id: \.0) { section, rows in
+            // In flight sits between what needs you and what has finished.
+            if section == .review { inFlight }
             NWSectionHeader(title: section.title, count: rows.filter { !data.ghosts.contains($0.id) }.count, color: section.color)
                 .id("section-\(section.title.lowercased())")
                 .offset(y: push(below: rows.first.flatMap { order.firstIndex(of: $0.id) }.map { $0 - 1 }))
@@ -210,6 +255,7 @@ struct NWNowScreen: View {
                     .offset(y: push(below: order.firstIndex(of: row.id).map { $0 - 1 }))
                     // The approach draws an arrival itself; a departure has already folded or simply fades.
                     .transition(reduceMotion ? .opacity : .asymmetric(insertion: .identity, removal: .opacity))
+                if let tip = data.tip, tip.anchorId == row.id { tipCallout(tip).offset(y: push(below: order.firstIndex(of: row.id))) }
             }
             // The Brief sits after Decide and Look when something needs you.
             if section == .look || (section == .decide && !sections.contains { $0.0 == .look }), let b = data.brief, b.hasUrgent {
@@ -218,6 +264,7 @@ struct NWNowScreen: View {
                     .offset(y: push(below: rows.last.flatMap { order.firstIndex(of: $0.id) }))
             }
         }
+        if !sections.contains(where: { $0.0 == .review }) { inFlight }
         if let b = data.brief, b.hasUrgent, !sections.contains(where: { $0.0 == .decide || $0.0 == .look }) {
             NWBriefCard(brief: b, expanded: data.briefExpanded, onToggle: actions.toggleBrief,
                         onDismiss: actions.dismissBrief, onReview: reviewFinished)
@@ -225,12 +272,27 @@ struct NWNowScreen: View {
         Group {
             if let line = data.model.receiptLine { NWReceiptLine(text: line, failed: data.model.receiptFailed) }
             if quiet && data.problem == nil { NWTonightCard(rings: data.model.rings) }
-            if !data.strands.isEmpty {
-                NWInFlightRibbon(strands: data.strands, onStrand: actions.tapStrand, onHeader: actions.toSky)
-            }
             NWSettledList(log: data.log, onSeeAll: actions.seeAll).padding(.top, 6)
         }
         .offset(y: push(below: order.count - 1))
+    }
+
+    /// The In flight rows, between Decide/Look and Review (or after them when nothing has finished).
+    @ViewBuilder private var inFlight: some View {
+        if !data.inFlight.rows.isEmpty {
+            let before = sections.first { $0.0 == .review }?.1.first.flatMap { order.firstIndex(of: $0.id) }.map { $0 - 1 } ?? (order.count - 1)
+            NWInFlightSection(section: data.inFlight, tip: data.tip.flatMap { $0.tip == .inFlight ? $0 : nil }, biometry: data.biometry,
+                              onOpen: actions.openRoom, onToggle: actions.toggleInFlight, onHeader: actions.toSky, onDismissTip: actions.dismissTip)
+                .id("section-in flight")
+                .offset(y: push(below: before))
+        }
+    }
+
+    /// A first-time tip under the row it explains.
+    private func tipCallout(_ tip: NowTipTarget) -> some View {
+        NWTipCallout(text: tip.tip.text(biometry: data.biometry), symbol: tip.tip.symbol, onDismiss: { actions.dismissTip(tip.tip) })
+            .padding(.top, -6)
+            .transition(.opacity)
     }
 
     // MARK: Final approach
