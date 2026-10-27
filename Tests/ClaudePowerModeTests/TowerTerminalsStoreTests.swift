@@ -43,9 +43,9 @@ final class TowerTerminalsStoreTests: XCTestCase {
             r.automationCalls.append(id)
             r.automationDone.append(done)
         }
-        env.confirm = { title, text, ok in
+        env.confirm = { title, text, ok, done in
             r.confirms.append((title: title, text: text, ok: ok))
-            return r.confirmAnswer
+            done(r.confirmAnswer)
         }
         env.showAlert = { r.alerts.append((title: $0, text: $1)) }
         env.openURL = { r.opened.append($0) }

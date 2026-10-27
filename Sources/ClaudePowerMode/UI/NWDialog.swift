@@ -3,11 +3,14 @@ import SwiftUI
 
 // The Night Watch dialog: what an NSAlert used to be. A glass card with a
 // title, a body, an optional mono block (a diff, the lines about to be added to
-// a file) and one to three buttons. It is shown in its own panel, centred over
-// the Tower when that is open, and answers the way NSAlert did: `run` blocks
-// like `runModal()` and returns which button was pressed (0 is the first
-// button, as `.alertFirstButtonReturn` was), and `present` / `ask` are the
-// non-blocking forms. Return presses the first button, Esc the last (Cancel).
+// a file) and one to three buttons. It is shown as a sheet on the Tower when that
+// is open (a floating panel otherwise), and answers with which button was pressed (0 is
+// the first button, as `.alertFirstButtonReturn` was). It never blocks: there
+// is no `runModal`, because a nested run loop started from inside a SwiftUI
+// button action (every caller is one) leaves the dialog's own buttons dead.
+// `present` shows it as a sheet on the Tower (or a floating panel when there
+// is no window to sit on) and calls back; `ask` is the `await`able form.
+// Return presses the first button, Esc the last (Cancel).
 
 private typealias P = NightWatch.Palette
 
@@ -136,6 +139,9 @@ struct NWCodeBlock: View {
 struct NWDialogCard: View {
     var spec: NWDialogSpec
     var choose: (Int) -> Void
+    /// The card's own drop shadow: for a floating panel, which has room around the card
+    /// for it. A sheet has none (AppKit draws the sheet's own), so the card fills it.
+    var shadow = true
 
     static let width: CGFloat = 460
     static let wideWidth: CGFloat = 600
@@ -195,7 +201,7 @@ struct NWDialogCard: View {
         .padding(22)
         .frame(width: width, alignment: .leading)
         .background(NWGlassBackground(radius: 18, fill: NightWatch.RGBA(hex: 0x0B0E14, alpha: 1), glowHeight: 18))
-        .shadow(color: Color.black.opacity(0.55), radius: 26, x: 0, y: 12)
+        .shadow(color: Color.black.opacity(shadow ? 0.55 : 0), radius: 26, x: 0, y: 12)
         .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(spec.title))
@@ -231,59 +237,121 @@ struct NWDialogCard: View {
 /// presenter activates Page first (as the alerts it replaces did).
 final class NWDialogPanel: NSPanel {
     var onCancel: (() -> Void)?
+    /// Transparent room around the card (for a floating panel's shadow); zero as a sheet.
+    var inset: CGFloat = 0
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override func cancelOperation(_ sender: Any?) { onCancel?() }
+}
+
+/// One dialog on screen, from `present` until its button is pressed. It owns
+/// the panel, answers exactly once, and takes the sheet down (or the floating
+/// panel off screen) before it calls back.
+final class NWDialogPresentation: NSObject {
+    let panel: NWDialogPanel
+    private let spec: NWDialogSpec
+    private weak var parent: NSWindow?
+    private var completion: ((Int) -> Void)?
+    private var observers: [NSObjectProtocol] = []
+    private(set) var finished = false
+    /// Shown as a sheet on `parent`, not as a floating panel.
+    private(set) var isSheet = false
+
+    init(_ spec: NWDialogSpec, over window: NSWindow?, completion: @escaping (Int) -> Void) {
+        self.spec = spec
+        self.completion = completion
+        panel = NWDialogPanel(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        super.init()
+        panel.onCancel = { [weak self] in self?.finish(spec.cancelIndex) }
+        panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.title = spec.title
+        panel.setAccessibilitySubrole(.dialog)
+        if let window, window.isVisible, !window.isMiniaturized, window.sheets.isEmpty {
+            parent = window
+            isSheet = true
+        }
+        // A sheet is the card alone (AppKit draws its edge and shadow); a floating panel has room for the card's shadow.
+        let inset = isSheet ? 0 : NWDialog.inset
+        panel.inset = inset
+        let host = NSHostingView(rootView: NWAppearanceRoot { NWDialogCard(spec: spec, choose: { [weak self] in self?.finish($0) }, shadow: inset > 0) }
+            .padding(inset))
+        panel.contentView = host
+        host.layoutSubtreeIfNeeded()
+        let size = host.fittingSize
+        panel.setContentSize(size)
+        if !isSheet {
+            panel.isFloatingPanel = true
+            panel.level = .modalPanel
+            panel.isMovableByWindowBackground = true
+            panel.setFrameOrigin(NWDialog.origin(for: size, over: window))
+        }
+    }
+
+    /// Puts it on screen: a sheet on the Tower (which it blocks, with no
+    /// nested run loop), or a key floating panel.
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: NSWindow.willCloseNotification, object: panel, queue: .main) { [weak self] _ in
+            self?.finish(self?.spec.cancelIndex ?? 0)
+        })
+        if let parent {
+            // The Tower closing under its sheet answers Cancel; nothing is left hanging.
+            observers.append(center.addObserver(forName: NSWindow.willCloseNotification, object: parent, queue: .main) { [weak self] _ in
+                self?.finish(self?.spec.cancelIndex ?? 0)
+            })
+            parent.makeKeyAndOrderFront(nil)
+            parent.beginSheet(panel, completionHandler: nil)
+            panel.makeKey()
+        } else {
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Answers once: takes the dialog down, then calls back on main.
+    func finish(_ index: Int) {
+        guard !finished else { return }
+        finished = true
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if let parent, parent.sheets.contains(panel) { parent.endSheet(panel) }
+        panel.orderOut(nil)
+        let done = completion
+        completion = nil
+        // Keep the panel alive past the SwiftUI button action that is calling us.
+        DispatchQueue.main.async { NWDialog.release(self) }
+        done?(index)
+    }
 }
 
 enum NWDialog {
     /// Room around the card for its shadow.
     static let inset: CGFloat = 44
 
-    /// Shows the dialog and waits for a button, like `NSAlert.runModal()`.
-    /// Returns the button's index (0 = the first). `window`: the Tower or other
-    /// window to centre over (when it is on screen). Main thread only; from
-    /// another thread it hops to main and waits.
-    @discardableResult
-    static func run(_ spec: NWDialogSpec, over window: NSWindow? = nil) -> Int {
-        if !Thread.isMainThread { return DispatchQueue.main.sync { run(spec, over: window) } }
-        var result = spec.cancelIndex
-        var finished = false
-        let panel = NWDialogPanel(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
-        let finish: (Int) -> Void = { index in
-            guard !finished else { return }
-            finished = true
-            result = index
-            NSApp.stopModal()
-        }
-        panel.onCancel = { finish(spec.cancelIndex) }
-        panel.isFloatingPanel = true
-        panel.level = .modalPanel
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = false
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        panel.isMovableByWindowBackground = true
-        panel.appearance = NSAppearance(named: .darkAqua)
-        panel.title = spec.title
-        panel.setAccessibilitySubrole(.dialog)
-        let host = NSHostingView(rootView: NWAppearanceRoot { NWDialogCard(spec: spec, choose: finish) }.padding(inset))
-        panel.contentView = host
-        host.layoutSubtreeIfNeeded()
-        let size = host.fittingSize
-        panel.setContentSize(size)
-        panel.setFrameOrigin(origin(for: size, over: window))
-        NSApp.activate(ignoringOtherApps: true)
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.runModal(for: panel)
-        panel.orderOut(nil)
-        return result
+    /// Dialogs on screen, held until they answer.
+    private(set) static var live: [NWDialogPresentation] = []
+
+    static func release(_ presentation: NWDialogPresentation) {
+        live.removeAll { $0 === presentation }
     }
 
-    /// Shows the dialog without blocking the caller; `completion` runs on main with the button's index.
+    /// Shows the dialog and returns at once; `completion` runs on main, once,
+    /// with the pressed button's index (0 = the first) after the dialog is gone.
+    /// Nothing is shown from the caller's stack: callers are SwiftUI button
+    /// actions, so this hops to the next main-queue turn first. `window`: the
+    /// Tower or other window to sit on as a sheet (when it is on screen);
+    /// otherwise a floating panel centred on the screen.
     static func present(_ spec: NWDialogSpec, over window: NSWindow? = nil, completion: @escaping (Int) -> Void = { _ in }) {
-        DispatchQueue.main.async { completion(run(spec, over: window)) }
+        DispatchQueue.main.async {
+            let presentation = NWDialogPresentation(spec, over: window, completion: completion)
+            live.append(presentation)
+            presentation.show()
+        }
     }
 
     /// `await`able form: `if await NWDialog.ask(spec) == 0 { … }`.

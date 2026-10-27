@@ -136,10 +136,12 @@ final class TowerPairingModel: ObservableObject {
             "Regenerate the pairing token?",
             "Phones paired with the current token stop receiving pages until they scan the new QR code. Page asks the relay to retire the old token, so (on an up-to-date relay) those phones are told to re-pair. This Mac reconnects with the new token right away.",
             ok: "Regenerate", tone: .warning, destructive: true)
-        guard store.ask(spec) == 0 else { return }
-        // Posts tokenDidChange; the Coordinator reconnects the relay.
-        store.env.pairing.regenerate()
-        refresh()
+        store.ask(spec) { [weak self, weak store] answer in
+            guard answer == 0, let self, let store else { return }
+            // Posts tokenDidChange; the Coordinator reconnects the relay.
+            store.env.pairing.regenerate()
+            self.refresh()
+        }
     }
 
     /// Pure. "This Mac is connected to the relay." and its siblings.

@@ -101,7 +101,7 @@ final class TowerStoreTests: XCTestCase {
         let (s, r) = makeStore()
         s.form.relayEnabled = true
         s.form.relayURL = "   "
-        XCTAssertFalse(s.apply())
+        XCTAssertFalse(applied(s))
         XCTAssertEqual(r.writes.count, 0)
         XCTAssertEqual(r.beeps, 1)
         XCTAssertEqual(r.alerts.count, 1)
@@ -115,7 +115,7 @@ final class TowerStoreTests: XCTestCase {
         s.form.relayEnabled = true
         s.form.relayURL = " https://a.b.workers.dev/ws "
         s.setCutoff(15)
-        XCTAssertTrue(s.apply())
+        XCTAssertTrue(applied(s))
         XCTAssertEqual(r.writes.count, 1)
         XCTAssertEqual(r.writes.first?.relayURL, "https://a.b.workers.dev", "saved as the normalised base URL")
         XCTAssertEqual(r.writes.first?.lowBatteryCutoff, 15)
@@ -125,13 +125,37 @@ final class TowerStoreTests: XCTestCase {
         XCTAssertTrue(r.lines.contains("Preferences saved"))
     }
 
+    /// Runs Apply and returns whether it saved. Every fake here answers at once, so `done` has run on return.
+    private func applied(_ s: TowerStore, file: StaticString = #filePath, line: UInt = #line) -> Bool {
+        var result: Bool?
+        s.apply { result = $0 }
+        XCTAssertNotNil(result, "Apply answered", file: file, line: line)
+        return result ?? false
+    }
+
+    func testApplyWaitsForTheAnswerWithoutBlocking() {
+        var answer: ((Bool) -> Void)?
+        let (s, r) = makeStore { env, rec in
+            rec.loadResult = Config.LoadResult(config: nil, problem: nil, backupURL: nil)
+            env.confirmReplaceBrokenConfig = { _, done in answer = done }
+        }
+        var result: Bool?
+        s.apply { result = $0 }
+        XCTAssertNil(result, "Apply returned while the question is still open")
+        XCTAssertTrue(r.writes.isEmpty, "nothing is written before the answer")
+        answer?(true)
+        XCTAssertEqual(result, true)
+        XCTAssertEqual(r.writes.count, 1)
+        XCTAssertEqual(r.closes, 1)
+    }
+
     func testApplyKeepsAnEditMadeByHandOnDisk() {
         var onDisk = Config()
         onDisk.lowBatteryCutoff = 20
         let (s, r) = makeStore()
         r.loadResult = Config.LoadResult(config: onDisk, problem: nil, backupURL: nil)
         s.setRecovery(30)
-        XCTAssertTrue(s.apply())
+        XCTAssertTrue(applied(s))
         XCTAssertEqual(r.writes.first?.lowBatteryCutoff, 20, "the file's own edit survives a save of other fields")
         XCTAssertEqual(r.writes.first?.recoveryThreshold, 30)
     }
@@ -140,22 +164,22 @@ final class TowerStoreTests: XCTestCase {
         let broken = Config.LoadResult(config: nil, problem: "malformed", backupURL: URL(fileURLWithPath: "/x/config.broken.json"))
         let (s, r) = makeStore { env, rec in
             rec.loadResult = broken
-            env.confirmReplaceBrokenConfig = { info in
+            env.confirmReplaceBrokenConfig = { info, done in
                 XCTAssertTrue(info.contains("Saving replaces it"))
                 XCTAssertTrue(info.hasSuffix("The broken file was copied to config.broken.json."), info)
-                return false
+                done(false)
             }
         }
-        XCTAssertFalse(s.apply())
+        XCTAssertFalse(applied(s))
         XCTAssertTrue(r.writes.isEmpty)
     }
 
     func testApplyWithAnUnreadableFileAndConsentReplacesIt() {
         let (s, r) = makeStore { env, rec in
             rec.loadResult = Config.LoadResult(config: nil, problem: nil, backupURL: nil)
-            env.confirmReplaceBrokenConfig = { _ in true }
+            env.confirmReplaceBrokenConfig = { _, done in done(true) }
         }
-        XCTAssertTrue(s.apply())
+        XCTAssertTrue(applied(s))
         XCTAssertEqual(r.writes.count, 1)
     }
 
@@ -164,7 +188,7 @@ final class TowerStoreTests: XCTestCase {
         let (s, r) = makeStore()
         r.writeError = Disk()
         s.form.lowBatteryCutoff = 12
-        XCTAssertFalse(s.apply())
+        XCTAssertFalse(applied(s))
         XCTAssertEqual(r.alerts.first?.title, "Couldn’t save settings")
         XCTAssertEqual(r.closes, 0)
         XCTAssertTrue(s.isDirty, "nothing was saved, so the edit is still there")

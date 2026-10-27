@@ -94,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var prefsController: PreferencesWindowController?
     /// True while the power-helper admin prompt is up (menu item disabled).
     private var installingPowerHelper = false
+    /// The lid-closed-on-battery question is on screen.
+    private var askingLidClosed = false
     private let launchedAt = Date()
     /// Ids already bannered this run (bounded). Backends can re-report a
     /// page (e.g. after a config reload); one banner per page is enough.
@@ -909,7 +911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 addInfo(menu, Self.batteryRuleLine(cfg))
                 let lid = addAction(menu, "Keep awake with the lid closed on battery", #selector(toggleLidClosedOnBattery), key: "")
                 lid.state = cfg.keepAwakeLidClosedOnBattery ? .on : .off
-                lid.isEnabled = !installingPowerHelper
+                lid.isEnabled = !installingPowerHelper && !askingLidClosed
             }
             menu.addItem(.separator())
         } else {
@@ -1109,7 +1111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// trade-off once, installs the power helper behind the macOS admin
     /// prompt if it's missing, then saves the setting.
     @objc private func toggleLidClosedOnBattery() {
-        guard !installingPowerHelper else { return }
+        guard !installingPowerHelper, !askingLidClosed else { return }
         if coordinator.config.keepAwakeLidClosedOnBattery {
             if !coordinator.setLidClosedOnBattery(false) { lidSettingFailed() }
             return
@@ -1121,8 +1123,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 + "A closed MacBook in a bag will stay awake and warm while agents work."
                 + (coordinator.sleepGuardHelperMissing ? "\n\nmacOS will ask for your password once to allow this." : ""),
             ok: "Turn On", tone: .warning)
-        guard NWDialog.run(confirm, over: prefsController?.window) == 0 else { return }
+        askingLidClosed = true
+        NWDialog.present(confirm, over: prefsController?.window) { [weak self] answer in
+            guard let self else { return }
+            self.askingLidClosed = false
+            guard answer == 0 else { return }
+            self.turnOnLidClosedOnBattery()
+        }
+    }
 
+    /// The rest of the menu toggle, once "Turn On" was pressed: install the
+    /// power helper if it is missing, then save the setting.
+    private func turnOnLidClosedOnBattery() {
         installingPowerHelper = true
         coordinator.checkPowerHelper(refresh: true) { [weak self] status in
             guard let self else { return }
@@ -1153,7 +1165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func showSimpleAlert(_ title: String, _ text: String) {
-        NWDialog.run(.notice(title, text), over: prefsController?.window)
+        NWDialog.present(.notice(title, text), over: prefsController?.window)
     }
 
     @objc private func openResumeLog(_ sender: NSMenuItem) {

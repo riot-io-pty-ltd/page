@@ -231,7 +231,7 @@ final class TowerHooksModel: ObservableObject {
     }
 
     private func notice(_ title: String, _ text: String, tone: NWDialogSpec.Tone = .warning) {
-        _ = store?.ask(.notice(title, text, tone: tone))
+        store?.ask(.notice(title, text, tone: tone))
     }
 
     /// Install… / Uninstall…: plan, show the exact change, and write only if confirmed.
@@ -260,15 +260,17 @@ final class TowerHooksModel: ObservableObject {
         }
         // Explicit confirmation showing the exact change.
         let spec = TowerHookText.confirmSpec(plan, action: action, agent: agent, path: displayPath(plan.fileURL), diff: diffText(plan))
-        guard store.ask(spec) == 0 else { return }
-        do {
-            let backup = try installer.apply(plan)
-            refresh()
-            notice(action == .install ? "Hooks installed" : "Hooks removed",
-                   TowerHookText.doneText(action: action, agent: agent, backupPath: backup.map { displayPath($0) }), tone: .info)
-        } catch {
-            refresh()
-            notice("Couldn't \(action.rawValue) the \(agent.displayName) hooks", (error as? LocalizedError)?.errorDescription ?? "\(error)")
+        store.ask(spec) { [weak self] answer in
+            guard answer == 0, let self else { return }
+            do {
+                let backup = try installer.apply(plan)
+                self.refresh()
+                self.notice(action == .install ? "Hooks installed" : "Hooks removed",
+                            TowerHookText.doneText(action: action, agent: agent, backupPath: backup.map { self.displayPath($0) }), tone: .info)
+            } catch {
+                self.refresh()
+                self.notice("Couldn't \(action.rawValue) the \(agent.displayName) hooks", (error as? LocalizedError)?.errorDescription ?? "\(error)")
+            }
         }
     }
 }

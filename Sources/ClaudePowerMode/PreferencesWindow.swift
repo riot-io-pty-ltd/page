@@ -225,10 +225,14 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         env.setUsageCapture = { on in try UsageCapture().set(on)?.lastPathComponent }
         env.localModelLines = { LocalActivity.menuLines(coordinator.localActivities) }
         env.probeRelay = { base, done in Self.probeRelay(base, done) }
-        env.runDialog = { [weak self] spec in self?.runDialog(spec) ?? spec.cancelIndex }
-        env.showAlert = { [weak self] title, text in _ = self?.runDialog(.notice(title, text)) }
-        env.confirmReplaceBrokenConfig = { [weak self] info in
-            self?.runDialog(.confirm("config.json couldn’t be read", info, ok: "Replace config.json", tone: .warning, destructive: true)) == 0
+        env.runDialog = { [weak self] spec, done in
+            guard let self else { return done(spec.cancelIndex) }
+            self.runDialog(spec, done)
+        }
+        env.showAlert = { [weak self] title, text in self?.runDialog(.notice(title, text)) { _ in } }
+        env.confirmReplaceBrokenConfig = { [weak self] info, done in
+            guard let self else { return done(false) }
+            self.runDialog(.confirm("config.json couldn’t be read", info, ok: "Replace config.json", tone: .warning, destructive: true)) { done($0 == 0) }
         }
         env.close = { [weak self] in self?.window?.close() }
         env.beep = { NSSound.beep() }
@@ -257,8 +261,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
                 DispatchQueue.main.async { done(access) }
             }
         }
-        env.confirm = { [weak self] title, text, okTitle in
-            self?.runDialog(.confirm(title, text, ok: okTitle, tone: .info)) == 0
+        env.confirm = { [weak self] title, text, okTitle, done in
+            guard let self else { return done(false) }
+            self.runDialog(.confirm(title, text, ok: okTitle, tone: .info)) { done($0 == 0) }
         }
         env.openURL = { NSWorkspace.shared.open($0) }
         env.windowVisible = { [weak self] in self?.window?.isVisible == true }
@@ -290,9 +295,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         }.resume()
     }
 
-    /// A Night Watch dialog, centred over the Tower.
-    private func runDialog(_ spec: NWDialogSpec) -> Int {
-        NWDialog.run(spec, over: window)
+    /// A Night Watch dialog, a sheet on the Tower. Returns at once; `done` gets the button.
+    private func runDialog(_ spec: NWDialogSpec, _ done: @escaping (Int) -> Void) {
+        NWDialog.present(spec, over: window, completion: done)
     }
 
     /// The hook installer, made the first time the Phone approvals page asks
@@ -345,7 +350,9 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     /// Reloads every control from disk, so Cancel always reverts and edits
     /// made to config.json by hand show up. `section` picks the page.
     func showAndFocus(section: TowerSection? = nil) {
-        store.load(section: section)
+        // A dialog is up over the form: reloading or switching page under it would
+        // change what its answer applies to. Bring the window forward and leave it be.
+        if window?.attachedSheet == nil { store.load(section: section) }
         NSApp.activate(ignoringOtherApps: true)
         if window?.isVisible != true { window?.center() }
         showWindow(nil)

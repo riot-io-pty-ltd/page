@@ -40,7 +40,7 @@ final class NWConversionTests: XCTestCase {
         var env = TowerEnvironment()
         let installer = HookInstaller(homeDirectory: home, scriptPath: located ?? "")
         env.hookSource = { TowerHookSource(installer: installer, scriptPath: located) }
-        env.runDialog = { spec in shown(spec); return spec.buttons.count > 1 ? answer : 0 }
+        env.runDialog = { spec, done in shown(spec); done(spec.buttons.count > 1 ? answer : 0) }
         return TowerStore(env: env)
     }
 

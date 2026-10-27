@@ -249,7 +249,7 @@ final class InFlightCardTests: XCTestCase {
 
     func testWireIsBounded() {
         var f = facts()
-        f.steps = (0..<6).map { InFlightStep(text: "Bash: " + String(repeating: "y", count: 400) + "\($0)", at: nil) }
+        f.steps = (0..<6).map { InFlightStep(text: "Bash: step\($0) " + String(repeating: "y", count: 400), at: nil) }
         f.workflows = (0..<6).map { InFlightWorkflow(name: "wf\($0)", phase: nil, done: 0, total: 2, agentsRunning: 1) }
         let o = InFlightWire.fields(facts: f, stuckDetail: nil, rateLimitResetsAt: nil, now: now)
         let steps = o["recentSteps"] as? [String] ?? []

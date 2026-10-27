@@ -25,16 +25,17 @@ struct TowerEnvironment {
     /// GET `<relay>/health`; calls back on the main queue.
     var probeRelay: (_ base: URL, _ done: @escaping (_ message: String, _ ok: Bool) -> Void) -> Void = { _, _ in }
     var showAlert: (_ title: String, _ text: String) -> Void = { _, _ in }
-    /// Asks before replacing an unreadable config.json; true = replace it.
-    var confirmReplaceBrokenConfig: (_ info: String) -> Bool = { _ in false }
+    /// Asks before replacing an unreadable config.json; calls back with true = replace it.
+    var confirmReplaceBrokenConfig: (_ info: String, _ done: @escaping (Bool) -> Void) -> Void = { _, done in done(false) }
     var close: () -> Void = {}
     var beep: () -> Void = {}
     var log: (String) -> Void = { _ in }
 
-    /// Shows a Night Watch dialog and waits for a button (0 = the first), like
-    /// `NSAlert.runModal()`. The default presses Cancel, so a harness or test
-    /// that does not fake it never blocks and never confirms anything.
-    var runDialog: (_ spec: NWDialogSpec) -> Int = { $0.cancelIndex }
+    /// Shows a Night Watch dialog and calls back with the button pressed (0 =
+    /// the first). It never blocks: the live window shows a sheet and answers
+    /// later, on main. The default presses Cancel at once, so a harness or test
+    /// that does not fake it never waits and never confirms anything.
+    var runDialog: (_ spec: NWDialogSpec, _ done: @escaping (Int) -> Void) -> Void = { spec, done in done(spec.cancelIndex) }
 
     // Pages that were separate windows. Their defaults touch nothing: no
     // ~/.claude, no Keychain, no cmux, no token. The live window fills them in.
@@ -60,8 +61,8 @@ struct TowerEnvironment {
     var undoKitty: () -> Bool = { false }
     /// Asks macOS for Automation permission (may show its prompt); calls back on main.
     var requestAutomation: (_ id: TerminalCatalog.ID, _ done: @escaping (TerminalProbe.Automation) -> Void) -> Void = { _, done in done(.unknown) }
-    /// An OK / Cancel question; true = OK.
-    var confirm: (_ title: String, _ text: String, _ okTitle: String) -> Bool = { _, _, _ in false }
+    /// An OK / Cancel question; calls back with true = OK.
+    var confirm: (_ title: String, _ text: String, _ okTitle: String, _ done: @escaping (Bool) -> Void) -> Void = { _, _, _, done in done(false) }
     var openURL: (URL) -> Void = { _ in }
     /// The window is on screen (the Terminals page only refreshes then).
     var windowVisible: () -> Bool = { true }
@@ -254,8 +255,31 @@ final class TowerStore: ObservableObject {
         pairing.reveal()
     }
 
-    /// Runs a dialog through the environment (the live window shows it over the Tower).
-    func ask(_ spec: NWDialogSpec) -> Int { env.runDialog(spec) }
+    /// Runs a dialog through the environment (the live window shows it over the Tower)
+    /// and calls back with the button pressed. Never blocks the caller.
+    func ask(_ spec: NWDialogSpec, completion: @escaping (Int) -> Void = { _ in }) {
+        exclusively(spec.buttons.count > 1, cancel: spec.cancelIndex, { done in env.runDialog(spec, done) }, completion)
+    }
+
+    /// A question is open, or waiting to show. A second click on the same button
+    /// before the first dialog is up would otherwise stack a second, identical one.
+    private var askingConfirm = false
+
+    /// Runs `present` unless another question is open, in which case `completion`
+    /// gets `cancel` at once and nothing is shown. Only questions (`isQuestion`)
+    /// are held to one at a time: a notice, usually asked from inside an answer,
+    /// always shows. The flag is cleared before `completion`, which may ask again.
+    private func exclusively(_ isQuestion: Bool, cancel: Int,
+                             _ present: (@escaping (Int) -> Void) -> Void,
+                             _ completion: @escaping (Int) -> Void) {
+        guard isQuestion else { return present(completion) }
+        guard !askingConfirm else { return completion(cancel) }
+        askingConfirm = true
+        present { [weak self] answer in
+            self?.askingConfirm = false
+            completion(answer)
+        }
+    }
 
     private static func usageStatus(_ s: UsageCapture.State) -> UsageCaptureStatus {
         switch s {
@@ -319,11 +343,18 @@ final class TowerStore: ObservableObject {
                 env.showAlert("kitty.conf already says something else", why)
             case .write(_, let added):
                 let text = TerminalCatalog.kittyConfirmText(path: p.url.path, added: added, creating: p.creating, linkTarget: p.linkTarget?.path)
-                guard env.confirm("Turn on kitty remote control?", text, "Add the lines") else { return }
-                switch env.enableKitty() {
-                case .success(let outcome): terminalNotice = TerminalCatalog.kittyDoneText(outcome)
-                case .failure(let f): env.showAlert("Couldn’t set up kitty", f.message)
+                let confirm = env.confirm
+                exclusively(true, cancel: 1, { done in
+                    confirm("Turn on kitty remote control?", text, "Add the lines") { done($0 ? 0 : 1) }
+                }) { [weak self] answer in
+                    guard let self, answer == 0 else { return }
+                    switch self.env.enableKitty() {
+                    case .success(let outcome): self.terminalNotice = TerminalCatalog.kittyDoneText(outcome)
+                    case .failure(let f): self.env.showAlert("Couldn’t set up kitty", f.message)
+                    }
+                    self.refreshTerminals(force: true)
                 }
+                return
             }
         }
         refreshTerminals(force: true)
@@ -459,14 +490,16 @@ final class TowerStore: ObservableObject {
     // MARK: apply, cancel, reset
 
     /// Validates, merges onto the freshest config on disk (only the fields
-    /// this window changed), writes it and reloads. True when it saved.
-    @discardableResult
-    func apply() -> Bool {
+    /// this window changed), writes it and reloads. `done` gets true when it
+    /// saved. It answers at once, except when config.json is unreadable: then
+    /// it waits (without blocking) for the answer to "Replace config.json?".
+    func apply(done: @escaping (Bool) -> Void = { _ in }) {
         let f = form.normalisedForSave()
         if let error = f.validationError(isExecutable: env.isExecutable) {
             env.beep()
             env.showAlert("Can’t save these settings", error)
-            return false
+            done(false)
+            return
         }
         let loaded = env.loadConfig()
         let base: Config
@@ -476,9 +509,17 @@ final class TowerStore: ObservableObject {
             // The file on disk is unreadable. Saving replaces it, so make
             // that an explicit choice (a copy of it has been kept).
             let info = TowerApply.replaceWarning(problem: loaded?.problem, backupName: loaded?.backupURL?.lastPathComponent)
-            guard env.confirmReplaceBrokenConfig(info) else { return false }
-            base = env.runningConfig()
+            env.confirmReplaceBrokenConfig(info) { [weak self] replace in
+                guard let self, replace else { return done(false) }
+                done(self.save(f, onto: self.env.runningConfig()))
+            }
+            return
         }
+        done(save(f, onto: base))
+    }
+
+    /// Writes the merged config; true when it saved.
+    private func save(_ f: PreferencesForm, onto base: Config) -> Bool {
         let config = TowerApply.config(form: f, baseline: baseline, base: base)
         do {
             try env.writeConfig(config)

@@ -42,8 +42,14 @@ final class NWDialogAndPagesTests: XCTestCase {
 
     func testTheDefaultDialogPressesCancelSoNothingIsConfirmedByAHarness() {
         let env = TowerEnvironment()
-        XCTAssertEqual(env.runDialog(.confirm("x", "y", ok: "Do it")), 1)
-        XCTAssertEqual(env.runDialog(.notice("x", "y")), 0)
+        var answers: [Int] = []
+        env.runDialog(.confirm("x", "y", ok: "Do it")) { answers.append($0) }
+        env.runDialog(.notice("x", "y")) { answers.append($0) }
+        XCTAssertEqual(answers, [1, 0])
+        var confirmed: [Bool] = []
+        env.confirm("x", "y", "Do it") { confirmed.append($0) }
+        env.confirmReplaceBrokenConfig("x") { confirmed.append($0) }
+        XCTAssertEqual(confirmed, [false, false])
     }
 
     // MARK: phone approvals
@@ -62,7 +68,7 @@ final class NWDialogAndPagesTests: XCTestCase {
         var env = TowerEnvironment()
         let installer = HookInstaller(homeDirectory: home, scriptPath: "/Applications/Page.app/Contents/Resources/hooks/page-notify.sh")
         env.hookSource = { TowerHookSource(installer: installer, scriptPath: installer.scriptPath) }
-        env.runDialog = { spec in dialogs(spec); return spec.buttons.count > 1 ? answer : 0 }
+        env.runDialog = { spec, done in dialogs(spec); done(spec.buttons.count > 1 ? answer : 0) }
         return TowerStore(config: Config(), macName: "Mac", env: env)
     }
 
@@ -180,7 +186,7 @@ final class NWDialogAndPagesTests: XCTestCase {
         var env = TowerEnvironment()
         env.pairing.info = { .ready(base: URL(string: "https://r.example.workers.dev")!, payload: "p\(regenerated)") }
         env.pairing.regenerate = { regenerated += 1 }
-        env.runDialog = { asked.append($0); return answer }
+        env.runDialog = { spec, done in asked.append(spec); done(answer) }
         let s = TowerStore(env: env)
         s.pairing.refresh()
         s.pairing.regenerate()
