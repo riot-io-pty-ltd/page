@@ -33,8 +33,8 @@ object RenderHarness {
         val queuedNew: Int = 0,
         /** The hold ring pinned at this progress (0..1), for the Irreversible hold button. */
         val hold: Double? = null,
-        /** Sky: the star whose tooltip is open. */
-        val selectedStar: String? = null,
+        /** Lanes: drawn as if live sessions can't load, for this reason (a demo is always ready, so the live check can't show it). */
+        val lanesAvailability: app.page.android.model.SessionAvailability? = null,
         /** Dispatch: drawn as a start that is on its way. */
         val dispatchSending: Boolean = false,
         /** Now: this row is the one arriving (Final approach), drawn [pin]'s seconds in, with the rows below making room. */

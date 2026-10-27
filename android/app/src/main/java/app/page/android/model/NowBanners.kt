@@ -3,7 +3,7 @@ package app.page.android.model
 import java.time.Instant
 
 // Port of iOS/Page/Models/NowBanners.swift. The problems the Now stream
-// surfaces above everything else, and the session-availability copy Sky shows
+// surfaces above everything else, and the session-availability copy Lanes shows
 // when live sessions can't load. These are the inbox banners and the Sessions
 // availability cards, as pure values. Android has no push provider, so the
 // push banner and the other-Macs banners (one pairing only) are not here.
@@ -125,7 +125,7 @@ data class NowBanner(
     }
 }
 
-/** What Sky says when live sessions can't load, and the step that fixes it. */
+/** What Lanes says when live sessions can't load, and the step that fixes it. */
 data class SessionAvailabilityCopy(
     val systemImage: String,
     val tone: Tone,

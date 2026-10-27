@@ -122,7 +122,7 @@ data class DispatchStatus(
                 is SessionDeliveryState.Typed, is SessionDeliveryState.Queued -> {
                     val detail = if (state is SessionDeliveryState.Typed) state.detail else (state as SessionDeliveryState.Queued).detail
                     if (startWaitExpired) {
-                        DispatchStatus("Started, but it hasn't shown up here yet. Look for it in Sky, or in cmux on your Mac.", Tone.WARN, false)
+                        DispatchStatus("Started, but it hasn't shown up here yet. Look for it in Lanes, or in cmux on your Mac.", Tone.WARN, false)
                     } else {
                         DispatchStatus((detail ?: "Started") + ". Opening it here as soon as it appears. On your Mac it's a new cmux workspace.", Tone.GOOD, true)
                     }

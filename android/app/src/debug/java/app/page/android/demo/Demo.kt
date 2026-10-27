@@ -26,7 +26,6 @@ import app.page.android.model.PairedMac
 import app.page.android.model.PendingAction
 import app.page.android.model.RoomEntry
 import app.page.android.model.RowAction
-import app.page.android.model.SkyMode
 import app.page.android.model.StopFlowPhase
 import app.page.android.model.StopOutcome
 import app.page.android.model.TipBook
@@ -66,7 +65,7 @@ object Demo {
         "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
         "decision-failed", "decision-tip",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
-        "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
+        "lanes", "lanes-crowded", "lanes-empty", "lanes-problem", "lanes-paused",
         "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
@@ -75,7 +74,7 @@ object Demo {
         "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
         "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
         "widgets",
-        "ask-story-q1", "ask-story-q2", "ask-story-other", "ask-story-review", "ask-story-sending", "ask-story-refused",
+        "ask-story-q1", "ask-story-q2", "ask-story-other", "ask-story-review", "ask-story-sending", "ask-story-refused", "ask-story-refused-terminal", "ask-story-iterm", "ask-story-terminal",
         "ask-story-answered", "ask-screen", "ask-screen-review", "ask-decision", "ask-hook-q2", "ask-hook-review",
         "motion-pulse-quiet", "motion-pulse-working", "motion-pulse-waiting1", "motion-pulse-waiting3", "motion-pulse-exhale",
         "motion-approach",
@@ -156,8 +155,8 @@ object Demo {
             // The signature motions on their real, unpinned paths (android/tools/render-motion.sh --live records it).
             start()
             if (extras.getString("page_live_script") == "arrivals") liveArrivals() else liveMotion()
-            // On Sky instead, to see its power story (and that nothing redraws while a pause holds still).
-            if (extras.getBoolean("page_live_sky")) AppRouter.selectDestination(app.page.android.model.NWDestination.SKY)
+            // On Lanes instead, to see its power story (and that nothing redraws while a pause holds still).
+            if (extras.getBoolean("page_live_lanes")) AppRouter.selectDestination(app.page.android.model.NWDestination.LANES)
             return
         }
         val render = extras.getString("page_render")
@@ -232,7 +231,8 @@ object Demo {
             screen in setOf("now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-inflight", "now-tip-irreversible") -> listOf(o[0])
             screen in setOf("now-inflight-long", "now-tip-undoable") -> listOf(o[1])
             screen in setOf("now-quiet", "now-brief-quiet", "now-working", "now-flight-quiet", "now-tip-inflight") -> emptyList()
-            screen.startsWith("problem-") || screen == "sky-empty" -> emptyList()
+            screen.startsWith("problem-") || screen == "lanes-empty" -> emptyList()
+            screen == "lanes-paused" -> listOf(DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 600, sub = "low_battery"))
             screen == "now-dusk" -> listOf(DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 600, sub = "low_battery"))
             screen.startsWith("decision") -> o + listOfNotNull(DemoFixtures.page(screen).takeIf { p -> o.none { it.id == p.id } })
             else -> o
@@ -248,14 +248,14 @@ object Demo {
             "problem-asleep", "now-banner" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(1_500))
             "problem-gone" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(3 * 3600 + 600), onAC = false, battery = 12)
             "problem-stale" -> st.copy(macConnected = true, lastHeartbeatAt = now.minusSeconds(8 * 60))
-            "sky-empty" -> st.copy(working = 0)
+            "lanes-empty" -> st.copy(working = 0)
             else -> st
         }
     }
 
     private fun sessionsFor(screen: String): List<LiveSession> = when {
-        screen == "sky-empty" || screen == "stop-none" -> emptyList()
-        screen == "sky-crowded" -> DemoFixtures.crowdedSessions
+        screen == "lanes-empty" || screen == "stop-none" -> emptyList()
+        screen == "lanes-crowded" -> DemoFixtures.crowdedSessions
         screen in setOf("now-quiet", "now-brief-quiet", "now-working") -> DemoFixtures.sessions.filter { it.state != LiveSessionState.WAITING_ON_APPROVAL }
         screen.startsWith("now") -> DemoFixtures.nowSessions(screen)
         screen.startsWith("problem-") -> DemoFixtures.sessions
@@ -285,7 +285,8 @@ object Demo {
                 scrollTop = DemoMotion.scrollTop(motion) ?: (if (screen == "now-working") null else if (screen == "now-brief") "brief" else jumpTop),
                 pinnedArrival = DemoMotion.pinnedArrival(motion), ghosts = DemoMotion.ghosts(motion),
                 dragDp = if (screen == "now-swipe") 84f else null, queuedNew = if (screen == "now-new") 1 else 0,
-                hold = if (screen == "now-hold" || screen == "decision-hold") 0.55 else null, selectedStar = if (screen == "sky-selected") "w1" else null, dispatchSending = screen == "dispatch-sending",
+                hold = if (screen == "now-hold" || screen == "decision-hold") 0.55 else null, dispatchSending = screen == "dispatch-sending",
+                lanesAvailability = if (screen == "lanes-problem") app.page.android.model.SessionAvailability.NeedsRepair(keyMismatch = false) else null,
             ),
         )
         if (isStandalone(motion) || isUnpaired(screen)) return
@@ -337,10 +338,7 @@ object Demo {
         }
         // Where the screen sits.
         when {
-            screen.startsWith("sky") || screen.startsWith("lanes") -> {
-                AppRouter.selectDestination(app.page.android.model.NWDestination.SKY)
-                AppRouter.setSkyModeForRender(if (screen.startsWith("lanes")) SkyMode.LANES else SkyMode.SKY)
-            }
+            screen.startsWith("lanes") -> AppRouter.selectDestination(app.page.android.model.NWDestination.LANES)
             screen.startsWith("decision") -> AppRouter.open(DemoFixtures.page(screen).id)
             screen.startsWith("tower") -> AppRouter.openTower(
                 when (screen) { "tower-budget" -> TowerSection.BUDGET; "tower-glow" -> TowerSection.APPEARANCE; "tower-terminals" -> TowerSection.TERMINALS; "tower-gestures" -> TowerSection.GESTURES; else -> null },

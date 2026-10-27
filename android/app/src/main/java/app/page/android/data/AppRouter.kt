@@ -7,7 +7,7 @@ import app.page.android.model.NWSheet
 import app.page.android.model.RoomEntry
 import app.page.android.model.SessionIntent
 import app.page.android.model.SheetQueue
-import app.page.android.model.SkyMode
+import app.page.android.model.LegacySkyMode
 import app.page.android.model.TowerSection
 import java.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +23,7 @@ enum class AppTab { SESSIONS, INBOX, HISTORY, SETTINGS }
  * AppRouter.swift). A request made before any screen exists simply waits here until the shell appears and
  * shows it.
  *
- * There are exactly two destinations (Now and Sky). Everything else is a sheet or a room, and only one sheet can
+ * There are exactly two destinations (Now and Lanes). Everything else is a sheet or a room, and only one sheet can
  * be up at a time: asking for another while one is showing closes the first, and the new one comes up from
  * [sheetDismissed] ([SheetQueue]). A deep link always lands on Now with the card's Decision sheet over it, never
  * on a tab.
@@ -32,9 +32,7 @@ object AppRouter {
     data class State(
         val destination: NWDestination = NWDestination.NOW,
         val sheets: SheetQueue = SheetQueue(),
-        /** Sky's mode, remembered ([SkyMode.storageKey]). */
-        val skyMode: SkyMode = SkyMode.default,
-        /** The unpair confirmation, asked for by Now, Sky and the Tower alike. */
+        /** The unpair confirmation, asked for by Now, Lanes and the Tower alike. */
         val confirmingUnpair: Boolean = false,
         /** The Paired screen is up after a first pairing; while it is, nothing else asks for notification permission. */
         val pairedWelcome: Boolean = false,
@@ -47,21 +45,18 @@ object AppRouter {
         _state.value = block(_state.value)
     }
 
-    /** Restores what is remembered (call once the preferences exist). */
+    /**
+     * Call once the preferences exist. Nothing is remembered by the router now: the old Sky/Lanes toggle is gone, so
+     * what it stored (an old "sky" meant constellations, which no longer exist) is cleared and ignored.
+     */
     fun restore() {
-        val mode = SkyMode.stored(AppGraph.prefs.string(SkyMode.storageKey))
-        update { it.copy(skyMode = mode) }
+        LegacySkyMode.forget(
+            stored = { AppGraph.prefs.string(LegacySkyMode.storageKey) },
+            clear = { AppGraph.prefs.putString(LegacySkyMode.storageKey, null) },
+        )
     }
 
     fun selectDestination(d: NWDestination) = update { it.copy(destination = d) }
-
-    /** The render harness shows a mode without remembering it. */
-    fun setSkyModeForRender(mode: SkyMode) = update { it.copy(skyMode = mode) }
-
-    fun selectSkyMode(mode: SkyMode) {
-        AppGraph.prefs.putString(SkyMode.storageKey, mode.raw)
-        update { it.copy(skyMode = mode) }
-    }
 
     /** Opens a page's Decision sheet over Now. */
     fun open(interventionId: String, switchTab: Boolean = true) = update {
@@ -106,14 +101,14 @@ object AppRouter {
     fun sheetDismissed() = update { it.copy(sheets = it.sheets.dismissed()) }
 
     /**
-     * Handles `page://intervention/<id>`, `page://sessions` (the widget), `page://now`, `page://sky` and
-     * `page://tower`. Returns false for anything else.
+     * Handles `page://intervention/<id>`, `page://sessions` (the widget), `page://now`, `page://lanes` (and its old
+     * name `page://sky`) and `page://tower`. Returns false for anything else.
      */
     fun handle(url: String): Boolean {
         val link = NWDeepLink.parse(url) ?: return false
         when (link) {
             NWDeepLink.Now -> selectDestination(NWDestination.NOW)
-            NWDeepLink.Sky -> selectDestination(NWDestination.SKY)
+            NWDeepLink.Lanes -> selectDestination(NWDestination.LANES)
             NWDeepLink.Tower -> openTower()
             is NWDeepLink.Decision -> open(link.pageId)
         }

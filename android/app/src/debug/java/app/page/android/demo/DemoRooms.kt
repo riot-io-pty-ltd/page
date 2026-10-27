@@ -215,7 +215,7 @@ object DemoRooms {
     fun sheet(screen: String): AnswerSheet {
         val s = AnswerSheet(ask, !isHook(screen))
         when (screen) {
-            "ask-story-q1", "ask-decision" -> Unit
+            "ask-story-q1", "ask-decision", "ask-story-iterm", "ask-story-terminal" -> Unit
             "ask-story-q2", "ask-screen", "ask-hook-q2" -> { s.tap(1); s.tap(0); s.tap(2) }
             "ask-story-other" -> { s.toggleOther(); s.setOther("develop, but rebase onto main first") }
             else -> { s.tap(1); s.tap(0); s.tap(2); s.toggleOther(); s.setOther("also run the Mac tests"); s.next(); s.tap(0) }
@@ -227,6 +227,8 @@ object DemoRooms {
         val state: SessionDeliveryState = when (screen) {
             "ask-story-sending" -> SessionDeliveryState.Sending
             "ask-story-refused" -> SessionDeliveryState.Refused("question_changed", "That question changed — look at your phone for the new one")
+            // The Mac's own words for a question it would not answer in Terminal.app (AnswerDelivery.terminalAppMessage).
+            "ask-story-refused-terminal" -> SessionDeliveryState.Refused("answer_unsupported", "Terminal.app adds a Return to every key Page types, which would skip or dismiss questions — answer at your Mac, or use tmux or iTerm2")
             "ask-story-answered" -> SessionDeliveryState.Typed("Answered 3 questions in tmux pane %1")
             else -> return null
         }
@@ -243,7 +245,11 @@ object DemoRooms {
         val base = inputs("room-waiting")
         val hook = isHook(screen)
         val page = DemoFixtures.iv(if (hook) "hookpre-q-ask" else "q-ask", "mac-on-claude-code", InterventionKind.USER_INPUT, "Which branch should I base this on?", 70, session = "room-claude")
-        val s = session("room-claude", "mac-on-claude-code", state = if (hook) LiveSessionState.ACTIVE else LiveSessionState.WAITING_ON_USER, host = "tmux", ago = 70, page = if (hook) null else "q-ask").copy(ask = ask)
+        // The wire host the Mac names: a refused answer and the no-ask case are Terminal.app, "ask-story-iterm" is iTerm2.
+        val host = when (screen) { "ask-story-refused-terminal", "ask-story-terminal" -> "Terminal"; "ask-story-iterm" -> "iTerm"; else -> "tmux" }
+        // The Mac sends no `ask` for Terminal.app (it can't answer there), so its question has no answer sheet, only "Tell it instead".
+        val s = session("room-claude", "mac-on-claude-code", state = if (hook) LiveSessionState.ACTIVE else LiveSessionState.WAITING_ON_USER, host = host, ago = 70, page = if (hook) null else "q-ask")
+            .copy(ask = if (screen == "ask-story-terminal") null else ask)
         return base.copy(
             session = s, pageIsHook = hook,
             pageContext = if (hook) ask.questions.withIndex().joinToString("\n\n") { (n, q) -> "Q${n + 1}. ${q.text}\n" + q.options.withIndex().joinToString("\n") { (k, o) -> "${k + 1}. ${o.label}" } } else null,

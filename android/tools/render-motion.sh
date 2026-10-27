@@ -89,7 +89,7 @@ frames=(
   motion-receipt-arm@0.6 motion-receipt-sending@0.3 motion-receipt-sent@0.8 motion-receipt-typed@0.45 motion-receipt-verified@0.95
   motion-receipt-failed@0.06 motion-receipt-failed@0.6 motion-receipt-fold@1.2 motion-receipt-fold@1.45 motion-receipt-sheet@0.95
   motion-hold@0 motion-hold@0.36 motion-hold@0.9 motion-hold@1.5 motion-hold-burst@0.15 motion-hold-burst@0.4
-  sky@3 motion-dusk@0.7 motion-dusk@3 motion-dawn@0.6 motion-dawn@1.2 motion-dawn@2.4
+  lanes@3 motion-dusk@0.7 motion-dusk@3 motion-dawn@0.6 motion-dawn@1.2 motion-dawn@2.4
   now-working@3 motion-dusk-now@0.8 motion-dusk-now@3 motion-dawn-now@0.9 motion-dawn-now@1.8
   motion-brief@0 motion-brief@0.6 motion-brief@1.2 motion-brief@2.6
 )

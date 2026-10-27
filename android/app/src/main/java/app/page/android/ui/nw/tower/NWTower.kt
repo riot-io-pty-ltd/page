@@ -323,13 +323,19 @@ private fun Gestures(actions: TowerScreenActions) {
 
 // MARK: Works with
 
+private fun answerTint(answer: TowerHosts.Answer): Rgba = when (answer) {
+    TowerHosts.Answer.Yes -> NW.Palette.green
+    is TowerHosts.Answer.Limited -> NW.Palette.amber
+    is TowerHosts.Answer.NotYet -> NW.Palette.textTertiary
+}
+
 @Composable
 private fun Terminals() {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Card {
             TowerHosts.hosts.forEachIndexed { i, h ->
                 if (i > 0) Divider()
-                RowBody(h.symbol, NW.Palette.teal, h.name, h.line)
+                RowBody(h.symbol, NW.Palette.teal, h.name, h.line, note = h.answer.line to answerTint(h.answer))
             }
         }
         Text(TowerHosts.setUpLine, style = NW.Typo.caption, color = NW.Palette.textSecondary.color, modifier = Modifier.padding(horizontal = 4.dp))
@@ -393,12 +399,14 @@ private fun IconTile(icon: String, tint: Rgba) {
 }
 
 @Composable
-private fun RowBody(icon: String, tint: Rgba, title: String, detail: String?, trailing: String? = null, chevron: Boolean = false) {
+private fun RowBody(icon: String, tint: Rgba, title: String, detail: String?, trailing: String? = null, chevron: Boolean = false, note: Pair<String, Rgba>? = null) {
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = 14.dp, vertical = 10.dp).semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
         IconTile(icon, tint)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color)
             detail?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textTertiary.color) }
+            // A second, coloured caption line (the Works with list's "Answer questions").
+            note?.let { (text, tint) -> Text(text, style = NW.Typo.caption, color = tint.color) }
         }
         trailing?.let { Text(it, style = NW.Typo.captionStrong, color = NW.Palette.teal.color) }
         if (chevron) Icon(Icons.Outlined.ChevronRight, null, tint = NW.Palette.textQuiet.color, modifier = Modifier.size(16.dp))

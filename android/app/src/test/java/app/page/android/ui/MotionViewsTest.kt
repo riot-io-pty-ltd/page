@@ -3,13 +3,12 @@ package app.page.android.ui
 import app.page.android.model.ApproachModel
 import app.page.android.model.DawnModel
 import app.page.android.model.DuskDawnLog
-import app.page.android.model.SkyStar
 import app.page.android.model.StarState
 import app.page.android.data.NowTicker
 import app.page.android.ui.nw.components.nwClockSleepMillis
 import app.page.android.ui.nw.components.nwClockStepNanos
 import app.page.android.ui.nw.now.ArrivalBook
-import app.page.android.ui.nw.sky.SkyPowerStory
+import app.page.android.ui.nw.lanes.LanesPowerStory
 import app.page.android.ui.nw.theme.AuroraPalette
 import app.page.android.ui.nw.theme.NWMotionPin
 import app.page.android.ui.nw.theme.PAUSED_STAR_FIELD
@@ -23,13 +22,12 @@ import org.junit.Test
 import java.time.Instant
 import kotlin.math.abs
 
-/** The pure halves of the signature-motion views: Sky's power story, the dusk palettes and the arrival book. */
+/** The pure halves of the signature-motion views: Lanes' power story, the dusk palettes and the arrival book. */
 class MotionViewsTest {
     private val t0: Instant = Instant.ofEpochSecond(1_793_063_520)
     private fun at(s: Double): Instant = t0.plusMillis((s * 1000).toLong())
     private fun near(a: Double, b: Double, tol: Double = 1e-6) = abs(a - b) <= tol
 
-    private fun star(id: String, state: StarState, y: Double) = SkyStar(id, id, state, 0.5, y, 1.0, "", null, "Claude", true, 1UL)
 
     // region The dusk palettes
 
@@ -46,15 +44,14 @@ class MotionViewsTest {
 
     // endregion
 
-    // region Sky's power story
+    // region Lanes' power story
 
     @Test
     fun aPauseFallsAndIsDrawnSettledWhenStill() {
         val log = DuskDawnLog()
         log.observe(false, setOf("a", "b"), t0)
         log.observe(true, emptySet(), at(10.0))
-        val stars = listOf(star("a", StarState.PAUSED, 0.3), star("b", StarState.PAUSED, 0.6), star("c", StarState.IDLE, 0.5))
-        val story = SkyPowerStory(true, log, stars)
+        val story = LanesPowerStory(true, log, listOf("a", "b", "c"))
         assertTrue("dusk is falling 0.8 s in", near(story.duskElapsed(at(10.8), null)!!, 0.8, 1e-3))
         assertTrue("still moving while it falls", story.isMoving(at(10.8), null))
         assertFalse("and still once it has fallen: no clock", story.isMoving(at(12.0), null))
@@ -62,9 +59,11 @@ class MotionViewsTest {
         val light = story.skyLight(null, null)
         assertTrue("settled: the night, the band held, the stars all but gone", light.palette == AuroraPalette.night && near(light.band, 1.0) && near(light.stars, PAUSED_STAR_FIELD))
         assertNull("no dawn while paused", story.dawnElapsed(at(11.0), null))
-        val (dim, scale) = story.starLight(stars[0], at(11.2), null)
-        assertTrue("a paused star has exhaled and dimmed with the others", near(dim, DawnModel.dimTo, 1e-3) && near(scale, 0.9, 1e-3))
-        assertEquals("an idle star that was not working stays as it is", 1.0 to 1.0, story.starLight(stars[2], at(11.2), null))
+        val (dim, scale) = story.starLight("a", StarState.PAUSED, at(11.2), null)
+        assertTrue("a paused lane has exhaled and dimmed with the others", near(dim, DawnModel.dimTo, 1e-3) && near(scale, 0.9, 1e-3))
+        assertEquals("an idle lane that was not working stays as it is", 1.0 to 1.0, story.starLight("c", StarState.IDLE, at(11.2), null))
+        assertTrue("the aurora behind the list is fully in once the dusk has fallen", near(light.cover, 1.0))
+        assertTrue("and a pause is a story to show, even settled", story.isShown(at(60.0), null))
         assertTrue("the harness pins a moment", near(story.duskElapsed(at(99.0), NWMotionPin(NWMotionPin.Kind.DUSK, 0.7))!!, 0.7))
         assertEquals("its clocks stop when the dusk has fallen", at(10.0 + DawnModel.duskDuration), story.movingUntil())
     }
@@ -73,7 +72,7 @@ class MotionViewsTest {
     fun aPauseAlreadyUnderWayIsNotReplayed() {
         val log = DuskDawnLog()
         log.observe(true, setOf("a"), t0)
-        val story = SkyPowerStory(true, log, listOf(star("a", StarState.PAUSED, 0.5)))
+        val story = LanesPowerStory(true, log, listOf("a"))
         assertEquals(DawnModel.duskDuration, story.duskElapsed(at(0.2), null)!!, 0.0)
         assertFalse("no clock for an old pause", story.isMoving(at(0.2), null))
         assertNull("and nothing to stop", story.movingUntil())
@@ -87,16 +86,18 @@ class MotionViewsTest {
         log.observe(false, emptySet(), at(20.0))
         log.observe(false, setOf("a"), at(20.3))
         log.observe(false, setOf("a", "b"), at(20.3))
-        val stars = listOf(star("a", StarState.WORKING, 0.9), star("b", StarState.WORKING, 0.9), star("c", StarState.IDLE, 0.4))
-        val story = SkyPowerStory(false, log, stars)
+        // The dawn rises from the bottom, so the lanes lower in the list relight first (a is the bottom lane).
+        val story = LanesPowerStory(false, log, listOf("c", "b", "a"))
         assertNotNull("a confirmed star relights", story.relights["a"])
         assertNull("an unconfirmed star stays dim", story.relights["c"])
         assertTrue("one by one", (story.relights["b"]!! - story.relights["a"]!!) >= DawnModel.stagger - 1e-9)
         assertTrue("the dawn is playing", near(story.dawnElapsed(at(21.0), null)!!, 1.0, 1e-3) && story.isMoving(at(21.0), null))
         val light = story.skyLight(at(20.6), null)
         assertNotNull("the gold sweep is drawn", light.dawn)
-        assertTrue("c is still dim at 2 s", near(story.starLight(stars[2], at(22.0), null).first, DawnModel.dimTo))
-        assertTrue("a is back up by 2 s", story.starLight(stars[0], at(22.0), null).first > 0.95)
+        assertTrue("c is still dim at 2 s", near(story.starLight("c", StarState.IDLE, at(22.0), null).first, DawnModel.dimTo))
+        assertTrue("a is back up by 2 s", story.starLight("a", StarState.WORKING, at(22.0), null).first > 0.95)
+        assertTrue("the aurora behind the list is still fading out while the dawn plays", light.cover in 0.0..1.0 && story.isShown(at(21.0), null))
+        assertTrue("and gone, with nothing shown, once it has settled", near(story.skyLight(at(60.0), null).cover, 0.0) && !story.isShown(at(60.0), null))
         assertNull("drawn still, no dawn plays", story.skyLight(null, null).dawn)
         assertFalse("and the dawn ends", story.isMoving(at(60.0), null))
         val until = story.movingUntil()!!

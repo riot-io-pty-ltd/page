@@ -59,12 +59,12 @@ SHEETS = {
         ("motion-hold-burst@0.15", "passed · burst"),
         ("motion-hold-burst@0.4", "burst · 400 ms"),
     ]),
-    "5-dusk-dawn-sky": ((0, 0, 411, 780), [
-        ("sky@3", "working sky"),
+    "5-dusk-dawn-lanes": ((0, 0, 411, 780), [
+        ("lanes@3", "working lanes"),
         ("motion-dusk@0.7", "cutoff · dusk falls"),
         ("motion-dusk@3", "paused · horizon only"),
         ("motion-dawn@0.6", "power · dawn rises"),
-        ("motion-dawn@1.2", "dawn · stars relight"),
+        ("motion-dawn@1.2", "dawn · lanes relight"),
         ("motion-dawn@2.4", "dawn · settling"),
     ]),
     "5b-dusk-dawn-horizon": ((0, 0, 411, 300), [

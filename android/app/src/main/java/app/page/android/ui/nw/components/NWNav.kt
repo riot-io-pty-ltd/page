@@ -73,8 +73,8 @@ import app.page.android.ui.nw.theme.NW
 import app.page.android.ui.nw.theme.Rgba
 
 /**
- * The bottom bar: Now, the pulse, Sky. Each side carries a badge (the Decide count in amber, the working count
- * in teal). Two places and one verb: a tap on a side switches, a horizontal drag on a side switches (Sky lies to
+ * The bottom bar: Now, the pulse, Lanes. Each side carries a badge (the Decide count in amber, the working count
+ * in teal). Two places and one verb: a tap on a side switches, a horizontal drag on a side switches (Lanes lies to
  * the right of Now), a tap on the pulse button opens Dispatch, and holding the pulse is the Stop ring (see
  * [NWStopOverlay]). The Android adaptation of iOS's floating capsule (board 06): a bar along the bottom edge with
  * the label under each icon, selected side in a tinted pill, and the pulse as a rounded-square button in the middle.
@@ -107,7 +107,7 @@ fun NWNavBar(
         ) {
             NavSide(NWDestination.NOW, "Now", Icons.Outlined.TrackChanges, decideCount, NW.Palette.amber, selection, onSelect, Modifier.weight(1f))
             PulseButton(workingCount, pulseWaiting, pulseLongestWait, onHeld, onPulseTap, onPulseHold, Modifier.size(88.dp, 84.dp))
-            NavSide(NWDestination.SKY, "Sky", Icons.Outlined.StarOutline, workingCount, NW.Palette.teal, selection, onSelect, Modifier.weight(1f))
+            NavSide(NWDestination.LANES, "Lanes", Icons.Outlined.StarOutline, workingCount, NW.Palette.teal, selection, onSelect, Modifier.weight(1f))
         }
     }
 }

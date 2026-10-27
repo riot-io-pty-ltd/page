@@ -104,7 +104,7 @@ private fun NWMain(onRequestNotifications: () -> Unit) {
             pulseWaiting = screen.model.pulseWaiting, pulseLongestWait = screen.pulse.longestWait,
             stop = stop, stopPlan = screen.stopPlan, biometry = biometry, held = pinnedHeld ?: held, onHeld = { held = it },
             onPulseTap = AppRouter::openDispatch, onPulseHold = { StopCoordinator.holdCompleted(screen.stopPlan) },
-            now = { app.page.android.ui.nw.now.NowScreen() }, sky = { app.page.android.ui.nw.sky.SkyScreen() },
+            now = { app.page.android.ui.nw.now.NowScreen() }, lanes = { app.page.android.ui.nw.lanes.LanesScreen() },
             overlays = { Sheets(sheets.current, onRequestNotifications) },
         )
     }

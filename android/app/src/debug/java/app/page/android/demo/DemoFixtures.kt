@@ -96,7 +96,7 @@ object DemoFixtures {
         s("w5", "web", "bottle-flip", LiveSessionState.ACTIVE, host = "Ghostty", ago = 31, preview = "npm run build"),
     )
 
-    /** A full sky: 17 sessions over 11 projects, long names, several that need you, one stuck. */
+    /** A full fleet: 17 sessions over 11 projects, long names, several that need you, one stuck. */
     val crowdedSessions: List<LiveSession> = sessions + listOf(
         s("c1", "deploy", "relay-worker-edge-router-service", LiveSessionState.WAITING_ON_APPROVAL, ago = 90, preview = "wrangler deploy --env production"),
         s("c2", "tests", "relay-worker-edge-router-service", LiveSessionState.ACTIVE, ago = 12, preview = "vitest"),

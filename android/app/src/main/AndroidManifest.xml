@@ -37,12 +37,13 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- page://now, page://sky and page://tower (the widget, the Quick Settings tile). -->
+            <!-- page://now, page://lanes (page://sky is its old name) and page://tower (the widget, the Quick Settings tile). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="page" android:host="now" />
+                <data android:scheme="page" android:host="lanes" />
                 <data android:scheme="page" android:host="sky" />
                 <data android:scheme="page" android:host="tower" />
             </intent-filter>

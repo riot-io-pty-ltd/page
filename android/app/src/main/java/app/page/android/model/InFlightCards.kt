@@ -257,7 +257,7 @@ enum class FlightHealth {
 
         /**
          * The Mac's word when it sent one, else what the phone can tell: an open stuck or looping page for this
-         * session (as Sky does), a rate limit. A Mac that sends working fields but no `health` says "normal" (it
+         * session (as Lanes does), a rate limit. A Mac that sends working fields but no `health` says "normal" (it
          * leaves the word out then), so the phone does not guess a long silence over it; only a Mac that sends
          * nothing gets that guess. Pure.
          */
@@ -284,7 +284,7 @@ enum class FlightHealth {
                 else -> null
             }
 
-        /** Sessions with an open stuck or looping page (the same test Sky uses). */
+        /** Sessions with an open stuck or looping page (the same test Lanes uses). */
         fun stuckSessionIds(interventions: List<Intervention>): Set<String> =
             interventions.filter { it.kind == InterventionKind.IDLE && PageSubtype.isStuck(it.subtype) }.map { it.sessionId }.toSet()
     }

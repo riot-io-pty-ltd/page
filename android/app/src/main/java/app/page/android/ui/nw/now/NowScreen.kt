@@ -339,7 +339,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
                     NWInFlightSection(
                         screen.inFlight, tip = tip?.takeIf { it.tip == NWTip.IN_FLIGHT }, biometry = biometry,
                         onOpen = { id, entry -> TipStore.retire(NWTip.IN_FLIGHT); AppRouter.openSession(id, entry) },
-                        onToggle = NowStore::toggleInFlightExpanded, onHeader = { AppRouter.selectDestination(NWDestination.SKY) }, onDismissTip = { TipStore.retire(it) },
+                        onToggle = NowStore::toggleInFlightExpanded, onHeader = { AppRouter.selectDestination(NWDestination.LANES) }, onDismissTip = { TipStore.retire(it) },
                     )
                 })
             }

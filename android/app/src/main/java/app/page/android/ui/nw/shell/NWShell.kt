@@ -23,8 +23,8 @@ import app.page.android.ui.nw.components.NWStopOverlay
 import app.page.android.ui.nw.theme.LocalReduceMotion
 
 /**
- * The frame of the app: the night sky behind, Now or Sky in front (Sky lies to the right of Now, and they slide
- * as one sky), the bar at the bottom, and the Stop ring over everything while the pulse is held. Pure: the live
+ * The frame of the app: the night sky behind, Now or Lanes in front (Lanes lies to the right of Now, and they slide
+ * as one), the bar at the bottom, and the Stop ring over everything while the pulse is held. Pure: the live
  * container and the render harness both fill it in. (iOS NWShell.swift.)
  *
  * Gesture owners: a horizontal drag on the Horizon or on a side of the bar switches destination; cards own their
@@ -50,7 +50,7 @@ fun NWShell(
     onPulseTap: () -> Unit = {},
     onPulseHold: () -> Unit = {},
     now: @Composable () -> Unit,
-    sky: @Composable () -> Unit,
+    lanes: @Composable () -> Unit,
     overlays: @Composable BoxScope.() -> Unit = {},
 ) {
     val reduce = LocalReduceMotion.current
@@ -62,14 +62,14 @@ fun NWShell(
                 if (reduce) {
                     fadeIn(tween(0)) togetherWith fadeOut(tween(0))
                 } else {
-                    val toSky = targetState == NWDestination.SKY
-                    (slideInHorizontally(tween(320)) { if (toSky) it / 3 else -it / 3 } + fadeIn(tween(320))) togetherWith
-                        (slideOutHorizontally(tween(320)) { if (toSky) -it / 3 else it / 3 } + fadeOut(tween(200)))
+                    val toLanes = targetState == NWDestination.LANES
+                    (slideInHorizontally(tween(320)) { if (toLanes) it / 3 else -it / 3 } + fadeIn(tween(320))) togetherWith
+                        (slideOutHorizontally(tween(320)) { if (toLanes) -it / 3 else it / 3 } + fadeOut(tween(200)))
                 }
             },
             modifier = Modifier.fillMaxSize(),
             label = "destination",
-        ) { d -> if (d == NWDestination.NOW) now() else sky() }
+        ) { d -> if (d == NWDestination.NOW) now() else lanes() }
         NWNavBar(
             selection = destination, decideCount = decideCount, workingCount = workingCount, onSelect = onDestinationChange,
             modifier = Modifier.align(Alignment.BottomCenter), pulseWaiting = pulseWaiting ?: decideCount, pulseLongestWait = pulseLongestWait,

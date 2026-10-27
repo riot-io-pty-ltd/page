@@ -60,7 +60,7 @@ class MainActivity : FragmentActivity() {
 
     /**
      * `page://intervention/<id>` (a notification tap) opens that page's Decision sheet over Now; `page://now`,
-     * `page://sky` and `page://tower` (a widget, the Quick Settings tile) open those.
+     * `page://lanes` (or its old name `page://sky`) and `page://tower` (a widget, the Quick Settings tile) open those.
      */
     private fun handle(intent: Intent?) {
         intent?.data?.toString()?.let { AppRouter.handle(it) }

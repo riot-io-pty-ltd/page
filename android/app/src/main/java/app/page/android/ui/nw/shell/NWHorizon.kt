@@ -116,7 +116,7 @@ private class HorizonClocks(var mode: PulseModel.Mode, var dusk: Boolean, var pa
 /**
  * The Horizon: the top of the Now screen. Aurora behind, the pulse in the middle, the one honest sentence below it. It
  * fades into the page, so it has no edge of its own to look cut off. (iOS NWHorizon.) A horizontal drag on it switches
- * between Now and Sky ([onSwipe]).
+ * between Now and Lanes ([onSwipe]).
  *
  * It plays three of the signature motions on one clock: the pulse itself; the exhale when the last waiting item clears
  * (the pulse turns amber to teal over 800 ms and the aurora settles with it); and dusk and dawn (the aurora fades to

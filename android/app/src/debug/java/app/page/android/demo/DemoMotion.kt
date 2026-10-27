@@ -33,7 +33,7 @@ import java.time.Instant
 
 /**
  * The signature motions, one moment at a time, for the render harness (iOS RenderHarnessMotion.swift):
- * `--es page_render motion-<name> --ef page_time <seconds>` draws the real screen (the shell, Now, Sky, the Decision
+ * `--es page_render motion-<name> --ef page_time <seconds>` draws the real screen (the shell, Now, Lanes, the Decision
  * sheet) with that motion pinned `seconds` in, so a contact sheet can be built frame by frame
  * (android/tools/render-motion.sh). In-memory fixtures only, like the rest of the harness.
  */
@@ -86,7 +86,7 @@ object DemoMotion {
         "motion-dusk-now" -> "now-dusk"
         "motion-brief" -> "now-brief-quiet"
         "motion-receipt-sheet" -> "decision-considered"
-        "motion-dusk", "motion-dawn" -> "sky"
+        "motion-dusk", "motion-dawn" -> "lanes"
         else -> "now"
     }
 
@@ -105,7 +105,7 @@ object DemoMotion {
             // Three decisions (the stock fixture's third page is a Look), so the headline says "3 need you" over the
             // three rings the pulse draws for them.
             "motion-pulse-waiting3" -> listOf(o[0], o[1], DemoFixtures.iv("p5", "sate-t", InterventionKind.APPROVAL, "[Bash] pio run -t upload\nFlash the board", 90, session = "w2"))
-            // Paused for battery: the Mac's low-battery page is what pauses the sky.
+            // Paused for battery: the Mac's low-battery page is what pauses the fleet.
             "motion-dusk" -> o + DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 30, sub = "low_battery")
             "motion-dawn" -> o
             else -> null
@@ -122,7 +122,7 @@ object DemoMotion {
         else -> null
     }
 
-    /** The power story behind Sky's dusk and dawn, built with the same observations the live app makes. */
+    /** The power story behind Lanes' dusk and dawn, built with the same observations the live app makes. */
     fun power(screen: String): DuskDawnLog? {
         if (screen != "motion-dusk" && screen != "motion-dawn") return null
         val now = DemoFixtures.now

@@ -85,7 +85,7 @@ fun NWInFlightSection(
 ) {
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button, onClickLabel = "Goes to Sky", onClick = onHeader).semantics(mergeDescendants = true) {
+            Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable(role = Role.Button, onClickLabel = "Goes to Lanes", onClick = onHeader).semantics(mergeDescendants = true) {
                 heading(); contentDescription = "In flight, ${section.total}"
             },
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically,

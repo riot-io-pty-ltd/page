@@ -9,7 +9,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Navigation (the Now and Sky pages, the sheet queue, deep links, the Sky mode) and wire compatibility for the Mac's
+ * Navigation (the Now and Lanes pages, the sheet queue, deep links, the retired Sky mode) and wire compatibility for the Mac's
  * optional fields, ported from the "Navigation, sheets and links" checks in iOS/Tests/LogicTests.swift and the
  * decoding rules in iOS/Page/Models. Everything the Mac may or may not send is optional: an old Mac's payload
  * decodes, and a new one's extra fields are ignored.
@@ -17,18 +17,18 @@ import org.junit.Test
 class NavigationWireTest {
     // MARK: navigation
 
-    @Test fun `a leftward drag from Now reveals Sky, a rightward one from Sky returns to Now, and a vertical drag is a scroll`() {
-        assertEquals(NWDestination.SKY, NWDestination.afterDrag(NWDestination.NOW, -60.0))
+    @Test fun `a leftward drag from Now reveals Lanes, a rightward one from Lanes returns to Now, and a vertical drag is a scroll`() {
+        assertEquals(NWDestination.LANES, NWDestination.afterDrag(NWDestination.NOW, -60.0))
         assertEquals(NWDestination.NOW, NWDestination.afterDrag(NWDestination.NOW, 60.0))
-        assertEquals(NWDestination.NOW, NWDestination.afterDrag(NWDestination.SKY, 60.0))
-        assertEquals(NWDestination.SKY, NWDestination.afterDrag(NWDestination.SKY, -60.0))
+        assertEquals(NWDestination.NOW, NWDestination.afterDrag(NWDestination.LANES, 60.0))
+        assertEquals(NWDestination.LANES, NWDestination.afterDrag(NWDestination.LANES, -60.0))
         assertEquals(NWDestination.NOW, NWDestination.afterDrag(NWDestination.NOW, -60.0, vertical = 80.0))
         assertEquals("a drag of 45 with 40 down is not horizontal", NWDestination.NOW, NWDestination.afterDrag(NWDestination.NOW, -45.0, vertical = 40.0))
-        assertEquals(NWDestination.SKY, NWDestination.afterDrag(NWDestination.NOW, -45.0))
+        assertEquals(NWDestination.LANES, NWDestination.afterDrag(NWDestination.NOW, -45.0))
         assertTrue(NWDestination.isHorizontal(60.0, 40.0))
         assertFalse(NWDestination.isHorizontal(50.0, 40.0))
-        assertEquals(NWDestination.SKY, NWDestination.NOW.other)
-        assertEquals(NWDestination.NOW, NWDestination.SKY.other)
+        assertEquals(NWDestination.LANES, NWDestination.NOW.other)
+        assertEquals(NWDestination.NOW, NWDestination.LANES.other)
     }
 
     @Test fun `a sheet waits for the one already up, a repeat changes nothing, and close clears both`() {
@@ -52,21 +52,24 @@ class NavigationWireTest {
         assertEquals("setting nil keeps a pending sheet", NWSheet.History, q.pending)
     }
 
-    @Test fun `deep links open the decision, Sky, Now or the Tower, and anything else is nothing`() {
+    @Test fun `deep links open the decision, Lanes, Now or the Tower, and anything else is nothing`() {
         assertEquals(NWDeepLink.Decision("abc"), NWDeepLink.parse("page://intervention/abc"))
-        assertEquals(NWDeepLink.Sky, NWDeepLink.parse("page://sessions"))
-        assertEquals(NWDeepLink.Sky, NWDeepLink.parse("page://sky"))
+        assertEquals(NWDeepLink.Lanes, NWDeepLink.parse("page://sessions"))
+        assertEquals(NWDeepLink.Lanes, NWDeepLink.parse("page://lanes"))
+        assertEquals("the old name still opens Lanes", NWDeepLink.Lanes, NWDeepLink.parse("page://sky"))
         assertEquals(NWDeepLink.Now, NWDeepLink.parse("page://now"))
         assertEquals(NWDeepLink.Tower, NWDeepLink.parse("page://tower"))
         assertNull(NWDeepLink.parse("https://x"))
         assertNull(NWDeepLink.parse("page://nonsense"))
     }
 
-    @Test fun `the Sky mode is Sky when missing or unknown, and Lanes round-trips`() {
-        assertEquals(SkyMode.SKY, SkyMode.stored(null))
-        assertEquals(SkyMode.SKY, SkyMode.stored("bogus"))
-        assertEquals(SkyMode.LANES, SkyMode.stored("lanes"))
-        assertEquals("page.skyMode", SkyMode.storageKey)
+    @Test fun `there are two destinations, Now then Lanes, and the old sky name is none of them`() {
+        assertEquals(listOf("now", "lanes"), NWDestination.entries.map { it.raw })
+        assertNull(NWDestination.entries.firstOrNull { it.raw == "sky" })
+    }
+
+    @Test fun `the old Sky mode key is named so it can be cleared`() {
+        assertEquals("page.skyMode", LegacySkyMode.storageKey)
     }
 
     // MARK: wire compatibility: an old Mac's payload and a new one's

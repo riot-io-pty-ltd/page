@@ -41,7 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
- * Everything Now and Sky draw, built from what the phone already holds (inbox pages, live sessions, the Mac's
+ * Everything Now and Lanes draw, built from what the phone already holds (inbox pages, live sessions, the Mac's
  * status and history, delivery state, the away record), off the main thread, as one value. The pure builders
  * ([NowModel], [InFlightSection], [SettledLog], [SkyModel] ...) do the work; this only gathers inputs and applies
  * the one stateful rule: the order never re-sorts under a finger ([StableOrder]).

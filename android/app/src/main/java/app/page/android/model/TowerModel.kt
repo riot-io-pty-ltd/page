@@ -40,25 +40,49 @@ enum class TowerSection(val raw: String) {
  * (Page ▸ Tower ▸ Terminals) is where each one is set up and where its live status shows, so nothing here is a switch.
  */
 object TowerHosts {
+    /**
+     * Whether the phone's answer sheet can press a question's keys in that terminal. Mirrors the Mac's
+     * `TerminalCatalog.AnswerSupport` (measured end to end on Claude Code 2.1.311). Only a display: whether the
+     * answer sheet is offered for one session is the Mac's call (it sends `ask` only for a terminal that takes
+     * answer keys), never this list's.
+     */
+    sealed interface Answer {
+        data object Yes : Answer
+
+        /** Works, with a stated limit. */
+        data class Limited(val why: String) : Answer
+
+        /** Refused up front: why, and what to use instead. */
+        data class NotYet(val why: String) : Answer
+
+        val line: String
+            get() = when (this) {
+                Yes -> "Answer questions: yes"
+                is Limited -> "Answer questions: with limits — $why"
+                is NotYet -> "Answer questions: not yet — $why"
+            }
+    }
+
     data class Host(
         val name: String,
         /** A semantic icon name (the views map it to an icon). */
         val symbol: String,
         /** What the phone can do there, in a line. */
         val line: String,
+        val answer: Answer,
     ) {
         val id: String get() = name
     }
 
     val hosts: List<Host> = listOf(
-        Host("Terminal", "macwindow", "reply and approve; the Mac asks macOS for permission once"),
-        Host("iTerm2", "terminal", "reply, approve and stop; the Mac asks macOS for permission once"),
-        Host("tmux", "rectangle.split.3x1", "reply, approve, stop and see the screen, in any terminal app"),
-        Host("cmux", "square.grid.2x2", "everything, and start new sessions from here"),
-        Host("WezTerm", "terminal.fill", "reply, approve, stop and see the screen; nothing to set up"),
-        Host("kitty", "pawprint", "reply, approve, stop and see the screen; one click turns on remote control"),
-        Host("Herdr", "rectangle.3.group", "reply, approve, stop and see the screen; nothing to set up"),
-        Host("Claude Squad", "person.3", "each agent is a tmux pane, so it works like tmux"),
+        Host("Terminal", "macwindow", "reply and approve; the Mac asks macOS for permission once", Answer.NotYet("Terminal adds a Return to every key Page types; use tmux or iTerm2")),
+        Host("iTerm2", "terminal", "reply, approve and stop; the Mac asks macOS for permission once", Answer.Yes),
+        Host("tmux", "rectangle.split.3x1", "reply, approve, stop and see the screen, in any terminal app", Answer.Yes),
+        Host("cmux", "square.grid.2x2", "everything, and start new sessions from here", Answer.Yes),
+        Host("WezTerm", "terminal.fill", "reply, approve, stop and see the screen; nothing to set up", Answer.Yes),
+        Host("kitty", "pawprint", "reply, approve, stop and see the screen; one click turns on remote control", Answer.Yes),
+        Host("Herdr", "rectangle.3.group", "reply, approve, stop and see the screen; nothing to set up", Answer.Yes),
+        Host("Claude Squad", "person.3", "each agent is a tmux pane, so it works like tmux", Answer.Yes),
     )
 
     /** Where to set them up. */
@@ -189,7 +213,7 @@ data class TowerBudget(
 object TowerScroll {
     enum class Source { CHIP, RUNWAY, MOON }
 
-    /** The Runway opens the Tower at Budget; the Sky's moon opens it at Power. */
+    /** The Runway opens the Tower at Budget; the moon on Lanes opens it at Power. */
     fun target(source: Source): TowerSection? = when (source) {
         Source.RUNWAY -> TowerSection.BUDGET
         Source.MOON -> TowerSection.POWER

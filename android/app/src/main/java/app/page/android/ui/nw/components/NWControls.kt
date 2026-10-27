@@ -324,7 +324,7 @@ fun NWRing(progress: Double, color: Rgba, modifier: Modifier = Modifier, lineWid
     }
 }
 
-/** Unblocked, Shipped and Calm as three concentric rings (the glyph in the corner of the Horizon and in Sky's "Tonight" card). */
+/** Unblocked, Shipped and Calm as three concentric rings (the glyph in the corner of the Horizon and in the "Tonight" card). */
 @Composable
 fun NWConcentricRings(rings: List<RingStat>, modifier: Modifier = Modifier, size: Dp = 44.dp) {
     val lw = maxOf(3.dp, size / 9)

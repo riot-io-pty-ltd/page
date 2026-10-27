@@ -17,7 +17,7 @@ import app.page.android.model.MotionCurve
 import app.page.android.ui.nw.theme.Rgba
 
 // DUSK AND DAWN, drawn (`DawnModel` for the timing): the grey horizon band that holds while agents are paused for
-// battery, and the dawn's gold light rising from it when power comes back. Shared by the Horizon, Sky and the Return
+// battery, and the dawn's gold light rising from it when power comes back. Shared by the Horizon, Lanes and the Return
 // Brief's sunrise. (iOS NWDuskDawn.swift.)
 
 /**

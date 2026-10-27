@@ -9,7 +9,7 @@ import kotlin.math.sin
 
 /**
  * Port of iOS/Page/Models/PulseModel.swift. THE PULSE: one glyph on every surface (the Horizon, the nav bar's
- * button, Sky's stars, the widgets). Still star-white when all is quiet; a teal breath every 4 s while agents
+ * button, the lane glyphs, the widgets). Still star-white when all is quiet; a teal breath every 4 s while agents
  * work (a little faster with more of them); an amber ripple when something needs you, one ring per waiting
  * item, the rate rising with the longest wait and capped at one ring every 1.5 s; a low dusk glow while paused
  * for battery. When the last item clears, the pulse turns from amber to teal over 800 ms with one long exhale.
