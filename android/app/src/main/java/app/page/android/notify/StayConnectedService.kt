@@ -21,6 +21,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -61,12 +63,19 @@ class StayConnectedService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // The notification is the live status: it follows the connection and what Now says.
         scope.launch {
-            RelayClient.connection.collectLatest { state ->
-                if (running) NotificationManagerCompatSafe.update(this@StayConnectedService, notification(state))
-            }
+            kotlinx.coroutines.flow.combine(RelayClient.connection, app.page.android.data.NowStore.screen) { c, n -> Pair(c, n) }
+                .map { (c, n) -> LiveNotification.status(n.model.headline, n.model.subline, n.model.runway, c == RelayClient.ConnectionState.CONNECTED) }
+                .distinctUntilChanged()
+                .collectLatest { status ->
+                    lastStatus = status
+                    if (running) NotificationManagerCompatSafe.update(this@StayConnectedService, notification(RelayClient.connection.value))
+                }
         }
     }
+
+    private var lastStatus: LiveNotification.Status? = null
 
     override fun onDestroy() {
         running = false
@@ -90,6 +99,7 @@ class StayConnectedService : Service() {
             this, 1, Intent(this, StayConnectedService::class.java).setAction(ACTION_TURN_OFF),
             PendingIntent.FLAG_IMMUTABLE,
         )
+        lastStatus?.let { st -> if (state == RelayClient.ConnectionState.CONNECTED || st.headline.isNotEmpty()) return LiveNotification.build(this, PageNotifications.CHANNEL_CONNECTION, st, turnOff) }
         val text = when (state) {
             RelayClient.ConnectionState.CONNECTED -> "Connected to your relay. You'll be paged the moment an agent needs you."
             RelayClient.ConnectionState.CONNECTING -> "Connecting to your relay…"

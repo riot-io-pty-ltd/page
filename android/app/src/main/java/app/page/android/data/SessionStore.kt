@@ -4,6 +4,9 @@ import android.util.Log
 import app.page.android.model.CommandResult
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
+import app.page.android.model.AnswerPicker
+import app.page.android.model.AnswerSheet
+import app.page.android.model.SessionTarget
 import app.page.android.model.MacPresence
 import app.page.android.model.SentSessionCommand
 import app.page.android.model.SessionAvailability
@@ -94,6 +97,13 @@ object SessionStore {
         val startedSessionId: String? = null,
     ) {
         fun session(id: String): LiveSession? = sessions.firstOrNull { it.id == id }
+
+        /** The newest `answer` sent for this very question (iOS `latestAnswer`). */
+        fun latestAnswer(sessionId: String, promptKey: String): SentSessionCommand? =
+            AnswerPicker.delivery(commands.values.toList(), sessionId, promptKey)
+
+        /** The newest message typed into this session from the phone. */
+        fun latestInput(sessionId: String): SentSessionCommand? = sentMessages(sessionId).lastOrNull()
 
         /** Messages typed into this session from the phone, oldest first. */
         fun sentMessages(sessionId: String): List<SentSessionCommand> =
@@ -413,43 +423,79 @@ object SessionStore {
     /**
      * Types [text] into the session. Returns the problem to show instead when
      * the text can't be sent; otherwise the message's delivery state appears
-     * in `commands` under a fresh `clientId`.
+     * in `commands` under a fresh `clientId`. [target] is what the room showed
+     * when it opened; the Mac refuses if the session no longer matches.
      */
-    fun sendInput(sessionId: String, text: String): SessionComposer.Problem? {
+    fun sendInput(sessionId: String, text: String, target: SessionTarget? = null): SessionComposer.Problem? {
         val clean = when (val v = SessionComposer.validate(text)) {
             is SessionComposer.Validation.Bad -> return v.problem
             is SessionComposer.Validation.Ok -> v.text
         }
         if (_state.value.isDemoMode) {
-            simulateDemoCommand(SessionCommandKind.INPUT, sessionId, clean)
+            simulateDemoCommand(SessionCommandKind.INPUT, sessionId, clean, target)
             return null
         }
         val clientId = UUID.randomUUID().toString().lowercase()
-        val body = encrypt(SessionCommand.Input(sessionId, clean), clientId)
+        val body = encrypt(SessionCommand.Input(sessionId, clean, target), clientId)
         if (body == null) {
-            record(clientId, sessionId, SessionCommandKind.INPUT, clean, SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."))
+            record(clientId, sessionId, SessionCommandKind.INPUT, clean, SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."), target)
             return null
         }
         if (!SessionComposer.fitsRelay(body)) return SessionComposer.Problem.TooLarge
-        record(clientId, sessionId, SessionCommandKind.INPUT, clean, SessionDeliveryState.Sending)
+        record(clientId, sessionId, SessionCommandKind.INPUT, clean, SessionDeliveryState.Sending, target)
         deliver(body, clientId, "input")
         return null
     }
 
-    /** Stop: the Mac presses Esc in the session. */
-    fun interrupt(sessionId: String) {
+    /** Stop: the Mac presses Esc in the session. [target] is what the room showed; the Mac refuses if the session no longer matches. */
+    fun interrupt(sessionId: String, target: SessionTarget? = null) {
         if (_state.value.isDemoMode) {
-            simulateDemoCommand(SessionCommandKind.INTERRUPT, sessionId, "")
+            simulateDemoCommand(SessionCommandKind.INTERRUPT, sessionId, "", target)
             return
         }
         val clientId = UUID.randomUUID().toString().lowercase()
-        val body = encrypt(SessionCommand.Interrupt(sessionId), clientId)
+        val body = encrypt(SessionCommand.Interrupt(sessionId, target), clientId)
         if (body == null) {
-            record(clientId, sessionId, SessionCommandKind.INTERRUPT, "", SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."))
+            record(clientId, sessionId, SessionCommandKind.INTERRUPT, "", SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."), target)
             return
         }
-        record(clientId, sessionId, SessionCommandKind.INTERRUPT, "", SessionDeliveryState.Sending)
+        record(clientId, sessionId, SessionCommandKind.INTERRUPT, "", SessionDeliveryState.Sending, target)
         deliver(body, clientId, "interrupt")
+    }
+
+    /**
+     * Sends the answers to the question the session is blocked on, the Mac's `answer` op: it checks the screen
+     * before every key and refuses if the question changed. Nothing is typed until the person submits.
+     */
+    fun sendAnswer(sessionId: String, sheet: AnswerSheet, target: SessionTarget? = null) {
+        val answers = sheet.wire() ?: return
+        val summary = sheet.summaryLine
+        val promptKey = sheet.ask.id
+        if (_state.value.isDemoMode) {
+            simulateDemoCommand(SessionCommandKind.ANSWER, sessionId, summary, target, promptKey)
+            return
+        }
+        val clientId = UUID.randomUUID().toString().lowercase()
+        val body = encrypt(SessionCommand.Answer(sessionId, promptKey, answers, target), clientId)
+        if (body == null) {
+            record(clientId, sessionId, SessionCommandKind.ANSWER, summary, SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."), target, promptKey)
+            return
+        }
+        record(clientId, sessionId, SessionCommandKind.ANSWER, summary, SessionDeliveryState.Sending, target, promptKey)
+        deliver(body, clientId, "answer")
+    }
+
+    /** Stop-all: Esc in every working session (the pulse's hold). The Mac's own answer comes later; this is the relay's. */
+    suspend fun interruptAll(): SessionCommandOutcome {
+        if (_state.value.isDemoMode) {
+            delay(600)
+            return SessionCommandOutcome.Accepted
+        }
+        val clientId = UUID.randomUUID().toString().lowercase()
+        val body = encrypt(SessionCommand.InterruptAll, clientId) ?: return SessionCommandOutcome.Failed("This phone has no session key. Re-pair with your Mac.")
+        val outcome = RelayClient.postSessionCommand(body)
+        noteOutcome(outcome)
+        return outcome
     }
 
     private fun encrypt(command: SessionCommand, clientId: String): String? {
@@ -462,10 +508,13 @@ object SessionStore {
         }
     }
 
-    private fun record(clientId: String, sessionId: String, kind: SessionCommandKind, text: String, state: SessionDeliveryState) {
+    private fun record(
+        clientId: String, sessionId: String, kind: SessionCommandKind, text: String, state: SessionDeliveryState,
+        target: SessionTarget? = null, promptKey: String? = null,
+    ) {
         val sentAt = Instant.now()
         val prior = _state.value.transcripts[sessionId]?.entries?.map { it.id }?.toSet()
-        update { it.copy(commands = pruned(it.commands + (clientId to SentSessionCommand(clientId, sessionId, kind, text, sentAt, state, prior)))) }
+        update { it.copy(commands = pruned(it.commands + (clientId to SentSessionCommand(clientId, sessionId, kind, text, sentAt, state, prior, target, promptKey)))) }
         if (!state.isPending) return
         timeoutJobs[clientId] = scope.launch {
             delay((SessionDeliveryState.RESULT_TIMEOUT * 1000).toLong())
@@ -664,6 +713,11 @@ object SessionStore {
 
     private fun demoDiff(sessionId: String): SessionDiff? = demoDiffs[sessionId]
 
+    /** Seeds sent messages and answers (the room's receipts, the question card's delivery) for fixtures. */
+    fun seedDemoCommands(commands: List<SentSessionCommand>) {
+        update { it.copy(commands = it.commands + commands.associateBy { c -> c.clientId }) }
+    }
+
     fun seedDemoExtras(diffs: Map<String, SessionDiff>, folders: StartFolders) {
         demoDiffs = diffs
         demoFolders = folders
@@ -696,14 +750,16 @@ object SessionStore {
      * the same refusal rules as the Mac's input gate where they're visible
      * from here.
      */
-    private fun simulateDemoCommand(kind: SessionCommandKind, sessionId: String, text: String) {
+    private fun simulateDemoCommand(kind: SessionCommandKind, sessionId: String, text: String, shown: SessionTarget? = null, promptKey: String? = null) {
         val clientId = UUID.randomUUID().toString().lowercase()
-        record(clientId, sessionId, kind, text, SessionDeliveryState.Sending)
+        record(clientId, sessionId, kind, text, SessionDeliveryState.Sending, shown, promptKey)
         val target = _state.value.session(sessionId)
         scope.launch {
             delay(700)
             if (!_state.value.isDemoMode || target == null) return@launch
             val result = when (kind) {
+                SessionCommandKind.START -> CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, "Started Claude (simulated)", null)
+                SessionCommandKind.ANSWER -> CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, "Answered in ${target.host} (simulated)", null)
                 SessionCommandKind.INTERRUPT -> {
                     if (target.isStoppable) {
                         replaceDemoSession(target, LiveSessionState.INTERRUPTED)

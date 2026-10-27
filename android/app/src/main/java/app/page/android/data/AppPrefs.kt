@@ -46,6 +46,11 @@ class AppPrefs(context: Context) {
         get() = prefs.getBoolean(KEY_ASKED_NOTIFICATIONS, false)
         set(value) = prefs.edit().putBoolean(KEY_ASKED_NOTIFICATIONS, value).apply()
 
+    /** Which one-time tips were dismissed (model/Tips.kt), newline-joined wire names. */
+    var dismissedTips: String?
+        get() = prefs.getString(KEY_TIPS, null)
+        set(value) = prefs.edit().apply { if (value == null) remove(KEY_TIPS) else putString(KEY_TIPS, value) }.apply()
+
     /**
      * Page ids a notification was already posted for, newest last. Shared by
      * the in-app socket, the foreground service and the background check so
@@ -82,6 +87,26 @@ class AppPrefs(context: Context) {
         get() = prefs.getString(KEY_POSTED, null)
         set(value) = prefs.edit().apply { if (value == null) remove(KEY_POSTED) else putString(KEY_POSTED, value) }.apply()
 
+    // Night Watch preferences: the phone's own, never synced. Generic readers so each store owns its key.
+
+    fun string(key: String): String? = prefs.getString(key, null)
+
+    fun putString(key: String, value: String?) {
+        prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+    }
+
+    fun boolean(key: String, default: Boolean = false): Boolean = prefs.getBoolean(key, default)
+
+    fun putBoolean(key: String, value: Boolean) {
+        prefs.edit().putBoolean(key, value).apply()
+    }
+
+    fun long(key: String): Long? = if (prefs.contains(key)) prefs.getLong(key, 0L) else null
+
+    fun putLong(key: String, value: Long?) {
+        prefs.edit().apply { if (value == null) remove(key) else putLong(key, value) }.apply()
+    }
+
     @Synchronized
     fun clearNotified() {
         prefs.edit().remove(KEY_NOTIFIED).apply()
@@ -95,6 +120,7 @@ class AppPrefs(context: Context) {
         private const val KEY_ASKED_NOTIFICATIONS = "page.askedNotifications"
         private const val KEY_NOTIFIED = "page.notifiedIds"
         private const val KEY_POSTED = "page.postedPages"
+        private const val KEY_TIPS = "page.dismissedTips"
         private const val MAX_NOTIFIED = 300
     }
 }

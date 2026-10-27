@@ -50,6 +50,26 @@ data class MacStatusSnapshot(
     /** Battery is only meaningful in 1..100: v2 Macs send -1 for unknown and older Macs hard-coded 0. */
     val batteryPercent: Int? get() = battery?.takeIf { it in 1..100 }
 
+    /** "Battery 42% · cutoff in about 35 min" while a forecast applies. */
+    val batteryLine: String?
+        get() {
+            val f = forecast
+            if (onAC == true || f == null) return null
+            val pct = batteryPercent?.let { "Battery $it% · " } ?: ""
+            return if (f.minutes == 0) pct + "at the ${f.cutoff}% cutoff" else pct + "cutoff in about ${BatteryForecast.duration(f.minutes)}"
+        }
+
+    /** "Claude 5-hour 62% · resets 5:00 PM · limit ~4:10 PM". */
+    fun usageLine(now: Instant, format: (Instant) -> String): String? {
+        val u = usage ?: return null
+        val five = u.fiveHour ?: return null
+        u.updatedAt?.let { if (now.secondsSince(it) > 6 * 3600) return null }
+        val parts = arrayListOf("Claude 5-hour ${Math.round(five.pct).toInt()}%")
+        five.resetsAt?.let { if (it > now) parts.add("resets ${format(it)}") }
+        u.hitAt?.let { if (it > now) parts.add("limit ~${format(it)}") }
+        return parts.joinToString(" · ")
+    }
+
     companion object {
         fun from(json: JsonObject): MacStatusSnapshot = MacStatusSnapshot(
             macConnected = json.bool("macConnected"),

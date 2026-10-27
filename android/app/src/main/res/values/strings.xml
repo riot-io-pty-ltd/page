@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Page</string>
+    <string name="widget_description">What needs you, what is working and the runway. Counts only, never a project or a command.</string>
+    <string name="tile_label">Page</string>
 </resources>

@@ -105,6 +105,39 @@ class SessionCryptoTest {
         assertTrue(wa.str("op") == "watch" && wa.str("runId") == "wf_1" && wa.str("agentId") == "a1" && wa.str("sessionId") == "S")
     }
 
+    private fun live(cwd: String, title: String) = LiveSession(
+        id = "abcdef1234567890", backend = AgentBackend.Known(InterventionBackend.CLAUDE), title = title, cwd = cwd,
+        state = LiveSessionState.ACTIVE, host = "tmux", canType = true, typeBlocker = null, canInterrupt = true,
+        provider = null, lastActivityAt = null, interventionId = null, preview = "",
+    )
+
+    @Test
+    fun inputCarriesTheExpectedTargetWhenGiven() {
+        val target = SessionTarget.of(live("~/projects/page", "page"))
+        val o = parseJsonObject(
+            SessionCommand.Input("s1", "hi", target).plaintext("c1", "v1", CMD_NOW).toString(Charsets.UTF_8)
+        )!!
+        assertEquals("~/projects/page", o.str("expectCwd"))
+        assertEquals("page", o.str("expectTitle"))
+        assertEquals(listOf("clientId", "expectCwd", "expectTitle", "op", "sessionId", "text", "ts", "viewer"), o.keys.toList())
+        // Optional: absent or empty fields are left out, so the wire stays as before.
+        val bare = parseJsonObject(
+            SessionCommand.Input("s1", "hi", SessionTarget.of(live("", "Session abcdef12"))).plaintext("c1", "v1", CMD_NOW).toString(Charsets.UTF_8)
+        )!!
+        assertEquals(listOf("clientId", "op", "sessionId", "text", "ts", "viewer"), bare.keys.toList())
+    }
+
+    @Test
+    fun sessionTargetIsTheMacsFolderAndTitleVerbatim() {
+        val t = SessionTarget.of(live("~/projects/page", "page"))
+        assertEquals("~/projects/page", t.expectCwd)
+        assertEquals("page", t.expectTitle)
+        // A title Page made up (no folder, no title from the Mac) isn't sent.
+        val made = SessionTarget.of(live("", "Session abcdef12"))
+        assertEquals(null, made.expectCwd)
+        assertEquals(null, made.expectTitle)
+    }
+
     @Test
     fun requestBodyRoundTrips() {
         val inputPT = SessionCommand.Input("s1", "hi").plaintext("c1", "v1", CMD_NOW)

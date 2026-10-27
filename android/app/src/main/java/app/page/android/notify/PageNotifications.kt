@@ -24,6 +24,7 @@ import app.page.android.model.NotificationActionId
 import app.page.android.model.NotificationActionUri
 import app.page.android.model.NotificationCategory
 import app.page.android.model.PageSubtype
+import app.page.android.model.Reversibility
 
 /**
  * Page's notifications (the Android side of iOS NotificationService): one
@@ -135,8 +136,11 @@ object PageNotifications : PageNotifier {
         // Our own record: actions are checked against it, never against
         // what an action intent claims.
         PostedPages.record(info)
-        val title = "${info.projectName.ifEmpty { "Your Mac" }} paged you"
-        val body = status ?: bodyText(info)
+        // Title is what it is ("Looks stuck", "Run this command?"), body the one redacted line, and the sub-text
+        // says where and how reversible it is. Older records without those fall back to the plain wording.
+        val title = info.headline.ifEmpty { "${info.projectName.ifEmpty { "Your Mac" }} paged you" }
+        val body = status ?: info.summary.ifEmpty { bodyText(info) }
+        val sub = listOfNotNull(info.projectName.takeIf { it.isNotEmpty() }, classWord(info)).joinToString(" · ")
         val builder = NotificationCompat.Builder(context, CHANNEL_PAGES)
             .setSmallIcon(R.drawable.ic_stat_page)
             .setColor(ContextCompat.getColor(context, R.color.notification_accent))
@@ -144,6 +148,9 @@ object PageNotifications : PageNotifier {
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(openPageIntent(info.id))
+            .setSubText(sub.ifEmpty { null })
+            .setShowWhen(info.openedAtMs > 0)
+            .setWhen(if (info.openedAtMs > 0) info.openedAtMs else System.currentTimeMillis())
             .setAutoCancel(true)
             .setOnlyAlertOnce(silent)
             .setSilent(silent)
@@ -160,6 +167,10 @@ object PageNotifications : PageNotifier {
         if (status == null) addActions(builder, info)
         notifySafely(info.id, PAGE_NOTIFICATION_ID, builder.build())
     }
+
+    /** "undoable", "considered" or "irreversible" for an approval; null for anything else. */
+    private fun classWord(info: PageInfo): String? =
+        if (info.decodedKind != InterventionKind.APPROVAL) null else info.level?.lowercase()
 
     private fun blocking(kind: InterventionKind) = kind == InterventionKind.APPROVAL || kind == InterventionKind.USER_INPUT
 
@@ -187,24 +198,28 @@ object PageNotifications : PageNotifier {
     private fun addActions(builder: NotificationCompat.Builder, info: PageInfo) {
         when (NotificationCategory.forPage(info.decodedKind, info.subtype)) {
             NotificationCategory.APPROVAL -> {
-                builder.addAction(action(info, NotificationActionId.APPROVE, "Approve"))
+                // Only an undoable page gets a one-tap Approve, judged from the page's full text when it was
+                // posted. Considered needs a tap and Irreversible a hold plus biometrics, which a notification
+                // cannot give, so those open the Decision sheet. Deny and a written reply are safe from here.
+                if (info.level == Reversibility.UNDOABLE.name) builder.addAction(action(info, NotificationActionId.APPROVE, "Approve"))
+                else builder.addAction(NotificationCompat.Action.Builder(0, "Open to decide", openPageIntent(info.id)).setShowsUserInterface(true).build())
                 builder.addAction(action(info, NotificationActionId.DENY, "Deny"))
                 // The relay refuses text for v1 blocking-hook pages (422).
-                if (!info.decisionsOnly) builder.addAction(replyAction(info, "Deny with instructions", "What should it do instead?"))
+                if (!info.decisionsOnly) builder.addAction(replyAction(info, "Tell it…", "What should it do instead?"))
             }
-            NotificationCategory.INPUT -> builder.addAction(replyAction(info, "Reply", "Type a reply…"))
+            NotificationCategory.INPUT -> builder.addAction(replyAction(info, "Answer…", "Type your answer…"))
             NotificationCategory.IDLE -> {
-                builder.addAction(replyAction(info, "Reply", "Type a reply…"))
-                builder.addAction(action(info, NotificationActionId.CARRY_ON, "Carry on"))
+                builder.addAction(action(info, NotificationActionId.CARRY_ON, "Looks good"))
+                builder.addAction(replyAction(info, "Steer…", "Tell it what to do next…"))
             }
-            // v4 stuck watch: no Carry on; Stop presses Esc on the Mac.
+            // v4 stuck watch: no Carry on; Stop it presses Esc on the Mac.
             NotificationCategory.STUCK -> {
                 builder.addAction(action(info, NotificationActionId.STOP, "Stop it"))
-                builder.addAction(replyAction(info, "Tell it what to do", "Tell it what to do instead…"))
+                builder.addAction(replyAction(info, "Steer…", "Tell it what to do instead…"))
             }
-            NotificationCategory.STALLED -> builder.addAction(replyAction(info, "Tell it what to do", "Tell it what to do instead…"))
+            NotificationCategory.STALLED -> builder.addAction(replyAction(info, "Steer…", "Tell it what to do instead…"))
             // The Mac queues a written reply until the limit resets.
-            NotificationCategory.LIMIT -> builder.addAction(replyAction(info, "Send when it resets", "Send this when the limit resets…"))
+            NotificationCategory.LIMIT -> builder.addAction(replyAction(info, "Send after reset", "Send this when the limit resets…"))
             NotificationCategory.INFO -> Unit
         }
     }

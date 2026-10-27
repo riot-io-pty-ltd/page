@@ -1,84 +1,155 @@
 package app.page.android.data
 
 import app.page.android.model.DeepLink
+import app.page.android.model.NWDeepLink
+import app.page.android.model.NWDestination
+import app.page.android.model.NWSheet
+import app.page.android.model.RoomEntry
+import app.page.android.model.SessionIntent
+import app.page.android.model.SheetQueue
+import app.page.android.model.SkyMode
+import app.page.android.model.TowerSection
+import java.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** Four tabs: Stats lives inside History as a segment. Sessions first: the live list is home. */
+/** The first-generation tabs, kept only so the retired tab bar still compiles until the screens stage removes it. */
 enum class AppTab { SESSIONS, INBOX, HISTORY, SETTINGS }
 
 /**
- * App-wide navigation state, so a notification tap or a `page://` link can
- * open a specific page whether the app was running, in the background or
- * cold-started. A request made before any screen exists simply waits here
- * until the main screen appears and shows it.
+ * App-wide navigation state, so a notification tap, a widget or Quick Settings tap or a `page://` link can open
+ * a specific card whether the app was running, in the background or cold-started (the Android side of iOS
+ * AppRouter.swift). A request made before any screen exists simply waits here until the shell appears and
+ * shows it.
  *
- * A page's reply screen and a session's detail screen are both full-screen
- * overlays on the tabs, and only one is up at a time: opening one replaces
- * the other.
+ * There are exactly two destinations (Now and Sky). Everything else is a sheet or a room, and only one sheet can
+ * be up at a time: asking for another while one is showing closes the first, and the new one comes up from
+ * [sheetDismissed] ([SheetQueue]). A deep link always lands on Now with the card's Decision sheet over it, never
+ * on a tab.
  */
 object AppRouter {
-    data class Route(
-        val tab: AppTab = AppTab.SESSIONS,
-        val interventionId: String? = null,
-        val sessionId: String? = null,
-        /** v4: the "New session" sheet. */
-        val newSession: Boolean = false,
+    data class State(
+        val destination: NWDestination = NWDestination.NOW,
+        val sheets: SheetQueue = SheetQueue(),
+        /** Sky's mode, remembered ([SkyMode.storageKey]). */
+        val skyMode: SkyMode = SkyMode.default,
+        /** The unpair confirmation, asked for by Now, Sky and the Tower alike. */
+        val confirmingUnpair: Boolean = false,
+        /** The Paired screen is up after a first pairing; while it is, nothing else asks for notification permission. */
+        val pairedWelcome: Boolean = false,
     )
 
-    private val _route = MutableStateFlow(Route())
-    val route: StateFlow<Route> = _route.asStateFlow()
+    private val _state = MutableStateFlow(State())
+    val state: StateFlow<State> = _state.asStateFlow()
 
-    fun selectTab(tab: AppTab) {
-        _route.value = _route.value.copy(tab = tab)
+    private inline fun update(block: (State) -> State) {
+        _state.value = block(_state.value)
+    }
+
+    /** Restores what is remembered (call once the preferences exist). */
+    fun restore() {
+        val mode = SkyMode.stored(AppGraph.prefs.string(SkyMode.storageKey))
+        update { it.copy(skyMode = mode) }
+    }
+
+    fun selectDestination(d: NWDestination) = update { it.copy(destination = d) }
+
+    /** The render harness shows a mode without remembering it. */
+    fun setSkyModeForRender(mode: SkyMode) = update { it.copy(skyMode = mode) }
+
+    fun selectSkyMode(mode: SkyMode) {
+        AppGraph.prefs.putString(SkyMode.storageKey, mode.raw)
+        update { it.copy(skyMode = mode) }
+    }
+
+    /** Opens a page's Decision sheet over Now. */
+    fun open(interventionId: String, switchTab: Boolean = true) = update {
+        it.copy(destination = if (switchTab) NWDestination.NOW else it.destination, sheets = it.sheets.request(NWSheet.Decision(interventionId)))
+    }
+
+    /** How the next room opens (Screen, Type, Stop), read once by that room. */
+    private data class PendingEntry(val sessionId: String, val entry: RoomEntry, val at: Instant)
+
+    private var roomEntry: PendingEntry? = null
+
+    /** Opens a live session's room, on Story unless the caller says how. */
+    fun openSession(sessionId: String, entry: RoomEntry = RoomEntry.STORY) {
+        roomEntry = if (entry == RoomEntry.STORY) null else PendingEntry(sessionId, entry, Instant.now())
+        update { it.copy(sheets = it.sheets.request(NWSheet.Session(sessionId))) }
     }
 
     /**
-     * Opens a page's reply screen. `switchTab = false` keeps the current tab
-     * (the Sessions list's "Open page").
+     * The entry asked for this session's room, once: a request older than a few seconds belongs to an earlier
+     * opening and is dropped.
      */
-    fun open(interventionId: String, switchTab: Boolean = true) {
-        val r = _route.value
-        _route.value = r.copy(tab = if (switchTab) AppTab.INBOX else r.tab, interventionId = interventionId, sessionId = null, newSession = false)
+    fun takeRoomEntry(sessionId: String, now: Instant = Instant.now()): RoomEntry {
+        val e = roomEntry
+        roomEntry = null
+        if (e == null || e.sessionId != sessionId || now.toEpochMilli() - e.at.toEpochMilli() >= 5000) return RoomEntry.STORY
+        return e.entry
     }
 
-    /** Opens a live session's detail screen (the reply screen's "Open session", or a tap in the list). */
-    fun openSession(sessionId: String) {
-        _route.value = _route.value.copy(tab = AppTab.SESSIONS, interventionId = null, sessionId = sessionId, newSession = false)
-    }
+    /** Opens the Tower, optionally scrolled to a section. */
+    fun openTower(section: TowerSection? = null) = update { it.copy(sheets = it.sheets.request(NWSheet.Tower(section))) }
 
-    fun openNewSession() {
-        _route.value = _route.value.copy(tab = AppTab.SESSIONS, interventionId = null, sessionId = null, newSession = true)
-    }
+    fun openDispatch() = update { it.copy(sheets = it.sheets.request(NWSheet.Dispatch)) }
+    fun openHistory() = update { it.copy(sheets = it.sheets.request(NWSheet.History)) }
+    fun requestUnpair() = update { it.copy(confirmingUnpair = true) }
+    fun clearUnpairRequest() = update { it.copy(confirmingUnpair = false) }
+    fun setPairedWelcome(on: Boolean) = update { it.copy(pairedWelcome = on) }
 
-    fun closeNewSession() {
-        _route.value = _route.value.copy(newSession = false)
-    }
+    /** The user closed the sheet (back, scrim, a close button). */
+    fun closeSheet() = update { it.copy(sheets = it.sheets.close()) }
 
-    fun closeReply() {
-        _route.value = _route.value.copy(interventionId = null)
-    }
+    /** A sheet finished dismissing: present whatever was waiting. */
+    fun sheetDismissed() = update { it.copy(sheets = it.sheets.dismissed()) }
 
-    fun closeSession() {
-        _route.value = _route.value.copy(sessionId = null)
-    }
-
-    /** Handles `page://intervention/<id>`. Returns false for anything else. */
+    /**
+     * Handles `page://intervention/<id>`, `page://sessions` (the widget), `page://now`, `page://sky` and
+     * `page://tower`. Returns false for anything else.
+     */
     fun handle(url: String): Boolean {
-        val id = DeepLink.interventionId(url) ?: return false
-        open(id)
+        val link = NWDeepLink.parse(url) ?: return false
+        when (link) {
+            NWDeepLink.Now -> selectDestination(NWDestination.NOW)
+            NWDeepLink.Sky -> selectDestination(NWDestination.SKY)
+            NWDeepLink.Tower -> openTower()
+            is NWDeepLink.Decision -> open(link.pageId)
+        }
         return true
     }
 
     fun reset() {
-        _route.value = Route()
+        roomEntry = null
+        update { it.copy(destination = NWDestination.NOW, sheets = SheetQueue(), confirmingUnpair = false) }
     }
+
+    // region Legacy entry points (the first-generation screens, until the screens stage replaces them)
+
+    /** `AppRouter.openSession(id, switchTab, intent)` of the old Sessions/Inbox screens. */
+    fun openSession(sessionId: String, switchTab: Boolean, intent: SessionIntent = SessionIntent.NONE) {
+        openSession(
+            sessionId,
+            when (intent) {
+                SessionIntent.NONE -> RoomEntry.STORY
+                SessionIntent.SCREEN -> RoomEntry.SCREEN
+                SessionIntent.TYPE -> RoomEntry.TYPE
+            },
+        )
+    }
+
+    fun openNewSession() = openDispatch()
+    fun closeNewSession() = closeSheet()
+    fun closeReply() = closeSheet()
+    fun closeSession() = closeSheet()
+
+    // endregion
 }
 
 /**
- * One-shot hints for the first screen shown after launch (set by the debug
- * demo's launch extras for scripted screenshots; never set in release).
+ * One-shot hints for the first screen shown after launch (set by the debug demo's launch extras for scripted
+ * screenshots; never set in release).
  */
 object LaunchHints {
     /** "terminal" or "workflows": the session detail opens on that pane. */

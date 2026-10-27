@@ -113,6 +113,16 @@ data class LiveSession(
     /** The open page for this session, if any. */
     val interventionId: String?,
     val preview: String,
+    /**
+     * The AskUserQuestion this session is blocked on, when the Mac sent it (a Mac that sends it also accepts
+     * `answer`).
+     */
+    val ask: SessionAsk? = null,
+    /**
+     * What a working session is doing, for the In flight card. Every one is an optional field of the Mac's list
+     * (docs/SESSIONS-PROTOCOL.md); an older Mac sends none and the card shows what it has.
+     */
+    val flight: SessionFlight? = null,
 ) {
     val hostLabel: String
         get() {
@@ -165,6 +175,8 @@ data class LiveSession(
                 lastActivityAt = PageDate.parseAny(c["lastActivityAt"]),
                 interventionId = if (iv.isEmpty() || iv.length > 200) null else iv,
                 preview = (c.str("preview") ?: "").capped(300),
+                ask = SessionAsk.decode(c["ask"]),
+                flight = SessionFlight.decode(c),
             )
         }
     }

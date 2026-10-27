@@ -19,6 +19,18 @@ class PageCheckWorker(context: Context, params: WorkerParameters) : CoroutineWor
     override suspend fun doWork(): Result = withContext(Dispatchers.Main) {
         if (!PairingStore.isPaired || RelayClient.isDemoMode) return@withContext Result.success()
         if (StayConnectedService.running || AppVisibility.isVisible) return@withContext Result.success()
+        // The widget and the tile read a snapshot of the Mac's status; with the app closed this keeps it from going stale.
+        runCatching {
+            RelayClient.refreshStatus()
+            val st = RelayClient.macStatus.value
+            val now = java.time.Instant.now()
+            val needs = st?.pendingCount ?: 0
+            val runway = app.page.android.model.RunwayModel.build(st, now)
+            val headline = if (needs == 0) "All quiet" else "$needs need${if (needs == 1) "s" else ""} you"
+            app.page.android.data.StatusSnapshotStore.write(
+                app.page.android.data.StatusSnapshot.of(PairingStore.pairedMac.value?.name ?: "", st, needs, st?.working, headline, "", runway, now),
+            )
+        }
         val pending = RelayClient.fetchPending() ?: return@withContext Result.success()
         // Oldest first, so the newest page ends up on top of the shade.
         for (iv in pending.sortedBy { it.openedAt }) PageNotifications.pageOpened(iv)

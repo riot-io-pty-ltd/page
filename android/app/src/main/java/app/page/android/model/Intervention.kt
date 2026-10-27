@@ -104,6 +104,11 @@ data class Intervention(
     val repliedAction: String? = null,
     /** The Worker fills in "claude" if an older Mac didn't send one. */
     val backend: InterventionBackend? = null,
+    /**
+     * The `backend` string as the relay sent it, kept so an agent Page does not know (a value [backend] could
+     * not decode) is not mistaken for Claude. Decode-only; the wire is unchanged.
+     */
+    val backendRaw: String? = null,
     val source: InterventionSource? = null,
     val subtype: String? = null,
     /** v2 (Worker-managed): "pending" | "delivered" | "failed". */
@@ -130,6 +135,12 @@ data class Intervention(
     /** Name of the agent for copy ("Claude needs your input"). */
     val agentName: String get() = backend?.displayName ?: "Your agent"
 
+    /**
+     * The relay named an agent Page has no adapter for. A page with no backend at all is an older Mac's Claude
+     * page, not this.
+     */
+    val hasUnknownBackend: Boolean get() = backend == null && Sw.trimWs(backendRaw ?: "").isNotEmpty()
+
     /** Time from page to the user's reply. Null when the user never replied. */
     val responseTimeSeconds: Long?
         get() = repliedAt?.let { maxOf(0L, (it.secondsSince(openedAt)).toLong()) }
@@ -152,7 +163,7 @@ data class Intervention(
                 id = id,
                 sessionId = sessionId,
                 cwd = cwd,
-                projectName = project.ifEmpty { cwd.split('/').lastOrNull { it.isNotEmpty() } ?: "Unknown project" },
+                projectName = ProjectLabel.clean(project, cwd),
                 kind = InterventionKind.fromWire(o.str("kind")),
                 openedAt = openedAt,
                 context = o.str("context") ?: "",
@@ -162,6 +173,7 @@ data class Intervention(
                 repliedText = o.str("repliedText"),
                 repliedAction = o.str("repliedAction"),
                 backend = InterventionBackend.fromWire(o.str("backend")),
+                backendRaw = o.str("backend"),
                 source = o.str("source")?.let(InterventionSource::fromWire),
                 subtype = o.str("subtype"),
                 deliveryStatus = o.str("deliveryStatus"),

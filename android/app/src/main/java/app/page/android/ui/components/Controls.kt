@@ -30,6 +30,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -164,6 +166,8 @@ fun ReplyField(
     enabled: Boolean,
     sendLabel: String = "Send reply",
     modifier: Modifier = Modifier,
+    /** Lets a caller put the cursor here (the In flight row's "Type"). */
+    focusRequester: FocusRequester? = null,
     onSend: (String) -> Unit,
 ) {
     val hasText = text.isNotBlank()
@@ -188,6 +192,7 @@ fun ReplyField(
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
                     .semantics { contentDescription = placeholder },
             )
         }

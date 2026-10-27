@@ -9,10 +9,12 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
+import app.page.android.data.RelayClient
 import app.page.android.model.NotificationActionId
 import app.page.android.model.NotificationActionUri
 import app.page.android.model.NotificationDecision
 import app.page.android.model.NotificationResponseKind
+import app.page.android.model.PhoneReversibility
 
 /**
  * Approve / Deny / Carry on / Reply from a page notification (the Android
@@ -55,12 +57,21 @@ class NotificationActionReceiver : BroadcastReceiver() {
             null
         }
 
-        val decision = NotificationDecision.decide(NotificationResponseKind.Action(parsed.action), typed, info.kind, info.subtype)
+        // Approve from a notification is only for what the phone itself classifies as undoable, judged now from
+        // the live page (never from the shortened text Page stored): anything else, or a page that is not in the
+        // inbox, opens the app on the Decision sheet (iOS NotificationDecision `approveLevel`).
+        val approveLevel = RelayClient.inbox.value.firstOrNull { it.id == info.id }?.let { PhoneReversibility.verdict(it)?.level }
+        val decision = NotificationDecision.decide(NotificationResponseKind.Action(parsed.action), typed, info.kind, info.subtype, approveLevel)
         when (decision) {
             NotificationDecision.Open, NotificationDecision.Ignore -> {
                 // An empty reply: put the notification back as it was, which
                 // also stops Android's reply spinner.
                 PageNotifications.post(info, silent = true, status = null)
+                if (decision == NotificationDecision.Open && parsed.action == NotificationActionId.APPROVE) {
+                    // Not undoable (or not in the inbox): a notification can't offer the tap or the hold plus
+                    // biometrics it needs, so nothing is sent and the app is where to decide.
+                    PageNotifications.notice("Nothing was sent", "This one needs a closer look. Open Page to approve it.", info.id)
+                }
             }
             is NotificationDecision.Refuse -> {
                 PageNotifications.post(info, silent = true, status = null)

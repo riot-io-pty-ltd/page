@@ -2,6 +2,7 @@ package app.page.android.model
 
 import java.time.Instant
 import java.util.TreeMap
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -11,8 +12,27 @@ import kotlinx.serialization.json.JsonPrimitive
 sealed interface SessionCommand {
     data class Watch(val sessionId: String?) : SessionCommand
     data object Refresh : SessionCommand
-    data class Input(val sessionId: String, val text: String) : SessionCommand
-    data class Interrupt(val sessionId: String) : SessionCommand
+    /**
+     * [expectCwd] / [expectTitle] are the folder and title the room showed, so
+     * the Mac refuses (SessionTargetCheck) instead of typing if the session
+     * behind this id is no longer that one. Both optional on the wire.
+     */
+    data class Input(
+        val sessionId: String,
+        val text: String,
+        val target: SessionTarget? = null,
+    ) : SessionCommand
+    /** [target]'s `expectCwd` / `expectTitle` ride along like on [Input]. */
+    data class Interrupt(val sessionId: String, val target: SessionTarget? = null) : SessionCommand
+
+    /**
+     * The answers to the question dialog the session is blocked on ([promptKey] is the ask's id). The Mac
+     * refuses if that is no longer the question showing.
+     */
+    data class Answer(val sessionId: String, val promptKey: String, val answers: List<AnswerWire>, val target: SessionTarget? = null) : SessionCommand
+
+    /** Esc in every working session (the pulse's Stop). */
+    data object InterruptAll : SessionCommand
 
     /** Watch a workflow agent inside the session (its transcript). */
     data class WatchAgent(val sessionId: String, val runId: String, val agentId: String) : SessionCommand
@@ -32,6 +52,8 @@ sealed interface SessionCommand {
             Refresh -> "refresh"
             is Input -> "input"
             is Interrupt -> "interrupt"
+            is Answer -> "answer"
+            InterruptAll -> "interruptAll"
             is Diff -> "diff"
             Folders -> "folders"
             is Start -> "start"
@@ -50,8 +72,19 @@ sealed interface SessionCommand {
             is Input -> {
                 body["sessionId"] = JsonPrimitive(sessionId)
                 body["text"] = JsonPrimitive(text)
+                addExpectation(target, body)
             }
-            is Interrupt -> body["sessionId"] = JsonPrimitive(sessionId)
+            is Interrupt -> {
+                body["sessionId"] = JsonPrimitive(sessionId)
+                addExpectation(target, body)
+            }
+            is Answer -> {
+                body["sessionId"] = JsonPrimitive(sessionId)
+                body["promptKey"] = JsonPrimitive(promptKey)
+                body["answers"] = JsonArray(answers.map { it.json })
+                addExpectation(target, body)
+            }
+            InterruptAll -> Unit
             is Diff -> body["sessionId"] = JsonPrimitive(sessionId)
             Folders -> Unit
             is Start -> {
@@ -68,6 +101,16 @@ sealed interface SessionCommand {
     }
 
     companion object {
+        /**
+         * The optional "what the room showed" fields. Absent (not null) when unknown, so an old Mac sees the same
+         * bytes as before and a new one has nothing to check.
+         */
+        private fun addExpectation(target: SessionTarget?, body: MutableMap<String, JsonElement>) {
+            if (target == null) return
+            target.expectCwd?.let { body["expectCwd"] = JsonPrimitive(it) }
+            target.expectTitle?.let { body["expectTitle"] = JsonPrimitive(it) }
+        }
+
         /** `{"e": <envelope>}`, the body of POST /sessions/command. */
         fun requestBody(plaintext: ByteArray, root: ByteArray, nonce: ByteArray? = null): String {
             val envelope = SessionCrypto.seal(plaintext, root, SessionCrypto.Direction.PHONE_TO_MAC, SessionFrameType.COMMAND, nonce)

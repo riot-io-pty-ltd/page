@@ -91,12 +91,15 @@ object BackgroundConnection {
  * to the background; Page does the same unless "Stay connected" holds it.
  */
 object AppVisibility : DefaultLifecycleObserver {
-    @Volatile
-    var isVisible = false
-        private set
+    private val _visible = MutableStateFlow(false)
+
+    /** [isVisible] as a flow, for what should only run while someone can see it (Now's clock). */
+    val visible: StateFlow<Boolean> = _visible.asStateFlow()
+
+    val isVisible: Boolean get() = _visible.value
 
     override fun onStart(owner: LifecycleOwner) {
-        isVisible = true
+        _visible.value = true
         if (PairingStore.isPaired && !RelayClient.isDemoMode) RelayClient.activate()
         // Re-read the key: the app may have been re-paired meanwhile.
         if (!SessionStore.state.value.hasKey) SessionStore.reloadKey()
@@ -105,7 +108,7 @@ object AppVisibility : DefaultLifecycleObserver {
     }
 
     override fun onStop(owner: LifecycleOwner) {
-        isVisible = false
+        _visible.value = false
         if (!StayConnectedService.running) RelayClient.disconnect()
     }
 }

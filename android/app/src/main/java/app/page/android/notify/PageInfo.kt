@@ -3,6 +3,8 @@ package app.page.android.notify
 import app.page.android.data.AppGraph
 import app.page.android.model.Intervention
 import app.page.android.model.InterventionKind
+import app.page.android.model.NowRowBuilder
+import app.page.android.model.PhoneReversibility
 import app.page.android.model.bool
 import app.page.android.model.parseJsonObject
 import app.page.android.model.str
@@ -20,6 +22,19 @@ data class PageInfo(
     val subtype: String?,
     /** A v1 blocking-hook page: only Approve/Deny can be applied. */
     val decisionsOnly: Boolean,
+    /** The session it is about, to group a session's pages together. */
+    val sessionId: String = "",
+    /** The title and the one redacted line the notification shows ("Run this command?", "swift test --filter Stuck"). */
+    val headline: String = "",
+    val summary: String = "",
+    /**
+     * How reversible approving it is, as the phone classified it from the page's FULL text when the notification
+     * was posted ([app.page.android.model.PhoneReversibility]): the [app.page.android.model.Reversibility] name,
+     * or null for a page with nothing to approve. Only UNDOABLE gets a one-tap Approve.
+     */
+    val level: String? = null,
+    /** When the page opened (the notification's time). */
+    val openedAtMs: Long = 0,
 ) {
     val decodedKind: InterventionKind get() = InterventionKind.fromWire(kind)
 
@@ -32,6 +47,11 @@ data class PageInfo(
             put("context", JsonPrimitive(context.take(500)))
             subtype?.let { put("subtype", JsonPrimitive(it)) }
             put("decisionsOnly", JsonPrimitive(decisionsOnly))
+            if (sessionId.isNotEmpty()) put("session", JsonPrimitive(sessionId))
+            if (headline.isNotEmpty()) put("headline", JsonPrimitive(headline.take(120)))
+            if (summary.isNotEmpty()) put("summary", JsonPrimitive(summary.take(160)))
+            level?.let { put("level", JsonPrimitive(it)) }
+            if (openedAtMs > 0) put("at", JsonPrimitive(openedAtMs))
         }
     )
 
@@ -39,6 +59,8 @@ data class PageInfo(
         fun of(iv: Intervention) = PageInfo(
             id = iv.id, kind = iv.kind.wire, projectName = iv.projectName,
             context = iv.context, subtype = iv.subtype, decisionsOnly = iv.acceptsDecisionsOnly,
+            sessionId = iv.sessionId, headline = NowRowBuilder.headline(iv), summary = NowRowBuilder.summaryLine(iv),
+            level = PhoneReversibility.verdict(iv)?.level?.name, openedAtMs = iv.openedAt.toEpochMilli(),
         )
 
         fun fromJson(o: JsonObject): PageInfo? {
@@ -50,6 +72,11 @@ data class PageInfo(
                 context = o.str("context") ?: "",
                 subtype = o.str("subtype"),
                 decisionsOnly = o.bool("decisionsOnly") ?: false,
+                sessionId = o.str("session") ?: "",
+                headline = o.str("headline") ?: "",
+                summary = o.str("summary") ?: "",
+                level = o.str("level"),
+                openedAtMs = (o["at"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0,
             )
         }
     }

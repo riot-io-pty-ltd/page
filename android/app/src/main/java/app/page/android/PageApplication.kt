@@ -2,7 +2,11 @@ package app.page.android
 
 import android.app.Application
 import androidx.lifecycle.ProcessLifecycleOwner
+import app.page.android.data.ActivityStore
 import app.page.android.data.AppGraph
+import app.page.android.data.AppRouter
+import app.page.android.data.CardGlowStore
+import app.page.android.data.TipStore
 import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
@@ -16,6 +20,10 @@ class PageApplication : Application() {
         super.onCreate()
         AppGraph.init(this)
         PageNotifications.createChannels(this)
+        AppRouter.restore()
+        CardGlowStore.init()
+        TipStore.init()
+        ActivityStore.init()
         RelayClient.notifier = PageNotifications
         SessionStore.reloadKey()
         PairingStore.init()
@@ -28,6 +36,7 @@ class PageApplication : Application() {
         }
         // Socket open while a screen is visible (or Stay connected holds it).
         ProcessLifecycleOwner.get().lifecycle.addObserver(AppVisibility)
+        AwayLifecycle.install()
         // A cold start from a notification action or the background check:
         // make sure the check stays scheduled; never start the service here.
         BackgroundConnection.sync(this, fromForeground = false)

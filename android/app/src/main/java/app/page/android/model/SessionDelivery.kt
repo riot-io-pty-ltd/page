@@ -2,7 +2,7 @@ package app.page.android.model
 
 import java.time.Instant
 
-enum class SessionCommandKind(val wire: String) { INPUT("input"), INTERRUPT("interrupt") }
+enum class SessionCommandKind(val wire: String) { INPUT("input"), INTERRUPT("interrupt"), START("start"), ANSWER("answer") }
 
 /**
  * Where a message (or Stop) sent from the phone stands, keyed by its
@@ -52,8 +52,18 @@ sealed interface SessionDeliveryState {
 
     /** Short status under a message bubble. */
     fun label(kind: SessionCommandKind): String = when (this) {
-        Sending -> if (kind == SessionCommandKind.INPUT) "Sending…" else "Stopping…"
-        is Typed -> if (kind == SessionCommandKind.INPUT) "Typed" else "Stopped"
+        Sending -> when (kind) {
+            SessionCommandKind.INPUT -> "Sending…"
+            SessionCommandKind.INTERRUPT -> "Stopping…"
+            SessionCommandKind.START -> "Starting…"
+            SessionCommandKind.ANSWER -> "Sending your answers…"
+        }
+        is Typed -> when (kind) {
+            SessionCommandKind.INPUT -> "Typed"
+            SessionCommandKind.INTERRUPT -> "Stopped"
+            SessionCommandKind.START -> "Started"
+            SessionCommandKind.ANSWER -> "Answered"
+        }
         is Queued -> "Queued"
         is Refused -> "Refused"
         is Failed -> "Not sent"
@@ -99,6 +109,10 @@ data class SentSessionCommand(
      * earlier identical "yes" from claiming this message's status.
      */
     val priorEntryIds: Set<String>? = null,
+    /** What the room showed when this was sent: names the receipt. */
+    val target: SessionTarget? = null,
+    /** `answer` only: the question (the ask's id) these answers were for. */
+    val promptKey: String? = null,
 )
 
 object SessionResultCopy {
@@ -120,6 +134,9 @@ object SessionResultCopy {
         "replay" -> "Your Mac already received this message."
         "not_found" -> "This session is no longer on your Mac's list."
         "interrupt_unsupported" -> "Page can't stop this session from here: it isn't mid-turn, or its terminal doesn't support it."
+        "question_changed" -> detail ?: "That question changed on your Mac, so nothing was pressed. Open it again to see the new one."
+        "answer_unsupported" -> detail ?: "Page can't answer this question from here. Answer it on your Mac."
+        "target_mismatch" -> detail ?: "This room doesn't match the session on your Mac any more, so nothing was typed. Close it and open the session again."
         "error" -> detail ?: "Something went wrong on your Mac. Try again."
         else -> detail ?: "Your Mac didn't type this."
     }

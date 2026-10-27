@@ -48,6 +48,17 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+    defaultConfig {
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+    sourceSets {
+        // The golden-row comparison runs as a unit test and, on a device, as an instrumented test.
+        getByName("test") { java.srcDir("src/goldenShared/java") }
+        getByName("androidTest") {
+            java.srcDir("src/goldenShared/java")
+            resources.srcDir("src/test/resources")
+        }
+    }
     lint {
         // Errors fail the build; warnings are reported.
         abortOnError = true
@@ -79,6 +90,11 @@ dependencies {
     implementation(libs.camerax.view)
     implementation(libs.zxing.core)
     implementation(libs.work.runtime)
+    implementation(libs.biometric)
+    implementation(libs.glance.appwidget)
 
     testImplementation(libs.junit)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="surface">#FAF8F4</color>
+    <color name="surface">#05070D</color>
     <color name="icon_background">#0E1014</color>
     <color name="pulse_start">#5EEAD4</color>
     <color name="pulse_end">#38BDF8</color>

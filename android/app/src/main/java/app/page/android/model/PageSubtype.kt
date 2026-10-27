@@ -18,6 +18,14 @@ object PageSubtype {
     const val BATTERY_FORECAST = "battery_forecast"
     const val USAGE_FORECAST = "usage_forecast"
 
+    // Kind-less forms, as iOS `PageSubtype` has them (callers already know the kind).
+    fun isStuck(subtype: String?): Boolean = subtype == LOOPING || subtype == STUCK || subtype == WORKFLOW_STALLED
+
+    /** Stop (Deny -> Esc) applies to a busy session, not a stalled workflow. */
+    fun canStop(subtype: String?): Boolean = subtype == LOOPING || subtype == STUCK
+
+    fun isForecast(subtype: String?): Boolean = subtype == BATTERY_FORECAST || subtype == USAGE_FORECAST
+
     /** A "looks stuck" page: needs a nudge, never a Carry on. */
     fun isStuck(kind: InterventionKind, subtype: String?): Boolean =
         kind == InterventionKind.IDLE && (subtype == LOOPING || subtype == STUCK || subtype == WORKFLOW_STALLED)

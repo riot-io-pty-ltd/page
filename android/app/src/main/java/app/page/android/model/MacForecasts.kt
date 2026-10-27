@@ -11,6 +11,14 @@ import kotlinx.serialization.json.JsonObject
 /** Time to the Mac's low-battery cutoff at the current drain (sent on battery only). */
 data class BatteryForecast(val cutoff: Int, val minutes: Int, val drainPerHour: Double) {
     companion object {
+        /** "35 min", "1 h", "1 h 20 min" (iOS `MacBatteryForecast.duration`: at least "1 min"). */
+        fun duration(minutes: Int): String {
+            if (minutes < 60) return "${maxOf(1, minutes)} min"
+            val h = minutes / 60
+            val m = minutes % 60
+            return if (m == 0) "$h h" else "$h h $m min"
+        }
+
         fun from(element: JsonElement?): BatteryForecast? {
             val o = element as? JsonObject ?: return null
             val cutoff = o.num("cutoff") ?: return null

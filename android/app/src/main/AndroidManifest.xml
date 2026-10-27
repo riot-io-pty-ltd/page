@@ -37,7 +37,16 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- page://intervention/<id> opens that page's reply screen. -->
+            <!-- page://now, page://sky and page://tower (the widget, the Quick Settings tile). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="page" android:host="now" />
+                <data android:scheme="page" android:host="sky" />
+                <data android:scheme="page" android:host="tower" />
+            </intent-filter>
+            <!-- page://intervention/<id> opens that page's Decision sheet. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -62,6 +71,29 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keeps a user-enabled WebSocket open to the user's self-hosted relay so pages (approval requests from AI agents on their computer) arrive instantly without a push provider. Shows an ongoing notification with a Turn off action." />
+        </service>
+
+        <!-- The home-screen widget: counts and the runway only, never a project or a command. -->
+        <receiver
+            android:name=".widget.PageWidgetReceiver"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/page_widget_info" />
+        </receiver>
+
+        <!-- The Quick Settings tile: shows what needs you, opens Now, never acts. -->
+        <service
+            android:name=".widget.PageTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_page"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
         </service>
 
         <receiver

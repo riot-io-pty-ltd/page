@@ -114,6 +114,10 @@ object RelayClient {
     private val _deliveries = MutableStateFlow<Map<String, ReplyDelivery>>(emptyMap())
     val deliveries: StateFlow<Map<String, ReplyDelivery>> = _deliveries.asStateFlow()
 
+    /** When each delivery last changed on this phone, so a failure or a receipt can age out of Now (iOS `deliveryTimes`). */
+    private val _deliveryTimes = MutableStateFlow<Map<String, Instant>>(emptyMap())
+    val deliveryTimes: StateFlow<Map<String, Instant>> = _deliveryTimes.asStateFlow()
+
     /** Close reasons for pages that closed while the app was watching, so an open reply screen can say why. */
     private val _recentCloseReasons = MutableStateFlow<Map<String, String>>(emptyMap())
     val recentCloseReasons: StateFlow<Map<String, String>> = _recentCloseReasons.asStateFlow()
@@ -224,12 +228,33 @@ object RelayClient {
         _connection.value = ConnectionState.CONNECTED
     }
 
+    /** The demo's inbox changing while it runs (new pages arrive, answered ones go), without the reset [seedDemoInbox] does. Demo only. */
+    fun replaceDemoInbox(list: List<Intervention>) {
+        if (isDemoMode) _inbox.value = Intervention.urgencySorted(list)
+    }
+
     fun seedDemoStatus(snapshot: MacStatusSnapshot) {
         if (isDemoMode) _macStatus.value = snapshot
     }
 
     fun seedDemoHistory(list: List<Intervention>) {
         if (isDemoMode) _history.value = list
+    }
+
+    /** Fixtures for the receipt thread: where each reply stands, and when that last changed. */
+    fun seedDemoDeliveries(states: Map<String, ReplyDelivery>, changedAt: Map<String, Instant>) {
+        if (!isDemoMode) return
+        _deliveries.value = states
+        _deliveryTimes.value = changedAt
+    }
+
+    /** Fixtures for the problem states: how the inbox load went, the socket, a rejected pairing. */
+    fun seedDemoProblem(inboxLoad: LoadState? = null, connection: ConnectionState? = null, authRejected: Boolean? = null, historyLoad: LoadState? = null) {
+        if (!isDemoMode) return
+        historyLoad?.let { _historyLoad.value = it }
+        inboxLoad?.let { _inboxLoad.value = it }
+        connection?.let { _connection.value = it }
+        authRejected?.let { _authRejected.value = it }
     }
 
     /** Walks a demo reply through the same states a real one goes through. */
@@ -267,6 +292,7 @@ object RelayClient {
         _authRejected.value = false
         _retiredWhy.value = null
         _deliveries.value = emptyMap()
+        _deliveryTimes.value = emptyMap()
         deliveryTouchedSeq.clear()
         _recentCloseReasons.value = emptyMap()
         inboxEvents.clear()
@@ -404,9 +430,15 @@ object RelayClient {
     }
 
     private inline fun updateDeliveries(block: (MutableMap<String, ReplyDelivery>) -> Unit) {
-        val m = _deliveries.value.toMutableMap()
+        val old = _deliveries.value
+        val m = old.toMutableMap()
         block(m)
         _deliveries.value = m
+        val now = Instant.now()
+        val times = _deliveryTimes.value.toMutableMap()
+        for ((id, state) in m) if (old[id] != state) times[id] = now
+        times.keys.retainAll(m.keys)
+        _deliveryTimes.value = times
     }
 
     /** Records a local delivery change so an in-flight fetch can't undo it. */

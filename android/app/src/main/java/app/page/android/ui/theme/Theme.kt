@@ -1,12 +1,11 @@
 package app.page.android.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -16,10 +15,16 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.page.android.data.CardGlowStore
 import app.page.android.model.AgentBackend
 import app.page.android.model.InterventionBackend
 import app.page.android.model.InterventionKind
 import app.page.android.model.LiveSessionState
+import app.page.android.ui.nw.theme.LocalCardGlow
+import app.page.android.ui.nw.theme.LocalReduceMotion
+import app.page.android.ui.nw.theme.NW
+import app.page.android.ui.nw.theme.rememberReduceMotion
 
 /**
  * The Page design system, ported from iOS Design/Theme.swift: colours,
@@ -108,7 +113,7 @@ data class PageColors(
             isDark = false,
         )
         val Dark = PageColors(
-            surface = Color(0xFF0E1014), surfaceRaised = Color(0xFF181B22), surfaceInset = Color(0xFF12151B),
+            surface = Color(0xFF05070D), surfaceRaised = Color(0xFF181B22), surfaceInset = Color(0xFF12151B),
             text = Color(0xFFE8EAED), textMuted = Color(0xFF8B92A1), hairline = Color(0xFF262A31),
             destructive = Color(0xFFE06464), destructiveText = Color(0xFFF07878),
             warning = Color(0xFFFBBF24), success = Color(0xFF34D399),
@@ -163,26 +168,27 @@ val LocalPageColors = staticCompositionLocalOf { PageColors.Light }
 val colors: PageColors
     @Composable get() = LocalPageColors.current
 
+/**
+ * Page is Night Watch: dark only (it does not follow the system's light appearance). The old [PageColors]
+ * stay provided, dark, for the first-generation screens until the screens stage retires them; the Night Watch
+ * environment (Card glow, Reduce Motion) is provided here, once, for everything below.
+ */
 @Composable
-fun PageTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
-    val c = if (dark) PageColors.Dark else PageColors.Light
+fun PageTheme(content: @Composable () -> Unit) {
+    val c = PageColors.Dark
+    val glow by CardGlowStore.glow.collectAsStateWithLifecycle()
+    val reduceMotion by rememberReduceMotion()
+    val p = NW.Palette
     // Material components (dialogs, switches, menus) take Page's palette.
-    val scheme = if (dark) {
-        darkColorScheme(
-            primary = c.kindApproval, onPrimary = c.onAccent, background = c.surface, onBackground = c.text,
-            surface = c.surfaceRaised, onSurface = c.text, surfaceVariant = c.surfaceInset, onSurfaceVariant = c.textMuted,
-            outline = c.hairline, outlineVariant = c.hairline, error = c.destructiveText, surfaceContainerHigh = c.surfaceRaised,
-            surfaceContainer = c.surfaceRaised, surfaceContainerHighest = c.surfaceInset,
-        )
-    } else {
-        lightColorScheme(
-            primary = c.kindApproval, onPrimary = Color.White, background = c.surface, onBackground = c.text,
-            surface = c.surfaceRaised, onSurface = c.text, surfaceVariant = c.surfaceInset, onSurfaceVariant = c.textMuted,
-            outline = c.hairline, outlineVariant = c.hairline, error = c.destructiveText, surfaceContainerHigh = c.surfaceRaised,
-            surfaceContainer = c.surfaceRaised, surfaceContainerHighest = c.surfaceInset,
-        )
-    }
-    CompositionLocalProvider(LocalPageColors provides c) {
+    val scheme = darkColorScheme(
+        primary = p.teal.color, onPrimary = p.onBright.color, background = p.background.color, onBackground = p.textPrimary.color,
+        surface = p.surface.color, onSurface = p.textPrimary.color, surfaceVariant = p.inset.color, onSurfaceVariant = p.textTertiary.color,
+        outline = p.hairline.color, outlineVariant = p.hairline.color, error = p.red.color, surfaceContainerHigh = p.surfaceRaised.color,
+        surfaceContainer = p.surface.color, surfaceContainerHighest = p.surfaceRaised.color,
+    )
+    CompositionLocalProvider(
+        LocalPageColors provides c, LocalCardGlow provides glow, LocalReduceMotion provides reduceMotion,
+    ) {
         MaterialTheme(colorScheme = scheme, content = content)
     }
 }

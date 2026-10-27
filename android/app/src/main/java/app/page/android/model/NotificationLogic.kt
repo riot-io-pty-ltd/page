@@ -60,8 +60,17 @@ sealed interface NotificationDecision {
          * type "yes, proceed" into a session that never asked. [subtype]
          * refines the v4 pages: Stop only for a stuck session, no Carry on for
          * one, and nothing at all for a forecast.
+         *
+         * [approveLevel] is how reversible the page's action is, as the phone classifies it, or null when the
+         * page is not in the inbox (a cold start, another Mac). Approve is sent from a notification only for
+         * UNDOABLE: a Considered action is a tap and an Irreversible one is a hold plus biometrics, neither of
+         * which a notification can offer, so those open the app on the Decision sheet instead. Deny and replies
+         * are safe from a notification. (iOS NotificationDecision.decide, `approveLevel`.)
          */
-        fun decide(response: NotificationResponseKind, userText: String?, rawKind: String?, subtype: String? = null): NotificationDecision {
+        fun decide(
+            response: NotificationResponseKind, userText: String?, rawKind: String?, subtype: String? = null,
+            approveLevel: Reversibility? = null,
+        ): NotificationDecision {
             val kind = rawKind?.let(InterventionKind::fromWire)
             val forecast = kind != null && PageSubtype.isForecast(kind, subtype)
             return when (response) {
@@ -71,6 +80,8 @@ sealed interface NotificationDecision {
                     NotificationActionId.APPROVE, NotificationActionId.DENY -> {
                         if (kind != null && kind != InterventionKind.APPROVAL) {
                             Refuse("Approve and Deny only apply to approval requests. Open Page to answer this one.")
+                        } else if (response.id == NotificationActionId.APPROVE && approveLevel != Reversibility.UNDOABLE) {
+                            Open
                         } else {
                             Send("", if (response.id == NotificationActionId.APPROVE) ReplyAction.APPROVE else ReplyAction.DENY)
                         }

@@ -1,80 +1,144 @@
 package app.page.android.demo
 
 import android.os.Bundle
+import app.page.android.data.ActionCoordinator
+import app.page.android.data.ActivityStore
 import app.page.android.data.AppRouter
-import app.page.android.data.AppTab
-import app.page.android.data.LaunchHints
+import app.page.android.data.AwayStore
+import app.page.android.data.CardGlowStore
+import app.page.android.data.NowStore
 import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
-import app.page.android.model.AgentBackend
+import app.page.android.data.StopCoordinator
+import app.page.android.data.TipStore
+import app.page.android.model.Absence
 import app.page.android.model.Base64Url
-import app.page.android.model.ValidatedPairing
-import app.page.android.notify.PageInfo
-import app.page.android.notify.PageNotifications
-import app.page.android.model.BatteryForecast
-import app.page.android.model.ClaudeUsage
-import app.page.android.model.DiffFile
-import app.page.android.model.MacStatusSnapshot
-import app.page.android.model.SessionDiff
-import app.page.android.model.StartFolder
-import app.page.android.model.StartFolders
-import app.page.android.model.UsageWindow
+import app.page.android.model.CardGlow
 import app.page.android.model.Intervention
-import app.page.android.model.InterventionBackend
 import app.page.android.model.InterventionKind
-import app.page.android.model.InterventionSource
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
+import app.page.android.model.MacStatusSnapshot
+import app.page.android.model.NowModel
+import app.page.android.model.NowRowBuilder
 import app.page.android.model.PairedMac
-import app.page.android.model.SessionScreen
-import app.page.android.model.SessionTranscript
-import app.page.android.model.TranscriptEntry
-import app.page.android.model.TranscriptRole
-import app.page.android.model.WorkflowRun
+import app.page.android.model.PendingAction
+import app.page.android.model.RoomEntry
+import app.page.android.model.RowAction
+import app.page.android.model.SkyMode
+import app.page.android.model.StopFlowPhase
+import app.page.android.model.StopOutcome
+import app.page.android.model.TipBook
+import app.page.android.model.TowerSection
+import app.page.android.model.ValidatedPairing
+import app.page.android.ui.nw.shell.RenderHarness
+import app.page.android.ui.nw.theme.NWMotionPin
 import java.time.Instant
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
- * Debug-only demo mode (the Android side of iOS DevBypass.swift): fills the
- * app with sample pages, history, live sessions, transcripts, a terminal
- * screen and workflows, so every screen can be seen without a Mac. It never
- * writes credentials, starts the background connection or touches the
- * network, and a relaunch returns to the pairing screen.
+ * Debug-only demo mode and render harness (the Android side of iOS DevBypass.swift and RenderHarness.swift):
+ * fills the app with sample pages, history, live sessions, transcripts and a terminal screen, so every screen can
+ * be seen without a Mac. It never writes credentials, starts the background connection or touches the network,
+ * and a relaunch returns to the pairing screen.
  *
- * Scriptable for screenshots:
- * `adb shell am start -n app.page.android.debug/app.page.android.MainActivity --ez page_demo true
- *   [--es page_demo_tab inbox|sessions|history|settings] [--es page_demo_open dev-1]
- *   [--es page_demo_session active|<id>] [--es page_demo_pane terminal|workflows] [--es page_demo_run <runId>]`
+ * Scriptable (android/tools/screens.sh does this for every screen in [screens]):
+ * `adb shell am start -S -W -n app.page.android.debug/app.page.android.MainActivity --ez page_demo true
+ *   --es page_render <screen> [--es page_glow off|subtle|full] [--ef page_time <seconds>] [--ez page_canvas true]`
+ * `page_render` pins the aurora phase (default 2.0 s, or `page_time`) and the clock (Tue 27 Oct 2026, 01:12 UTC)
+ * so a screen is the same every time; without it the demo is live. On a `motion-*` screen `page_time` is the
+ * seconds into that signature motion ([DemoMotion]; android/tools/render-motion.sh builds the contact sheets).
+ * `page_canvas` draws with the Canvas fallbacks a device below Android 13 gets, instead of the AGSL shaders, and
+ * `page_noblur` the Canvas aurora as a device below Android 12 draws it (no blur).
  */
 object Demo {
     const val available = true
 
+    /** Every screen name, in the order the render script captures them (the same names as iOS RenderHarness.screens). */
+    val screens = listOf(
+        "now", "now-quiet", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
+        "now-receipt", "now-banner", "now-new",
+        "now-inflight", "now-inflight-long", "now-tip-undoable", "now-tip-irreversible", "now-tip-inflight",
+        "now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-flight-quiet",
+        "decision-irreversible", "decision-hold", "decision-considered", "decision-undoable", "decision-question", "decision-stuck",
+        "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
+        "decision-failed", "decision-tip",
+        "hold-stop", "stop-confirm", "stop-result", "stop-none",
+        "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
+        "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
+        "dispatch", "dispatch-sending", "dispatch-off",
+        "runway", "settled", "gallery", "glow-compare",
+        "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
+        "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
+        "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
+        "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
+        "widgets",
+        "ask-story-q1", "ask-story-q2", "ask-story-other", "ask-story-review", "ask-story-sending", "ask-story-refused",
+        "ask-story-answered", "ask-screen", "ask-screen-review", "ask-decision", "ask-hook-q2", "ask-hook-review",
+        "motion-pulse-quiet", "motion-pulse-working", "motion-pulse-waiting1", "motion-pulse-waiting3", "motion-pulse-exhale",
+        "motion-approach",
+        "motion-receipt-arm", "motion-receipt-sending", "motion-receipt-sent", "motion-receipt-typed", "motion-receipt-verified",
+        "motion-receipt-fold", "motion-receipt-failed", "motion-receipt-sheet",
+        "motion-hold", "motion-hold-burst",
+        "motion-dusk", "motion-dawn", "motion-dusk-now", "motion-dawn-now", "motion-brief",
+        "history", "history-stats", "history-empty", "history-loading", "history-failed", "history-large", "history-stats-large",
+        "gallery-lower",
+    )
+
+    /** Screens drawn outside the shell (components on their own). */
+    private fun isStandalone(screen: String) = screen in setOf("gallery", "gallery-lower", "glow-compare", "runway", "settled", "widgets") || screen.startsWith("room-") || screen.startsWith("ask-") || isUnpaired(screen) || DemoMotion.isStandalone(screen)
+
+    /** Screens with no Mac paired (the first-run flow). */
+    private fun isUnpaired(screen: String) = screen.startsWith("welcome") || screen.startsWith("scan") || screen.startsWith("pair") || screen == "paired" || screen == "paired-denied"
+
+    /** The default demo (the pairing screen's "Try the demo"): the board scenario, live. */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
     fun start() {
-        // Never over a real pairing: seeding resets the relay client, which
-        // would clear the real session key.
+        // Never over a real pairing: seeding resets the relay client, which would clear the real session key.
         if (PairingStore.isPaired && !PairingStore.isDemoPairing) return
-        PairingStore.adoptDemo(PairedMac("MacBook Pro (demo)", Instant.now()))
-        RelayClient.seedDemoInbox(interventions())
-        RelayClient.seedDemoHistory(history())
-        // Sessions are seeded after the inbox, whose reset clears them.
-        SessionStore.seedDemo("MacBook Pro (demo)", sessions(), transcripts(), screens(), workflows())
-        SessionStore.seedDemoExtras(mapOf(ACTIVE_SESSION_ID to diff(), "99999999-4444-dddd-eeee-ffffffffffff" to diff()), folders())
-        // On battery with a forecast, and Claude usage captured (v4 heartbeat fields).
-        RelayClient.seedDemoStatus(
-            MacStatusSnapshot(
-                macConnected = true, lastHeartbeatAt = Instant.now(), activeSessions = 7, battery = 42, onAC = false,
-                working = 2, forecast = BatteryForecast(cutoff = 10, minutes = 35, drainPerHour = 55.0),
-                usage = ClaudeUsage(
-                    fiveHour = UsageWindow(62.0, Instant.now().plusSeconds(2 * 3600)), sevenDay = UsageWindow(31.0, Instant.now().plusSeconds(3 * 24 * 3600 + 5 * 3600)),
-                    hitAt = Instant.now().plusSeconds(80 * 60), updatedAt = Instant.now(),
-                ),
-            )
+        // The fixtures' timestamps are on the harness clock; live, the Mac's status is stamped against the real one
+        // and kept fresh, or the demo opens on "Studio MBP stopped checking in".
+        seed(
+            open = DemoFixtures.openAt(Instant.now()), status = DemoFixtures.statusAt(Instant.now()), sessions = DemoFixtures.sessionsWithFlight,
         )
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            while (PairingStore.isDemoPairing) {
+                delay(60_000)
+                if (PairingStore.isDemoPairing) RelayClient.seedDemoStatus(DemoFixtures.statusAt(Instant.now()))
+            }
+        }
+    }
+
+    /** The fixture pages as real notifications, plus the live one, for looking at them in the shade. */
+    private fun postDemoNotifications() {
+        val ctx = app.page.android.data.AppGraph.app
+        app.page.android.notify.PageNotifications.createChannels(ctx)
+        for (iv in DemoFixtures.open) app.page.android.notify.PageNotifications.post(app.page.android.notify.PageInfo.of(iv), silent = true, status = null)
+        val nm = androidx.core.app.NotificationManagerCompat.from(ctx)
+        val screen = NowStore.screen.value
+        val off = android.app.PendingIntent.getActivity(ctx, 1, android.content.Intent(), android.app.PendingIntent.FLAG_IMMUTABLE)
+        val n = app.page.android.notify.LiveNotification.build(
+            ctx, app.page.android.notify.PageNotifications.CHANNEL_CONNECTION,
+            app.page.android.notify.LiveNotification.status(screen.model.headline, screen.model.subline, screen.model.runway, true), off,
+        )
+        @Suppress("MissingPermission") nm.notify(42, n)
+    }
+
+    private fun seed(open: List<Intervention>, status: MacStatusSnapshot?, sessions: List<LiveSession>) {
+        PairingStore.adoptDemo(PairedMac(DemoFixtures.mac, DemoFixtures.now.minusSeconds(26 * 86_400)))
+        RelayClient.seedDemoInbox(open)
+        RelayClient.seedDemoHistory(DemoFixtures.history)
+        status?.let { RelayClient.seedDemoStatus(it) }
+        // Sessions are seeded after the inbox, whose reset clears them.
+        SessionStore.seedDemo(DemoFixtures.mac, sessions, DemoFixtures.transcripts(), DemoFixtures.screens(), DemoFixtures.workflows())
+        SessionStore.seedDemoExtras(sessions.associate { it.id to DemoFixtures.diff(it.id) }, DemoFixtures.folders)
     }
 
     fun handleLaunchExtras(extras: Bundle?) {
-        // Exercises the real, non-demo path (Keystore, adopt, socket failure,
-        // Stay connected) against a relay that can't resolve. Unpaired only.
+        // Exercises the real, non-demo path (Keystore, adopt, socket failure, Stay connected) against a relay that
+        // can't resolve. Unpaired only.
         if (extras?.getBoolean("page_test_pair") == true && !PairingStore.isPaired) {
             val random = java.security.SecureRandom()
             val token = Base64Url.encode(ByteArray(32).also(random::nextBytes))
@@ -82,282 +146,234 @@ object Demo {
             return
         }
         if (extras?.getBoolean("page_demo") != true) return
-        start()
-        if (!PairingStore.isDemoPairing) return
-        when (extras.getString("page_demo_tab")) {
-            "inbox" -> AppRouter.selectTab(AppTab.INBOX)
-            "history" -> AppRouter.selectTab(AppTab.HISTORY)
-            "settings" -> AppRouter.selectTab(AppTab.SETTINGS)
-            "sessions" -> AppRouter.selectTab(AppTab.SESSIONS)
+        if (extras.getBoolean("page_notify")) {
+            // Posts the board-34 notifications for the fixture pages (a debug aid for looking at the shade).
+            start()
+            postDemoNotifications()
+            return
         }
-        extras.getString("page_demo_open")?.let { AppRouter.open(it) }
-        extras.getString("page_demo_session")?.let { AppRouter.openSession(if (it == "active") ACTIVE_SESSION_ID else it) }
-        if (extras.getBoolean("page_demo_new")) AppRouter.openNewSession()
-        // Posts sample page notifications (approval, stuck, idle) to check how
-        // they render; their actions find no pairing and say so in a notice.
-        if (extras.getBoolean("page_demo_notify")) {
-            interventions().filter { it.id in setOf("dev-1", "dev-5", "dev-4") }.forEach {
-                PageNotifications.post(PageInfo.of(it), silent = false, status = null)
-            }
+        if (extras.getBoolean("page_live_motion")) {
+            // The signature motions on their real, unpinned paths (android/tools/render-motion.sh --live records it).
+            start()
+            if (extras.getString("page_live_script") == "arrivals") liveArrivals() else liveMotion()
+            // On Sky instead, to see its power story (and that nothing redraws while a pause holds still).
+            if (extras.getBoolean("page_live_sky")) AppRouter.selectDestination(app.page.android.model.NWDestination.SKY)
+            return
         }
-        LaunchHints.sessionPane = extras.getString("page_demo_pane")
-        LaunchHints.workflowRunId = extras.getString("page_demo_run")
+        val render = extras.getString("page_render")
+        if (render == null) {
+            start()
+            return
+        }
+        app.page.android.ui.nw.components.NWShaders.forceCanvas = extras.getBoolean("page_canvas")
+        app.page.android.ui.nw.components.NWShaders.forceNoBlur = extras.getBoolean("page_noblur")
+        renderScreen(render, CardGlow.argument(extras.getString("page_glow")) ?: CardGlow.OFF, if (extras.containsKey("page_time")) extras.getFloat("page_time").toDouble() else null)
     }
-
-    const val ACTIVE_SESSION_ID = "5e551011-5555-eeee-ffff-000000000000"
-
-    private fun ago(seconds: Long): Instant = Instant.now().minusSeconds(seconds)
-
-    fun interventions(): List<Intervention> = listOf(
-        Intervention(
-            id = "dev-1", sessionId = "7f3a9c2b-1111-aaaa-bbbb-cccccccccccc", cwd = "/Users/you/projects/acme-web",
-            projectName = "acme-web", kind = InterventionKind.APPROVAL, openedAt = ago(12),
-            context = "Bash command needs approval: `npm install bcrypt@5.1.1`",
-            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL,
-        ),
-        Intervention(
-            id = "dev-2", sessionId = "abcdef12-2222-bbbb-cccc-dddddddddddd", cwd = "/Users/you/projects/nova-firmware",
-            projectName = "nova-firmware", kind = InterventionKind.USER_INPUT, openedAt = ago(130),
-            context = "Should I retry the cert download at 9600 baud instead of 38400?",
-            backend = InterventionBackend.CODEX, source = InterventionSource.VSCODE,
-        ),
-        Intervention(
-            id = "dev-3", sessionId = "12345678-3333-cccc-dddd-eeeeeeeeeeee", cwd = "/Users/you/projects/helix-mobile",
-            projectName = "helix-mobile", kind = InterventionKind.APPROVAL, openedAt = ago(310),
-            context = "4-step plan for the Reply screen is ready — review before implementation?",
-            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL, subtype = "plan",
-        ),
-        Intervention(
-            id = "dev-4", sessionId = "99999999-4444-dddd-eeee-ffffffffffff", cwd = "/Users/you/projects/orbit-api",
-            projectName = "orbit-api", kind = InterventionKind.IDLE, openedAt = ago(900),
-            context = "Changed 3 files (+120 −14) · tests passed\n\nFinished the migration and all tests pass. Waiting for your next instruction.",
-            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL,
-        ),
-        // v4 pages: a stuck session, a stalled workflow, a plain rate limit and a usage forecast.
-        Intervention(
-            id = "dev-5", sessionId = "0110a4a1-6666-ffff-0000-111111111111", cwd = "/Users/you/projects/llm-play",
-            projectName = "llm-play", kind = InterventionKind.IDLE, openedAt = ago(60),
-            context = "The same failing call ran 6 times: Bash: cargo test tokenizer::tests::bpe_roundtrip",
-            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL, subtype = "looping",
-        ),
-        Intervention(
-            id = "dev-6", sessionId = ACTIVE_SESSION_ID, cwd = "/Users/you/projects/page-android",
-            projectName = "page-android", kind = InterventionKind.IDLE, openedAt = ago(400),
-            context = "Workflow design-pass-ch1-8-opus has made no progress for 20 minutes (28/30 agents done).",
-            backend = InterventionBackend.CLAUDE, source = InterventionSource.TERMINAL, subtype = "workflow_stalled",
-        ),
-        Intervention(
-            id = "dev-7", sessionId = "ra7e1111-7777-0000-1111-222222222222", cwd = "/Users/you/projects/docs-site",
-            projectName = "docs-site", kind = InterventionKind.RATE_LIMIT, openedAt = ago(1800),
-            context = "Codex hit its usage limit. It resets at 3:00 PM.", backend = InterventionBackend.CODEX,
-        ),
-        Intervention(
-            id = "dev-8", sessionId = "page-mac-usage", cwd = "", projectName = "Your Mac", kind = InterventionKind.RATE_LIMIT,
-            openedAt = ago(30), context = "At the current pace the Claude 5-hour limit is reached in about 30 minutes (at 4:10 PM).",
-            backend = InterventionBackend.CLAUDE, subtype = "usage_forecast",
-        ),
-    )
-
-    fun history(): List<Intervention> = listOf(
-        Intervention(
-            id = "h-1", sessionId = "7f3a9c2b-1111-aaaa-bbbb-cccccccccccc", cwd = "/Users/you/projects/acme-web",
-            projectName = "acme-web", kind = InterventionKind.APPROVAL, openedAt = ago(3_700),
-            context = "Bash: npm run test -- --coverage", closedAt = ago(3_640), closeReason = "replied",
-            repliedAt = ago(3_650), repliedAction = "approve", backend = InterventionBackend.CLAUDE,
-        ),
-        Intervention(
-            id = "h-2", sessionId = "abcdef12-2222-bbbb-cccc-dddddddddddd", cwd = "/Users/you/projects/nova-firmware",
-            projectName = "nova-firmware", kind = InterventionKind.USER_INPUT, openedAt = ago(7_300),
-            context = "Which board revision are you flashing?", closedAt = ago(7_100), closeReason = "replied",
-            repliedAt = ago(7_150), repliedText = "Rev C, the one with the blue silkscreen", backend = InterventionBackend.CODEX,
-        ),
-        Intervention(
-            id = "h-3", sessionId = "99999999-4444-dddd-eeee-ffffffffffff", cwd = "/Users/you/projects/orbit-api",
-            projectName = "orbit-api", kind = InterventionKind.IDLE, openedAt = ago(20_000),
-            context = "Refactor done. Anything else?", closedAt = ago(19_000), closeReason = "user_resolved_in_terminal",
-            backend = InterventionBackend.CLAUDE,
-        ),
-        Intervention(
-            id = "h-4", sessionId = "ra7e1111-7777-0000-1111-222222222222", cwd = "/Users/you/projects/docs-site",
-            projectName = "docs-site", kind = InterventionKind.RATE_LIMIT, openedAt = ago(90_000),
-            context = "Usage limit reached until 3pm.", closedAt = ago(80_000), closeReason = "session_resolved",
-            backend = InterventionBackend.CODEX,
-        ),
-    )
 
     /**
-     * Mixed on purpose: every group, a non-typable host, a local-model
-     * backend, and sessions whose pages are in the sample inbox.
+     * A scripted run of the live demo that plays the signature motions through the real app paths, not the harness
+     * pins: the swipe-to-run page is approved (its arm, the demo relay's sent and confirmed, the fold), a page arrives
+     * (Final approach), the last decisions clear (the exhale), the battery cutoff falls (dusk) and power comes back
+     * (dawn). Times are seconds after launch.
      */
-    fun sessions(): List<LiveSession> {
-        fun s(
-            id: String, backend: String, title: String, state: LiveSessionState, host: String,
-            canType: Boolean = true, blocker: String? = null, canInterrupt: Boolean = true, provider: String? = "anthropic",
-            ago: Long, page: String? = null, preview: String,
-        ) = LiveSession(
-            id = id, backend = AgentBackend.fromWire(backend), title = title, cwd = "~/projects/$title", state = state,
-            host = host, canType = canType, typeBlocker = if (canType) null else blocker, canInterrupt = canInterrupt,
-            provider = provider, lastActivityAt = ago(ago), interventionId = page, preview = preview,
-        )
-        return listOf(
-            s("7f3a9c2b-1111-aaaa-bbbb-cccccccccccc", "claude", "acme-web", LiveSessionState.WAITING_ON_APPROVAL, "cmux",
-                ago = 12, page = "dev-1", preview = "Bash: npm install bcrypt@5.1.1"),
-            s("abcdef12-2222-bbbb-cccc-dddddddddddd", "codex", "nova-firmware", LiveSessionState.WAITING_ON_USER, "VS Code",
-                canType = false, blocker = "Page can't type into VS Code yet", canInterrupt = false, provider = "cloudGateway",
-                ago = 130, page = "dev-2", preview = "Should I retry the cert download at 9600 baud instead of 38400?"),
-            s(ACTIVE_SESSION_ID, "claude", "page-android", LiveSessionState.ACTIVE, "tmux",
-                ago = 3, preview = "Bash: ./gradlew :app:assembleDebug test lint"),
-            s("0110a4a1-6666-ffff-0000-111111111111", "ollama", "llm-play", LiveSessionState.ACTIVE, "Ghostty",
-                canType = false, blocker = "Page can't type into Ghostty yet", canInterrupt = false, provider = "ollama",
-                ago = 40, preview = "Edit: src/tokenizer.rs"),
-            s("12345678-3333-cccc-dddd-eeeeeeeeeeee", "claude", "helix-mobile", LiveSessionState.WAITING_ON_APPROVAL, "Terminal",
-                canType = false, blocker = "Page can't type into Terminal yet", canInterrupt = false,
-                ago = 310, page = "dev-3", preview = "4-step plan for the Reply screen is ready"),
-            s("99999999-4444-dddd-eeee-ffffffffffff", "claude", "orbit-api", LiveSessionState.IDLE, "iTerm",
-                ago = 900, preview = "Finished the migration and all tests pass."),
-            s("ra7e1111-7777-0000-1111-222222222222", "codex", "docs-site", LiveSessionState.RATE_LIMITED, "cmux",
-                provider = "cloudGateway", ago = 1800, preview = "Rate limited until 3pm"),
-        )
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun liveMotion() {
+        val o = DemoFixtures.open
+        val paused = DemoFixtures.iv("pz", "bottle-flip", app.page.android.model.InterventionKind.IDLE, "Page paused your agents at 10% battery.", 5, sub = "low_battery")
+        // The fixtures' heartbeat is on the harness clock; live, the Mac must look present or the Horizon goes hollow.
+        fun beat() = RelayClient.seedDemoStatus(DemoFixtures.status.copy(macConnected = true, lastHeartbeatAt = Instant.now()))
+        beat()
+        RelayClient.replaceDemoInbox(listOf(o[1], o[2], o[3]))
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            delay(2_000)
+            NowStore.screen.value.rows.firstOrNull { it.id == "p2" }?.let { ActionCoordinator.begin(it, RowAction.Kind.APPROVE) }
+            delay(5_000)
+            beat()
+            // p2 was answered and has gone; p1 arrives.
+            RelayClient.replaceDemoInbox(listOf(o[0], o[2], o[3]))
+            delay(4_000)
+            beat()
+            RelayClient.replaceDemoInbox(listOf(o[3]))
+            delay(3_000)
+            beat()
+            RelayClient.replaceDemoInbox(listOf(o[3], paused))
+            delay(3_500)
+            beat()
+            RelayClient.replaceDemoInbox(listOf(o[3]))
+        }
     }
 
-    private fun e(id: String, role: TranscriptRole, text: String, ago: Long, tool: String? = null) =
-        TranscriptEntry(id, role, text, ago(ago), tool)
+    /**
+     * Arrivals on the real path: the first page into an empty, quiet stream (the Horizon gives up its room as the card
+     * comes down), then a second page while a finger is on the stream (android/tools/live-motion.sh --arrivals holds
+     * one down), which waits behind the "New" pill until it is tapped.
+     */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun liveArrivals() {
+        val o = DemoFixtures.open
+        fun beat() = RelayClient.seedDemoStatus(DemoFixtures.status.copy(macConnected = true, lastHeartbeatAt = Instant.now()))
+        beat()
+        RelayClient.replaceDemoInbox(emptyList())
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            delay(3_000)
+            beat()
+            RelayClient.replaceDemoInbox(listOf(o[0]))
+            delay(4_500)
+            beat()
+            RelayClient.replaceDemoInbox(listOf(o[0], o[1]))
+        }
+    }
 
-    fun transcripts(): List<SessionTranscript> = listOf(
-        SessionTranscript(
-            ACTIVE_SESSION_ID,
-            listOf(
-                e("1", TranscriptRole.USER, "Port the phone app to Android with feature parity.", 600),
-                e("2", TranscriptRole.ASSISTANT, "I'll start with the models so the logic is testable, then the relay client, then the screens.", 590),
-                e("3", TranscriptRole.TOOL, "Read: iOS/Page/Models/LiveSessions.swift", 585, "Read"),
-                e("4", TranscriptRole.TOOL, "Write: android/app/src/main/java/app/page/android/model/LiveSession.kt", 400, "Write"),
-                e("5", TranscriptRole.ASSISTANT, "Models are in and the AES-GCM test vector passes. Running the full build before touching the UI.", 120),
-                e("6", TranscriptRole.USER, "Also check dark mode please", 60),
-                e("7", TranscriptRole.TOOL, "Bash: ./gradlew :app:assembleDebug test lint", 3, "Bash"),
-            ),
-            truncated = true,
-        ),
-        SessionTranscript(
-            "7f3a9c2b-1111-aaaa-bbbb-cccccccccccc",
-            listOf(
-                e("1", TranscriptRole.USER, "Switch password hashing to bcrypt.", 300),
-                e("2", TranscriptRole.ASSISTANT, "I'll add bcrypt and migrate the hash helper.", 280),
-                e("3", TranscriptRole.TOOL, "Bash: npm install bcrypt@5.1.1", 12, "Bash"),
-                e("4", TranscriptRole.SYSTEM, "Waiting for approval", 12),
-            ),
-            truncated = false,
-        ),
-        SessionTranscript(
-            "99999999-4444-dddd-eeee-ffffffffffff",
-            listOf(
-                e("1", TranscriptRole.USER, "Run the migration and fix whatever breaks.", 2400),
-                e("2", TranscriptRole.TOOL, "Bash: npm run migrate", 2300, "Bash"),
-                e("3", TranscriptRole.TOOL, "Edit: src/db/schema.ts", 1500, "Edit"),
-                e("4", TranscriptRole.ASSISTANT, "Finished the migration and all tests pass. Waiting for your next instruction.", 900),
-            ),
-            truncated = false,
-        ),
-        // A workflow agent's own transcript (keyed apart from the session's).
-        SessionTranscript(
-            ACTIVE_SESSION_ID,
-            listOf(
-                e("a1", TranscriptRole.USER, "Fix the contrast findings in chapter 5 of the design pass.", 900),
-                e("a2", TranscriptRole.TOOL, "Read: ui/theme/Theme.kt", 880, "Read"),
-                e("a3", TranscriptRole.ASSISTANT, "The light-mode chip text was 3.9:1; darkening the teal to #0F766E brings it to 5.4:1.", 600),
-                e("a4", TranscriptRole.TOOL, "Edit: ui/theme/Theme.kt", 590, "Edit"),
-            ),
-            truncated = false, runId = "wf_5efbb134-a4c", agentId = "a501def47993d54be",
-        ),
-    )
+    // region The render harness
 
-    fun diff(): SessionDiff = SessionDiff(
-        sessionId = ACTIVE_SESSION_ID, clientId = null, scope = "turn", repo = "page",
-        files = listOf(
-            DiffFile("android/app/src/main/java/app/page/android/ui/theme/Theme.kt", 12, 3, "modified"),
-            DiffFile("android/README.md", 40, 0, "added"),
-            DiffFile("notes.txt", null, null, "changed"),
-        ),
-        patch = listOf(
-            "diff --git a/android/app/src/main/java/app/page/android/ui/theme/Theme.kt b/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
-            "index 3f2a1c0..9b8e7d1 100644",
-            "--- a/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
-            "+++ b/android/app/src/main/java/app/page/android/ui/theme/Theme.kt",
-            "@@ -18,9 +18,12 @@ data class PageColors(",
-            "     val text: Color,",
-            "-    val kindApproval: Color = Color(0xFF14B8A6),",
-            "+    // Darker in light mode so 11sp chip text stays above 4.5:1.",
-            "+    val kindApproval: Color = Color(0xFF0F766E),",
-            "     val kindUserInput: Color,",
-            "diff --git a/android/README.md b/android/README.md",
-            "new file mode 100644",
-            "--- /dev/null",
-            "+++ b/android/README.md",
-            "@@ -0,0 +1,3 @@",
-            "+# Page for Android",
-            "+",
-            "+Build with ./gradlew :app:assembleDebug",
-        ).joinToString("\n"),
-        truncated = false, note = null,
-    )
+    private fun inboxFor(screen: String): List<Intervention> {
+        val o = DemoFixtures.open
+        return when {
+            screen in setOf("now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-inflight", "now-tip-irreversible") -> listOf(o[0])
+            screen in setOf("now-inflight-long", "now-tip-undoable") -> listOf(o[1])
+            screen in setOf("now-quiet", "now-brief-quiet", "now-working", "now-flight-quiet", "now-tip-inflight") -> emptyList()
+            screen.startsWith("problem-") || screen == "sky-empty" -> emptyList()
+            screen == "now-dusk" -> listOf(DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 600, sub = "low_battery"))
+            screen.startsWith("decision") -> o + listOfNotNull(DemoFixtures.page(screen).takeIf { p -> o.none { it.id == p.id } })
+            else -> o
+        }
+    }
 
-    fun folders(): StartFolders = StartFolders(
-        clientId = null, enabled = true, agents = listOf("claude"),
-        folders = listOf(
-            StartFolder("/Users/you/projects/page", "page", ago(300)),
-            StartFolder("/Users/you/projects/acme-web", "acme-web", ago(7_200)),
-            StartFolder("/Users/you/projects/orbit-api", "orbit-api", ago(90_000)),
-        ),
-    )
+    private fun statusFor(screen: String): MacStatusSnapshot {
+        val st = DemoFixtures.status
+        val now = DemoFixtures.now
+        return when (screen) {
+            "now-quiet", "now-brief-quiet" -> st.copy(working = 0, forecast = null, usage = null, onAC = true)
+            "now-working", "now-flight-quiet", "now-tip-inflight" -> st.copy(onAC = true, forecast = null)
+            "problem-asleep", "now-banner" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(1_500))
+            "problem-gone" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(3 * 3600 + 600), onAC = false, battery = 12)
+            "problem-stale" -> st.copy(macConnected = true, lastHeartbeatAt = now.minusSeconds(8 * 60))
+            "sky-empty" -> st.copy(working = 0)
+            else -> st
+        }
+    }
 
-    fun screens(): List<SessionScreen> = listOf(
-        SessionScreen(
-            ACTIVE_SESSION_ID,
-            listOf(
-                "● Running the build before touching the UI.",
-                "",
-                "⏺ Bash(./gradlew :app:assembleDebug test lint)",
-                "  ⎿  > Task :app:testDebugUnitTest",
-                "     BUILD SUCCESSFUL in 1m 12s",
-                "     58 tests completed, 0 failed",
-                "",
-                "────────────────────────────────────────────────────────────────────────",
-                "❯ ",
-                "────────────────────────────────────────────────────────────────────────",
-                "  ⏵⏵ auto mode on (shift+tab to cycle) · 1 shell · ctrl+t to hide todos",
-                "  ○ design-pass-ch1-8-opus        28/30 · 2h34m · 6.3m tokens",
-                "  ○ finish-act-opus                0/1 · 4m",
-            ),
-            Instant.now(),
-        ),
-    )
+    private fun sessionsFor(screen: String): List<LiveSession> = when {
+        screen == "sky-empty" || screen == "stop-none" -> emptyList()
+        screen == "sky-crowded" -> DemoFixtures.crowdedSessions
+        screen in setOf("now-quiet", "now-brief-quiet", "now-working") -> DemoFixtures.sessions.filter { it.state != LiveSessionState.WAITING_ON_APPROVAL }
+        screen.startsWith("now") -> DemoFixtures.nowSessions(screen)
+        screen.startsWith("problem-") -> DemoFixtures.sessions
+        else -> DemoFixtures.sessionsWithFlight
+    }
 
-    fun workflows(): Map<String, List<WorkflowRun>> {
-        val now = Instant.now()
-        return mapOf(
-            ACTIVE_SESSION_ID to listOf(
-                WorkflowRun(
-                    id = "wf_5efbb134-a4c", name = "design-pass-ch1-8-opus",
-                    summary = "Review chapters 1–8 of the design spec for contrast, spacing and copy; fix what's found.",
-                    status = "running", phase = "Fix B", done = 28, total = 30,
-                    startedAt = now.minusSeconds(9_240), tokens = 6_300_000,
-                    agents = listOf(
-                        WorkflowRun.Agent("a501def47993d54be", "ch5: fix contrast findings", "Fix B", "running", now.minusSeconds(10)),
-                        WorkflowRun.Agent("a502", "ch7: fix spacing findings", "Fix B", "running", now.minusSeconds(45)),
-                        WorkflowRun.Agent("a503", "ch3: review copy", "Review", "failed", now.minusSeconds(3_000)),
-                        WorkflowRun.Agent("a504", "ch1: review", "Review", "done", now.minusSeconds(8_000)),
-                        WorkflowRun.Agent("a505", "ch2: review", "Review", "done", now.minusSeconds(7_800)),
-                    ),
-                ),
-                WorkflowRun(
-                    id = "wf_7a1c", name = "finish-act-opus", status = "running", phase = "Draft",
-                    done = 0, total = 1, startedAt = now.minusSeconds(240),
-                    agents = listOf(WorkflowRun.Agent("b1", "act 3: draft", "Draft", "running", now.minusSeconds(5))),
-                ),
-                WorkflowRun(
-                    id = "wf_0ld", name = "lint-sweep", status = "completed", done = 12, total = 12,
-                    startedAt = now.minusSeconds(30_000), endedAt = now.minusSeconds(28_000), tokens = 985_100,
-                ),
+    private fun renderScreen(asked: String, glow: CardGlow, time: Double?) {
+        // A motion screen is drawn on its base screen's fixtures, with the motion pinned (DemoMotion).
+        val motion = asked
+        val screen = if (DemoMotion.isMotion(asked)) DemoMotion.base(asked) else asked
+        val phase = DemoMotion.phase(asked, time)
+        val pin: NWMotionPin? = DemoMotion.pin(asked, time)
+        RenderHarness.standalone = { name -> standalone(name, time) }
+        CardGlowStore.overrideForRender(glow)
+        TipStore.overrideForRender(TipBook())
+        NowStore.clock = { DemoFixtures.now }
+        NowStore.zone = DemoFixtures.zone
+        val jumpTop = if (screen in setOf("now-flight", "now-flight-old", "now-flight-jump", "now-inflight", "now-tip-inflight", "now-flight-two", "now-flight-header", "now-flight-quiet", "now-inflight-long", "now-working")) "section-in flight" else null
+        val scrollTo = when (screen) {
+            "now-swipe", "now-receipt", "now-tip-undoable" -> "row-p2"
+            "now-arming" -> "row-p2"
+            else -> null
+        }
+        RenderHarness.set(
+            RenderHarness.Spec(
+                motion, glow, phase, DemoFixtures.now, pin, scrollTo = DemoMotion.scrollTo(motion) ?: scrollTo,
+                scrollTop = DemoMotion.scrollTop(motion) ?: (if (screen == "now-working") null else if (screen == "now-brief") "brief" else jumpTop),
+                pinnedArrival = DemoMotion.pinnedArrival(motion), ghosts = DemoMotion.ghosts(motion),
+                dragDp = if (screen == "now-swipe") 84f else null, queuedNew = if (screen == "now-new") 1 else 0,
+                hold = if (screen == "now-hold" || screen == "decision-hold") 0.55 else null, selectedStar = if (screen == "sky-selected") "w1" else null, dispatchSending = screen == "dispatch-sending",
             ),
         )
+        if (isStandalone(motion) || isUnpaired(screen)) return
+
+        val open = DemoMotion.inbox(motion) ?: inboxFor(screen)
+        seed(open, statusFor(screen), DemoMotion.sessions(motion) ?: sessionsFor(screen))
+        ActivityStore.overridePowerForRender(DemoMotion.power(motion))
+        val extra: Map<String, app.page.android.model.ReplyDelivery> = when (screen) {
+            "decision-delivered" -> mapOf("p1" to app.page.android.model.ReplyDelivery.Delivered("typed into tmux pane %3"))
+            "decision-failed" -> mapOf("p1" to app.page.android.model.ReplyDelivery.Failed("The Mac didn't confirm in time. Check the session before answering again."))
+            else -> emptyMap()
+        }
+        val receipt = DemoMotion.receipt(motion, DemoMotion.time(motion, time), open.firstOrNull { it.id == "p2" }?.let { NowRowBuilder.row(it, null, DemoFixtures.mac).action(RowAction.Kind.APPROVE)?.preview })
+        RelayClient.seedDemoDeliveries(
+            mapOf("h1" to app.page.android.model.ReplyDelivery.Delivered(null)) + extra + (receipt?.deliveries ?: emptyMap()),
+            mapOf("h1" to DemoFixtures.now.minusSeconds(12 * 60)) + extra.mapValues { DemoFixtures.now.minusSeconds(30) } + (receipt?.times ?: emptyMap()),
+        )
+        receipt?.pending?.takeIf { it.isNotEmpty() }?.let { ActionCoordinator.seedForRender(it) }
+        if (screen == "dispatch-off") SessionStore.seedDemoExtras(emptyMap(), DemoFixtures.folders.copy(enabled = false))
+        ActivityStore.overrideForRender(DemoFixtures.activity)
+        AppRouter.reset()
+        when (screen) {
+            "problem-relay" -> RelayClient.seedDemoProblem(inboxLoad = RelayClient.LoadState.Failed("The relay didn't answer."), connection = RelayClient.ConnectionState.DISCONNECTED)
+            "problem-pairing" -> RelayClient.seedDemoProblem(authRejected = true)
+            "history-empty" -> RelayClient.seedDemoHistory(emptyList())
+            "history-loading" -> { RelayClient.seedDemoHistory(emptyList()); RelayClient.seedDemoProblem(historyLoad = RelayClient.LoadState.Loading) }
+            "history-failed" -> { RelayClient.seedDemoHistory(emptyList()); RelayClient.seedDemoProblem(historyLoad = RelayClient.LoadState.Failed("The network connection was lost.")) }
+        }
+        // The tapped state of some screens.
+        val rows = open.map { NowRowBuilder.row(it, null, DemoFixtures.mac) }
+        when {
+            // A productive night (as iOS's motion-brief), so the sunrise is drawn at its brightest.
+            motion == "motion-brief" -> AwayStore.overrideForRender(Absence(DemoFixtures.now.minusSeconds(18 * 3600), DemoFixtures.now))
+            else -> when (screen) {
+            "now-brief" -> AwayStore.overrideForRender(Absence(DemoFixtures.now.minusSeconds(13 * 3600 + 5 * 60), DemoFixtures.now))
+            "now-brief-quiet" -> AwayStore.overrideForRender(Absence(DemoFixtures.now.minusSeconds(13 * 3600 + 5 * 60), DemoFixtures.now))
+            else -> AwayStore.overrideForRender(null)
+            }
+        }
+        if (screen == "now-arming") {
+            rows.firstOrNull { it.chip == app.page.android.model.ChipKind.CONSIDERED || it.chip == app.page.android.model.ChipKind.UNDOABLE }?.let { r ->
+                ActionCoordinator.seedForRender(mapOf(r.id to PendingAction(r.id, RowAction.Kind.APPROVE, "", r.commit, DemoFixtures.now.minusMillis(500), true, r.action(RowAction.Kind.APPROVE)?.preview)))
+            }
+        }
+        if (screen == "now-receipt") {
+            rows.firstOrNull { it.section == app.page.android.model.NowRow.Section.REVIEW }?.let { r ->
+                ActionCoordinator.seedForRender(emptyMap(), mapOf(r.id to "Didn't confirm in time · Check on Mac"))
+            }
+        }
+        // Where the screen sits.
+        when {
+            screen.startsWith("sky") || screen.startsWith("lanes") -> {
+                AppRouter.selectDestination(app.page.android.model.NWDestination.SKY)
+                AppRouter.setSkyModeForRender(if (screen.startsWith("lanes")) SkyMode.LANES else SkyMode.SKY)
+            }
+            screen.startsWith("decision") -> AppRouter.open(DemoFixtures.page(screen).id)
+            screen.startsWith("tower") -> AppRouter.openTower(
+                when (screen) { "tower-budget" -> TowerSection.BUDGET; "tower-glow" -> TowerSection.APPEARANCE; "tower-terminals" -> TowerSection.TERMINALS; "tower-gestures" -> TowerSection.GESTURES; else -> null },
+            )
+            screen.startsWith("dispatch") -> AppRouter.openDispatch()
+            screen.startsWith("history") -> AppRouter.openHistory()
+            screen.startsWith("room-") || screen.startsWith("ask-") ->
+                AppRouter.openSession("w1", when (screen) { "room-screen", "ask-screen", "ask-screen-review" -> RoomEntry.SCREEN; "room-draft" -> RoomEntry.TYPE; "room-stop" -> RoomEntry.STOP; else -> RoomEntry.STORY })
+        }
+        when (screen) {
+            "hold-stop" -> RenderHarness.pinHeld(0.3 + 0.7 * 1.2)
+            "stop-confirm" -> StopCoordinator.overrideForRender(StopFlowPhase.Authenticating)
+            "stop-result" -> StopCoordinator.overrideForRender(StopFlowPhase.Result(StopOutcome.Asked))
+            "stop-none" -> StopCoordinator.overrideForRender(StopFlowPhase.Result(StopOutcome.NothingBusy))
+        }
     }
+
+    /** The screens drawn outside the shell. */
+    private fun standalone(screen: String, time: Double?): (@androidx.compose.runtime.Composable () -> Unit)? = when (screen) {
+        "motion-hold", "motion-hold-burst" -> ({ DemoMotion.Hold(screen, DemoMotion.time(screen, time)) })
+        "gallery" -> ({ DemoGallery() })
+        "gallery-lower" -> ({ DemoGallery(lower = true) })
+        "glow-compare" -> ({ DemoGlowCompare() })
+        "runway" -> ({ DemoRunway() })
+        "settled" -> ({ DemoSettled() })
+        "widgets" -> ({ DemoGallery(widgetsPlaceholder = true) })
+        else -> when {
+            screen.startsWith("room-") -> ({ DemoRooms.Room(screen) })
+            screen.startsWith("ask-") -> ({ DemoRooms.Ask(screen) })
+            isUnpaired(screen) -> ({ DemoOnboarding.Screen(screen) })
+            else -> null
+        }
+    }
+
+    // endregion
 }

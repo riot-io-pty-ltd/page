@@ -134,6 +134,7 @@ object PairingStore {
         s.delete(SecretStore.RELAY_TOKEN)
         SessionKeyStore.clear(s)
         AppGraph.prefs.clearNotified()
+        StatusSnapshotStore.clear()
         isDemoPairing = false
         _pairedMac.value = null
         _relayHost.value = null
@@ -156,6 +157,7 @@ object PairingStore {
         isDemoPairing = false
         _pairedMac.value = null
         _relayHost.value = null
+        StatusSnapshotStore.clear()
         RelayClient.reset()
         AppRouter.reset()
     }

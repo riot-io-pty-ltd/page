@@ -5,7 +5,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotificationLogicTest {
-    private fun decide(r: NotificationResponseKind, text: String? = null, kind: String?) = NotificationDecision.decide(r, text, kind)
+    private fun decide(r: NotificationResponseKind, text: String? = null, kind: String?) = NotificationDecision.decide(r, text, kind, approveLevel = Reversibility.UNDOABLE)
     private fun action(id: String) = NotificationResponseKind.Action(id)
 
     @Test

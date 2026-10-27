@@ -22,7 +22,7 @@ class ProtocolV4Test {
         assertTrue(PageSubtype.isStuck(looping.kind, looping.subtype) && PageSubtype.canStop(looping.kind, looping.subtype))
         val stalled = page("idle", "workflow_stalled")
         assertEquals("WORKFLOW STALLED", stalled.chipLabel())
-        assertEquals("Claude looks stuck", ReplyCopy.headline(stalled))
+        assertEquals("A workflow stopped making progress", ReplyCopy.headline(stalled))
         assertFalse("no Stop for a stalled workflow", PageSubtype.canStop(stalled.kind, stalled.subtype))
         assertEquals("Claude is waiting for you", ReplyCopy.headline(page("idle", "low_battery")))
         // A stuck subtype on another kind means nothing.
