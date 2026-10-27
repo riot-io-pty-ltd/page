@@ -7,7 +7,7 @@ import SwiftUI
 /// fires before any view exists; the request simply sits here until the root
 /// view appears and presents it.
 ///
-/// There are exactly two destinations (Now and Sky). Everything else is a sheet
+/// There are exactly two destinations (Now and Lanes). Everything else is a sheet
 /// or a room, and only one sheet can be up at a time: asking for another while
 /// one is showing closes the first, and the new one comes up from
 /// `sheetDismissed()` (`SheetQueue`). A deep link always lands on Now with the
@@ -23,7 +23,7 @@ final class AppRouter: ObservableObject {
 
     @Published var destination: NWDestination = .now
     @Published private(set) var sheets = SheetQueue()
-    /// The unpair confirmation, asked for by Now, Sky and the Tower alike.
+    /// The unpair confirmation, asked for by Now, Lanes and the Tower alike.
     @Published var confirmingUnpair = false
     /// The Paired screen is up after a first pairing. While it is, nothing else
     /// asks iOS for notification permission: that choice is made on that screen.
@@ -69,14 +69,15 @@ final class AppRouter: ObservableObject {
     func sheetDismissed() { sheets.dismissed() }
 
     /// Handles `page://intervention/<id>`, `page://sessions` (the widget),
-    /// `page://now`, `page://sky` and `page://tower`. Returns false for
+    /// `page://now`, `page://lanes` (and its old name `page://sky`) and
+    /// `page://tower`. Returns false for
     /// anything else.
     @discardableResult
     func handle(url: URL) -> Bool {
         guard let link = NWDeepLink.parse(url) else { return false }
         switch link {
         case .now: destination = .now
-        case .sky: destination = .sky
+        case .lanes: destination = .lanes
         case .tower: openTower()
         case .decision(let id): open(interventionId: id)
         }

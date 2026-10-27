@@ -139,7 +139,7 @@ struct DispatchStatus: Equatable {
         case .sending: return DispatchStatus(text: "Asking your Mac to start it…", tone: .working, waiting: true)
         case .typed(let detail), .queued(let detail):
             if startWaitExpired {
-                return DispatchStatus(text: "Started, but it hasn't shown up here yet. Look for it in Sky, or in cmux on your Mac.", tone: .warn, waiting: false)
+                return DispatchStatus(text: "Started, but it hasn't shown up here yet. Look for it in Lanes, or in cmux on your Mac.", tone: .warn, waiting: false)
             }
             return DispatchStatus(text: (detail ?? "Started") + ". Opening it here as soon as it appears. On your Mac it's a new cmux workspace.", tone: .good, waiting: true)
         case .refused(_, let message), .failed(let message):

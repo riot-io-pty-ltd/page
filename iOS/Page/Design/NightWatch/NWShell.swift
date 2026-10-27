@@ -1,10 +1,10 @@
 import SwiftUI
 
-/// The frame of the app: the night sky behind, Now or Sky in front (Sky lies
-/// to the right of Now, and they slide as one sky), the floating capsule at
+/// The frame of the app: the night sky behind, Now or Lanes in front (Lanes lies
+/// to the right of Now, and they slide as one), the floating capsule at
 /// the bottom, and the Stop ring over everything while the pulse is held.
 /// Pure: the live container and the render harness both fill it in.
-struct NWShell<NowContent: View, SkyContent: View>: View {
+struct NWShell<NowContent: View, LanesContent: View>: View {
     @Binding var destination: NWDestination
     var decideCount: Int
     var workingCount: Int
@@ -19,7 +19,7 @@ struct NWShell<NowContent: View, SkyContent: View>: View {
     var onPulseTap: () -> Void = {}
     var onPulseHold: () -> Void = {}
     @ViewBuilder var now: () -> NowContent
-    @ViewBuilder var sky: () -> SkyContent
+    @ViewBuilder var lanes: () -> LanesContent
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -29,12 +29,12 @@ struct NWShell<NowContent: View, SkyContent: View>: View {
                 if destination == .now {
                     now().transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
                 } else {
-                    sky().transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                    lanes().transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: destination)
-            NWNavCapsule(selection: Binding(get: { destination == .now ? .now : .sky },
-                                            set: { destination = $0 == .now ? .now : .sky }),
+            NWNavCapsule(selection: Binding(get: { destination == .now ? .now : .lanes },
+                                            set: { destination = $0 == .now ? .now : .lanes }),
                          decideCount: decideCount, workingCount: workingCount, pulseWaiting: pulseWaiting,
                          pulseLongestWait: pulseLongestWait, held: $held,
                          onPulseTap: onPulseTap, onPulseHold: onPulseHold)

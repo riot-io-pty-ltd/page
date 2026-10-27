@@ -273,7 +273,7 @@ struct NWRing: View {
 }
 
 /// Unblocked, Shipped and Calm as three concentric rings (the glyph in the
-/// corner of the Horizon and in Sky's "Tonight" card).
+/// corner of the Horizon and in the "Tonight" card).
 struct NWConcentricRings: View {
     var rings: [RingStat]
     var size: CGFloat = 44

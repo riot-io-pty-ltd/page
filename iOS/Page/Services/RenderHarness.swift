@@ -8,7 +8,7 @@ import SwiftUI
 /// Keychain, no network, no push registration, no shared stores (the live
 /// stores are only created by `LiveApp`, which is not built in this mode),
 /// and the glow override lives in memory only. The screens are the very views
-/// the live app uses (`NWShell`, `NWNowScreen`, `NWSkyScreen`, ...), fed
+/// the live app uses (`NWShell`, `NWNowScreen`, `NWLanesScreen`, ...), fed
 /// fixtures instead of the stores.
 enum RenderHarness {
     /// Every screen name, in the order the render script captures them.
@@ -21,7 +21,7 @@ enum RenderHarness {
         "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
         "decision-failed", "decision-tip",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
-        "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
+        "lanes", "lanes-crowded", "lanes-empty", "lanes-problem", "lanes-standby", "lanes-paused",
         "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
         "tower-widgets", "tower-widgets-lock", "tower-widgets-previews", "tower-widgets-large", "tower-widgets-lockscreen",
         "dispatch", "dispatch-sending", "dispatch-off",
@@ -113,8 +113,7 @@ enum RenderFixtures {
         ]
     }
 
-    /// A full sky: 17 sessions over 11 projects, long names, several that need you, one stuck.
-    /// The sky must label every constellation without a label touching another label or a star.
+    /// A full fleet: 17 sessions over 11 projects, long names, several that need you, one stuck.
     static var crowdedSessions: [LiveSession] {
         sessions + [
             s("c1", "deploy", "relay-worker-edge-router-service", .waitingOnApproval, ago: 90, preview: "wrangler deploy --env production"),
@@ -201,10 +200,15 @@ enum RenderFixtures {
                                 WorkflowBrief(name: "Docs sweep", phase: "Writing", done: 1, total: 4, status: "running")],
                     workflowsRunning: 2)
             case "sess-p3":
-                s.flight = SessionFlight.make(
-                    busySince: now.addingTimeInterval(-41 * 60), startedAt: now.addingTimeInterval(-5 * 3600), model: "Sonnet 4.5",
-                    recentSteps: ["Reading lib.rs", "Running cargo test", "Running cargo test"], health: "stuck", healthNote: "the same test failed 6 times",
-                    workflows: [])
+                // Read from the wire exactly as the Mac writes it (`healthDetail`, ISO dates), so this render also proves the decode.
+                let iso = ISO8601DateFormatter()
+                let wire: [String: Any] = ["id": s.id, "busySince": iso.string(from: now.addingTimeInterval(-41 * 60)),
+                                           "startedAt": iso.string(from: now.addingTimeInterval(-5 * 3600)), "model": "Sonnet 4.5",
+                                           "recentSteps": ["Reading lib.rs", "Running cargo test", "Running cargo test"],
+                                           "health": "stuck", "healthDetail": "the same test failed 6 times"]
+                if let data = try? JSONSerialization.data(withJSONObject: wire), let row = try? JSONDecoder().decode(LiveSession.self, from: data) {
+                    s.flight = row.flight
+                }
             default: break
             }
             return s
@@ -312,7 +316,7 @@ enum RenderFixtures {
         d.inFlight = InFlightSection.build(sessions: nowSessions(screen), hasSessionList: true, now: now)
         // Only the tip screens show a tip, and the real picker chooses it: a fresh phone, the rows as staged.
         if screen.hasPrefix("now-tip") {
-            d.tip = TipBook().nowTip(NowTipInputs(rows: m.rows.map { ($0.id, $0.chip) }, inFlight: d.inFlight.rows.map(\.id)))
+            d.tip = TipBook().nowTip(NowTipInputs(rows: m.rows, inFlight: d.inFlight.rows.map(\.id)))
             // Frame the row the tip points at, with the tip under it.
             if let t = d.tip { d.scrollTo = t.tip == .inFlight ? "inflight-\(t.anchorId)" : t.anchorId }
         }
@@ -413,8 +417,8 @@ struct RenderHarnessRoot: View {
             HarnessMotion(screen: s, time: RenderHarnessMotion.time(args))
         case _ where s.hasPrefix("now"):
             HarnessShell(screen: s, destination: .now)
-        case _ where s.hasPrefix("sky") || s.hasPrefix("lanes"):
-            HarnessShell(screen: s, destination: .sky)
+        case _ where s.hasPrefix("lanes"):
+            HarnessShell(screen: s, destination: .lanes)
         case _ where s.hasPrefix("decision"):
             HarnessDecision(screen: s)
         case "hold-stop", "stop-confirm", "stop-result", "stop-none":
@@ -442,19 +446,15 @@ struct RenderHarnessRoot: View {
     }
 }
 
-/// Now, Sky or Lanes inside the real shell (capsule and Stop ring included).
+/// Now or Lanes inside the real shell (capsule and Stop ring included).
 struct HarnessShell: View {
     let screen: String
     @State var destination: NWDestination
     @State private var held: TimeInterval?
-    @State private var mode: SkyMode
-    @State private var selected: String?
 
     init(screen: String, destination: NWDestination) {
         self.screen = screen
         _destination = State(initialValue: destination)
-        _mode = State(initialValue: screen.hasPrefix("lanes") ? .lanes : .sky)
-        _selected = State(initialValue: screen == "sky-selected" ? "w1" : nil)
     }
 
     private var stop: StopFlowPhase {
@@ -478,18 +478,20 @@ struct HarnessShell: View {
                 pulseLongestWait: PulseModel.longestWait(since: model.pulseRows.map(\.waitingSince), now: RenderFixtures.now), stop: stop, stopPlan: plan,
                 biometry: "Face ID", held: $held) {
             NWNowScreen(data: RenderFixtures.nowData(screen.hasPrefix("now") ? screen : "now"))
-        } sky: {
-            NWSkyScreen(data: skyData, actions: SkyScreenActions(setMode: { mode = $0 }, select: { selected = $0 }))
+        } lanes: {
+            NWLanesScreen(data: lanesData)
         }
         .environment(\.nwTopInset, 54)
     }
 
-    private var skyData: SkyScreenData {
-        let list = screen == "sky-empty" ? [] : (screen == "sky-crowded" ? RenderFixtures.crowdedSessions : RenderFixtures.sessions)
-        let sky = RenderFixtures.sky(sessions: list, paused: false)
-        var d = SkyScreenData(sky: sky, lanes: LanesModel.build(sky: sky, log: RenderFixtures.activity, now: RenderFixtures.now),
-                              mode: mode, now: RenderFixtures.now, standby: screen == "lanes-standby" ? RenderFixtures.macRows : [], selectedStar: selected)
-        if screen == "sky-problem" { d.availability = SessionAvailabilityCopy(.needsRepair(keyMismatch: false)) }
+    private var lanesData: LanesScreenData {
+        // The standby screen keeps the fleet short so the standby Macs below it are in view.
+        let list = screen == "lanes-empty" ? [] : (screen == "lanes-crowded" ? RenderFixtures.crowdedSessions
+            : (screen == "lanes-standby" ? Array(RenderFixtures.sessions.prefix(2)) : RenderFixtures.sessions))
+        let fleet = RenderFixtures.sky(sessions: list, paused: screen == "lanes-paused")
+        var d = LanesScreenData(fleet: fleet, lanes: LanesModel.build(sky: fleet, log: RenderFixtures.activity, now: RenderFixtures.now),
+                                now: RenderFixtures.now, standby: screen == "lanes-standby" ? RenderFixtures.macRows : [])
+        if screen == "lanes-problem" { d.availability = SessionAvailabilityCopy(.needsRepair(keyMismatch: false)) }
         return d
     }
 }

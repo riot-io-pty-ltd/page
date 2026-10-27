@@ -71,7 +71,7 @@ struct PairMacView: View {
                         AppRouter.shared.open(interventionId: args[i + 1])
                     }
                     // `-PageDevSheet tower|tower-budget|dispatch|history` opens that sheet, and
-                    // `-PageDevDestination sky` starts on Sky (mock data only, for screenshots).
+                    // `-PageDevDestination lanes` starts on Lanes (mock data only, for screenshots).
                     if let i = args.firstIndex(of: "-PageDevSheet"), i + 1 < args.count {
                         switch args[i + 1] {
                         case "tower": AppRouter.shared.openTower()
@@ -81,8 +81,8 @@ struct PairMacView: View {
                         default: break
                         }
                     }
-                    if let i = args.firstIndex(of: "-PageDevDestination"), i + 1 < args.count, args[i + 1] == "sky" {
-                        AppRouter.shared.destination = .sky
+                    if let i = args.firstIndex(of: "-PageDevDestination"), i + 1 < args.count, ["lanes", "sky"].contains(args[i + 1]) {
+                        AppRouter.shared.destination = .lanes
                     }
                     // `-PageDevSession <id|active>` opens a mock session's detail.
                     if let i = args.firstIndex(of: "-PageDevSession"), i + 1 < args.count {

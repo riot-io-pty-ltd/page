@@ -315,7 +315,7 @@ struct HarnessProblem: View {
         return NWShell(destination: $destination, decideCount: 0, workingCount: 0, stopPlan: StopPlan.build(sessions: [], hasSessionList: true),
                        held: $held) {
             NWNowScreen(data: d)
-        } sky: { EmptyView() }
+        } lanes: { EmptyView() }
             .environment(\.nwTopInset, 54)
     }
 }

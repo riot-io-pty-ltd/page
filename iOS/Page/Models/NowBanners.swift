@@ -1,7 +1,7 @@
 import Foundation
 
 // The problems the Now stream surfaces above everything else, and the
-// session-availability copy Sky shows when live sessions can't load. These
+// session-availability copy Lanes shows when live sessions can't load. These
 // are the inbox banners and the Sessions availability cards, as pure values:
 // nothing is lost in the move, only restyled.
 
@@ -92,7 +92,7 @@ struct NowBanner: Equatable, Identifiable {
     }
 }
 
-/// What Sky says when live sessions can't load, and the step that fixes it.
+/// What Lanes says when live sessions can't load, and the step that fixes it.
 struct SessionAvailabilityCopy: Equatable {
     enum Action: Equatable { case repair, retry }
     enum Tone: Equatable { case warning, error, info }

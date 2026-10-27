@@ -132,7 +132,7 @@ struct NWInFlightSection: View {
         .buttonStyle(.plain)
         .accessibilityAddTraits(.isHeader)
         .accessibilityLabel(Text("In flight, \(section.total)"))
-        .accessibilityHint(Text("Goes to Sky"))
+        .accessibilityHint(Text("Goes to Lanes"))
     }
 }
 

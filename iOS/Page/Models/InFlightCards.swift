@@ -80,14 +80,18 @@ struct WorkflowBrief: Hashable, Decodable {
     let phase: String?
     let done: Int
     let total: Int
+    /// Older phones' word for it; the Mac sends none (every row it lists is running).
     let status: String?
+    /// The Mac's `running`: how many of its agents run right now (an Int; the
+    /// workflow itself is running whatever it says). nil when not sent.
+    let agentsRunning: Int?
 
     var running: Bool { status == nil || status == "running" }
 
-    private enum CodingKeys: String, CodingKey { case name, phase, done, total, status }
+    private enum CodingKeys: String, CodingKey { case name, phase, done, total, status, running }
 
-    init(name: String, phase: String? = nil, done: Int = 0, total: Int = 0, status: String? = nil) {
-        self.name = name; self.phase = phase; self.done = done; self.total = total; self.status = status
+    init(name: String, phase: String? = nil, done: Int = 0, total: Int = 0, status: String? = nil, agentsRunning: Int? = nil) {
+        self.name = name; self.phase = phase; self.done = done; self.total = total; self.status = status; self.agentsRunning = agentsRunning
     }
 
     init(from decoder: Decoder) throws {
@@ -100,6 +104,8 @@ struct WorkflowBrief: Hashable, Decodable {
         done = max(0, (try? c.decodeIfPresent(Int.self, forKey: .done)) ?? 0)
         total = max(0, (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? 0)
         status = c.lenientString(.status).flatMap { $0.isEmpty ? nil : String($0.prefix(20)) }
+        // `running` is an Int on the Mac's wire; anything else (a bool, text) is not read as a count.
+        agentsRunning = ((try? c.decodeIfPresent(Int.self, forKey: .running)) ?? nil).map { max(0, $0) }
     }
 }
 
@@ -239,7 +245,7 @@ enum FlightHealth: Equatable {
     var needsAttention: Bool { self == .stuck || self == .rateLimited }
 
     /// The Mac's word when it sent one, else what the phone can tell: an open
-    /// stuck or looping page for this session (as Sky does), a rate limit. A
+    /// stuck or looping page for this session (as Lanes does), a rate limit. A
     /// Mac that sends working fields but no `health` says "normal" (it leaves
     /// the word out then), so the phone does not guess a long silence over it;
     /// only a Mac that sends nothing gets that guess. Pure.
@@ -265,7 +271,7 @@ enum FlightHealth: Equatable {
         }
     }
 
-    /// Sessions with an open stuck or looping page (the same test Sky uses).
+    /// Sessions with an open stuck or looping page (the same test Lanes uses).
     static func stuckSessionIds(_ interventions: [Intervention]) -> Set<String> {
         Set(interventions.filter { $0.kind == .idle && PageSubtype.isStuck($0.subtype) }.map(\.sessionId))
     }

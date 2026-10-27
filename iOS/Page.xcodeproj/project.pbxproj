@@ -97,6 +97,7 @@
 		8C587E2D893A15C8092D7F4E /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39C90FA6902C0DAC78CF3399 /* APIClient.swift */; };
 		8CA4BC5834E30C6C40DF4B8A /* RenderHarnessMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79D946C5DF7C08AA21AA463F /* RenderHarnessMotion.swift */; };
 		9071A00618434AF1DF738F47 /* AppRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 110E21D804E2A13DD3CCD3A1 /* AppRouter.swift */; };
+		92E3C0CB414282F53DFD3AB3 /* NWLanes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5ACC179925B4553E19322068 /* NWLanes.swift */; };
 		933A47C355D8A6AECF00B37A /* TowerModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B338746D330F48E7DB6C5C /* TowerModel.swift */; };
 		949FC01E8899A068371F9058 /* NWHorizon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 828BAB6DFBC74469A93FCAA4 /* NWHorizon.swift */; };
 		967F808F8F46AAE0B6904DE7 /* SessionRoomContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05C01BA53A70722DB66AABFC /* SessionRoomContainer.swift */; };
@@ -111,7 +112,6 @@
 		A18B5CED40485F51FE1F25D0 /* DispatchModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 811FCA35639BE15A50449CFF /* DispatchModel.swift */; };
 		A451B6AAAA2DA96007C27F07 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB8DB987081303E7E57F635 /* SessionRoom.swift */; };
 		A4806154B483216206E3842F /* RenderHarnessStage3.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89E80633A09CB0F64FA70C1F /* RenderHarnessStage3.swift */; };
-		A6370B2B054B1EF37E96981A /* SkyContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9724975FF83F18AFB5C1D85 /* SkyContainer.swift */; };
 		A6D7AE5551CAB3E211939065 /* TowerWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514D7FD17D487F5D78DA41ED /* TowerWidgets.swift */; };
 		A9FAFE26E2C3D9E12B4C1534 /* NowBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F67E4F21F4AB8C27797449A /* NowBanners.swift */; };
 		AACE7808002E2BE61CE32318 /* PageWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87F90880A9F324A1582416D0 /* PageWidget.swift */; };
@@ -127,6 +127,7 @@
 		B3DE6FE9BD2214D2BD381DFB /* NowStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C25B3E2B731B3873638966E /* NowStream.swift */; };
 		B4FAFCAD410EDE5DCC3109D5 /* NWNowParts.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD2A413590058FC99CF4246C /* NWNowParts.swift */; };
 		B75D2B9FF587C41A6A0B299F /* NWShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BFDB6DB2502DFACBF223566 /* NWShell.swift */; };
+		B803473590042902C57D680F /* LanesContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F007852EE013D2DD7E0F320 /* LanesContainer.swift */; };
 		B87AE14581D6B07D0F2E0E9E /* Reversibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13947691F147367D45B37FF3 /* Reversibility.swift */; };
 		B93879D978D17508CDE07449 /* PairedContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF8E004F4C502C569B8C1206 /* PairedContainer.swift */; };
 		B9A37D8797EECAA7139E0F6D /* DecisionContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0E4306688192CB4D09DF21 /* DecisionContent.swift */; };
@@ -173,7 +174,6 @@
 		FB6F498418C31E881D1C377C /* DispatchModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 811FCA35639BE15A50449CFF /* DispatchModel.swift */; };
 		FBDFE3B97809EF2FF31326E2 /* NightWatchNow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8961FA819AD15B0C672F6A67 /* NightWatchNow.swift */; };
 		FD7CA423072F7D2458B30A56 /* ActivityStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEA91064988D836162378AEF /* ActivityStrip.swift */; };
-		FD886D15B0223FE0EE2C6555 /* NWSky.swift in Sources */ = {isa = PBXBuildFile; fileRef = 708072FB4C02ACC461313E76 /* NWSky.swift */; };
 		FEDBD4A3E6837BC38AE7BE88 /* DecisionContent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0E4306688192CB4D09DF21 /* DecisionContent.swift */; };
 /* End PBXBuildFile section */
 
@@ -215,6 +215,7 @@
 		182D2C7D548F8637DF6FA7C8 /* NWHaptics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHaptics.swift; sourceTree = "<group>"; };
 		19F2BC5F25C28ADF792A2070 /* NightWatchRoot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NightWatchRoot.swift; sourceTree = "<group>"; };
 		1D8FC33307E6D89193C51CF7 /* WireDecoding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireDecoding.swift; sourceTree = "<group>"; };
+		1F007852EE013D2DD7E0F320 /* LanesContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LanesContainer.swift; sourceTree = "<group>"; };
 		20C50E4D2A0F6A8309DC22F3 /* NWProblem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWProblem.swift; sourceTree = "<group>"; };
 		2113C8513AE372F02DBB8456 /* SessionCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCrypto.swift; sourceTree = "<group>"; };
 		216AA84E1E6BAFDC091C70D2 /* DuskDawn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuskDawn.swift; sourceTree = "<group>"; };
@@ -252,6 +253,7 @@
 		5A181A52D27E87844823DCF2 /* FirstTimeTips.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirstTimeTips.swift; sourceTree = "<group>"; };
 		5A2189090B0D49DB6F90FF81 /* AnswerDraftStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnswerDraftStore.swift; sourceTree = "<group>"; };
 		5A79CFE2253DE35574A52359 /* NWMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWMotion.swift; sourceTree = "<group>"; };
+		5ACC179925B4553E19322068 /* NWLanes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWLanes.swift; sourceTree = "<group>"; };
 		5E57785102BFD3C4927FB2E2 /* NWDuskDawn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWDuskDawn.swift; sourceTree = "<group>"; };
 		5F4205AEB6075D656C12F203 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6029DA091100718623C8E7ED /* ActionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionCoordinator.swift; sourceTree = "<group>"; };
@@ -263,7 +265,6 @@
 		649088C92E8341D54B6CC0FD /* DispatchContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatchContainer.swift; sourceTree = "<group>"; };
 		6BFA005907403801905AF553 /* NWInFlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWInFlight.swift; sourceTree = "<group>"; };
 		6CECFCC29CF8FA48594552E6 /* NWControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWControls.swift; sourceTree = "<group>"; };
-		708072FB4C02ACC461313E76 /* NWSky.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWSky.swift; sourceTree = "<group>"; };
 		75D47124BDD0793B7D08FFF6 /* RenderHarnessHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenderHarnessHistory.swift; sourceTree = "<group>"; };
 		77354E4E102A7F40E644C646 /* RenderHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RenderHarness.swift; sourceTree = "<group>"; };
 		78EFD50EA897A82740CD7164 /* PairingStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingStore.swift; sourceTree = "<group>"; };
@@ -289,7 +290,6 @@
 		9A77624C8D41D5364F81241C /* NWRoomStory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWRoomStory.swift; sourceTree = "<group>"; };
 		9DE952CFFAC9883B7500F023 /* InFlightCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InFlightCards.swift; sourceTree = "<group>"; };
 		A234C85EA4474C63E7686E8F /* SavedMacs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedMacs.swift; sourceTree = "<group>"; };
-		A9724975FF83F18AFB5C1D85 /* SkyContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyContainer.swift; sourceTree = "<group>"; };
 		AD20F5312536FD52962C2AF1 /* StopCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StopCoordinator.swift; sourceTree = "<group>"; };
 		AD2A413590058FC99CF4246C /* NWNowParts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWNowParts.swift; sourceTree = "<group>"; };
 		AE75A73D4256FFE3CF18AD87 /* DevBypass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevBypass.swift; sourceTree = "<group>"; };
@@ -387,13 +387,13 @@
 				3715A976450E67F9E60015C4 /* DiffView.swift */,
 				649088C92E8341D54B6CC0FD /* DispatchContainer.swift */,
 				2ED116C81E1FE471B6977A9A /* HistoryContainer.swift */,
+				1F007852EE013D2DD7E0F320 /* LanesContainer.swift */,
 				19F2BC5F25C28ADF792A2070 /* NightWatchRoot.swift */,
 				605EB9133AEA2BFAA6F60F75 /* NowContainer.swift */,
 				FEDD34963B5A5C40E3EB248D /* NWBridges.swift */,
 				BF8E004F4C502C569B8C1206 /* PairedContainer.swift */,
 				BA4B38D95AEEDC3D6CA48FCF /* PairMacView.swift */,
 				05C01BA53A70722DB66AABFC /* SessionRoomContainer.swift */,
-				A9724975FF83F18AFB5C1D85 /* SkyContainer.swift */,
 				314D7D39859EA3652636C001 /* TowerContainer.swift */,
 			);
 			path = Views;
@@ -417,6 +417,7 @@
 				00DB3421F03AF4F01F161B7D /* NWHoldRing.swift */,
 				828BAB6DFBC74469A93FCAA4 /* NWHorizon.swift */,
 				6BFA005907403801905AF553 /* NWInFlight.swift */,
+				5ACC179925B4553E19322068 /* NWLanes.swift */,
 				5A79CFE2253DE35574A52359 /* NWMotion.swift */,
 				AD2A413590058FC99CF4246C /* NWNowParts.swift */,
 				F7E098C1C1F466A3E7D33A79 /* NWNowScreen.swift */,
@@ -432,7 +433,6 @@
 				56A4E9BDC4D4A983454BF246 /* NWSettled.swift */,
 				FAE6F0137C10936A45D68AC5 /* NWShaders.swift */,
 				2BFDB6DB2502DFACBF223566 /* NWShell.swift */,
-				708072FB4C02ACC461313E76 /* NWSky.swift */,
 				8A1B182529EABA01A1EC9443 /* NWStar.swift */,
 				C57C01CC45A7D831FDDBE2EF /* NWTheme.swift */,
 				2DA54CD037CB906F0950E091 /* NWTower.swift */,
@@ -722,6 +722,7 @@
 				3F812253C961C2BE1CFF0FDE /* InFlightRows.swift in Sources */,
 				D0A5B048B87EBCE28EEF39AF /* Intervention.swift in Sources */,
 				3A906B685FA2F7C70E836EE6 /* KeychainStore.swift in Sources */,
+				B803473590042902C57D680F /* LanesContainer.swift in Sources */,
 				988EDA7AAEAB79ACFDB0F5AC /* LiveSessions.swift in Sources */,
 				9E195037BF780C8070E33382 /* MacPresenceCopy.swift in Sources */,
 				EC19AD818BF2B3B70F26DE38 /* MotionCurves.swift in Sources */,
@@ -740,6 +741,7 @@
 				7091F20A4E4652054B3B30AA /* NWHoldRing.swift in Sources */,
 				949FC01E8899A068371F9058 /* NWHorizon.swift in Sources */,
 				17F2D86A42D37697AE6D4173 /* NWInFlight.swift in Sources */,
+				92E3C0CB414282F53DFD3AB3 /* NWLanes.swift in Sources */,
 				0E9E2E905866D3AD2964F63A /* NWMotion.swift in Sources */,
 				5A6D4B9022EF53FC843CA524 /* NWNightWatch.metal in Sources */,
 				B4FAFCAD410EDE5DCC3109D5 /* NWNowParts.swift in Sources */,
@@ -756,7 +758,6 @@
 				0E6B428549DBA7B4ED77F91D /* NWSettled.swift in Sources */,
 				D7EF0F27083B6B7590D49731 /* NWShaders.swift in Sources */,
 				B75D2B9FF587C41A6A0B299F /* NWShell.swift in Sources */,
-				FD886D15B0223FE0EE2C6555 /* NWSky.swift in Sources */,
 				838A4565CB5EDFDB80B8227C /* NWStar.swift in Sources */,
 				0A63F3F9F6C5EAE570D56D09 /* NWTheme.swift in Sources */,
 				EC27B1D409716FAFF9E80458 /* NWTower.swift in Sources */,
@@ -798,7 +799,6 @@
 				283334965571DCA9ACB376FE /* SessionTarget.swift in Sources */,
 				017ECCC934690EA30BB9B9FF /* SettledLog.swift in Sources */,
 				84EC56CC7A88092D44A8192A /* SharedWidgetStore.swift in Sources */,
-				A6370B2B054B1EF37E96981A /* SkyContainer.swift in Sources */,
 				1709AE23BB6E1A4E92974339 /* SkyModel.swift in Sources */,
 				E7A0D95625C27D5A373B2FDF /* StopCoordinator.swift in Sources */,
 				DCAFE96E04BB3C2E96B81ACE /* StopPlan.swift in Sources */,

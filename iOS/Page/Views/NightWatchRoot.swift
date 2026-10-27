@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The root of the paired app: Now and Sky, the capsule with the pulse, and
+/// The root of the paired app: Now and Lanes, the capsule with the pulse, and
 /// every sheet. Two places and one verb; sessions are rooms and Settings is
 /// the Tower, never tabs.
 struct NightWatchRoot: View {
@@ -24,8 +24,8 @@ struct NightWatchRoot: View {
                 onPulseTap: { router.openDispatch() },
                 onPulseHold: { stop.holdCompleted(plan: busy) }) {
             NowContainer()
-        } sky: {
-            SkyContainer()
+        } lanes: {
+            LanesContainer()
         }
         // Set on the shell only, so the sheet that covers it keeps animating.
         .environment(\.nwAnimationsPaused, router.sheets.current != nil)
@@ -87,7 +87,7 @@ private struct SheetHost: View {
     }
 }
 
-/// The unpair confirmation, worded once. The root presents it for Now, Sky
+/// The unpair confirmation, worded once. The root presents it for Now, Lanes
 /// and the Tower's own button alike (the Tower sheet covers the root, so it
 /// presents the same dialog itself); both read this copy.
 enum UnpairCopy {

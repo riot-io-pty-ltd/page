@@ -1,7 +1,7 @@
 import Foundation
 
-/// THE PULSE: one glyph on every surface (the Horizon, the capsule, Sky's
-/// stars, the widgets). Still star-white when all is quiet; a teal breath
+/// THE PULSE: one glyph on every surface (the Horizon, the capsule, the
+/// lane glyphs, the widgets). Still star-white when all is quiet; a teal breath
 /// every 4 s while agents work (a little faster with more of them); an
 /// amber ripple when something needs you, one ring per waiting item, the
 /// rate rising with the longest wait and capped at one ring every 1.5 s; a

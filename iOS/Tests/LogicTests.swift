@@ -1081,6 +1081,30 @@ do {
         ("[Bash] cat <<'EOF'\nx\nEOF\nrm -rf y", .irreversible),
         ("[Bash] echo hi\r\nrm -rf x", .irreversible),
         ("[Bash] ls -la $(rm x)", .irreversible),
+        ("[Bash] cat <<E\"OF\"\nhi\nEOF\ngit push --force", .irreversible),
+        ("[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<E\\OF\nhi\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<\"EOF\"\nhi\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<-'X'\nhi\nX\nrm -rf y", .irreversible),
+        ("[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y", .irreversible),
+        ("[Bash] cat <<'EOF'\nhi\nEOF", .considered),
+        ("[Bash] cat <<EOF\nrm -rf x", .irreversible),
+        ("[Bash] cat <<EOF\nhi", .considered),
+        ("[Bash] echo $'\\x72m'", .considered),
+        ("[Bash] $'\\x72m' -rf x", .considered),
+        ("[Bash] $'rm' -rf x", .irreversible),
+        ("[Bash] ls $\"a\"", .considered),
+        ("[Bash] echo $'a\\'b' ; rm -rf x", .irreversible),
+        ("[Bash] ls > $'/tmp/x'", .considered),
+        ("[Bash] echo '$'", .undoable),
+        ("[Bash] echo \"$'x'\"", .undoable),
+        ("[Bash] cat < x$'a b'; rm -rf x", .irreversible),
+        ("[Bash] cat < x'a b' ; rm -rf x #'", .irreversible),
+        ("[Bash] cat < \"a\\\" b\" ; rm -rf x ; echo \"y\"", .irreversible),
+        ("[Bash] cat < a\\'b ; rm -rf x #'", .irreversible),
+        ("[Bash] ls > x$'y\\'' ; rm -rf x #'", .irreversible),
+        ("[Bash] cat > \"a\\\" b\" ; rm -rf x #\"", .irreversible),
+        ("[Bash] ls > x\\; rm -rf x", .considered),
         ("[Bash] pytest /tmp/x.py", .considered),
         ("[Bash] python3 -m pytest /tmp/x.py", .considered),
         ("[Bash] python3 -m compileall /tmp/x", .considered),
@@ -1190,6 +1214,25 @@ do {
         let got = Reversibility.classify(context: ctx, cwd: rvCwd).level
         check(got == want, "ported Mac row: \(ctx.replacingOccurrences(of: "\n", with: " / ")) wanted \(want), got \(got)")
     }
+
+    // Partly quoted heredoc delimiters end at their line; unterminated heredocs and $'...' / $"..." words are opaque.
+    for cmd in ["cat <<E\"OF\"\nhi\nEOF\nrm x", "cat <<'E'OF\nhi\nEOF\nrm x", "cat <<E\\OF\nhi\nEOF\nrm x", "cat <<-'X'\nhi\nX\nrm x"] {
+        let p = ShellParse.parse(cmd)
+        check(p.segments.map(\.words) == [["cat"], ["rm", "x"]] && !p.hasOpaqueHeredoc, "heredoc delimiter quote removal: \(cmd)")
+    }
+    let openHeredoc = ShellParse.parse("cat <<EOF\nhi\nrm -rf x")
+    check(openHeredoc.hasOpaqueHeredoc && openHeredoc.substitutions == ["hi\nrm -rf x"], "unterminated heredoc is opaque and its text is judged as commands")
+    check(ShellParse.parse("cat <<E\"OF\"\nhi").hasOpaqueHeredoc, "unterminated heredoc with a partly quoted delimiter is opaque")
+    check(!ShellParse.parse("cat <<'EOF'\nhi\nEOF").hasOpaqueHeredoc, "a terminated quoted heredoc is not opaque")
+    for cmd in ["echo $'\\x72m'", "$'\\x72m' -rf x", "echo $\"a\"", "ls > $'f'", "cat <<$'EOF'\nx\nEOF"] {
+        check(ShellParse.parse(cmd).hasOpaqueHeredoc, "ANSI-C / locale quoting is opaque: \(cmd)")
+    }
+    check(ShellParse.parse("echo $'a\\'b' ; rm x").segments.map(\.words) == [["echo", "a\\'b"], ["rm", "x"]], "an escaped quote inside $'...' does not close it")
+    check(!ShellParse.parse("echo '$' \"$'x'\"").hasOpaqueHeredoc, "plain quoted dollars are not opaque")
+    for cmd in ["cat < x'a b' ; rm x", "cat < \"a\\\" b\" ; rm x", "cat < a\\'b ; rm x"] {
+        check(ShellParse.parse(cmd).segments.map(\.words) == [["cat"], ["rm", "x"]], "a redirect target is one word after quote removal: \(cmd)")
+    }
+    check(ShellParse.parse("cat < x$'a b' ; rm x").hasOpaqueHeredoc, "an ANSI-C part of a redirect target is opaque")
 
     // No hook-style text is ever undoable, whatever the command, line endings or tail.
     let hookCommands = ["ls", "swift test", "git status", "cat README.md", "pwd", "rm -rf build", "echo hi", "(no command)", "",
@@ -1333,9 +1376,30 @@ do {
     check(NowRowBuilder.row(for: ap, session: cmux, macName: mac).action(.approve)?.preview == "Will type 1 · cmux › page · Studio MBP", "cmux › page route")
     check(row.section == .decide && row.chip == .undoable && row.commit == .swipe, "npm test row is undoable, swipe")
 
+    check(row.canSwipeApprove, "an undoable row with an Approve action can be swiped")
+
     // A pane that cannot be typed into offers only "Open on Mac".
     let ghost = nwSession("s3", title: "api", host: "Ghostty", canType: false, blocker: "Page can't type into Ghostty yet")
     let blocked = NowRowBuilder.row(for: ap, session: ghost, macName: mac)
+    // BUG (trust): such a row kept its Undoable chip and so offered swipe-to-approve with no Approve behind it.
+    check(blocked.action(.approve) == nil && !blocked.canSwipeApprove, "a row Page can't type into is never swipe-approvable, whatever its chip")
+    check(!ActionGate.canBegin(row: blocked, kind: .approve) && ActionGate.canBegin(row: row, kind: .approve), "begin refuses an action the row does not offer")
+    check(!ActionGate.canBegin(row: blocked, kind: .deny) && ActionGate.canBegin(row: row, kind: .deny), "deny likewise: only what the row offers")
+    // An agent Page has no adapter for, on a command that would otherwise be Undoable: the same, no swipe and no Approve.
+    let gemUndo = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"g2","sessionId":"s11","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] swift test","backend":"gemini"}"#.utf8))
+    let gemUndoRow = NowRowBuilder.row(for: gemUndo, session: nil, macName: mac)
+    check(!gemUndoRow.canSwipeApprove && gemUndoRow.action(.approve) == nil && !ActionGate.canBegin(row: gemUndoRow, kind: .approve),
+          "an unknown agent's row is never swipe-approvable, whatever its chip (\(gemUndoRow.chip))")
+    // A banner's Approve/Deny/reply never goes through the coordinator: the same backstop gates it.
+    let bannerApprove = NotificationDecision.decide(.action("APPROVE"), userText: nil, kind: "permission", approveLevel: .undoable)
+    let bannerDeny = NotificationDecision.decide(.action("DENY"), userText: nil, kind: "permission", approveLevel: .undoable)
+    let bannerReply = NotificationDecision.decide(.action("REPLY"), userText: "use v2", kind: "permission", approveLevel: .undoable)
+    check(ActionGate.banner(bannerApprove, row: blocked) == .open && ActionGate.banner(bannerDeny, row: blocked) == .open
+          && ActionGate.banner(bannerReply, row: blocked) == .open, "a banner on a row Page can't type into opens the app, never sends")
+    check(ActionGate.banner(bannerApprove, row: gemUndoRow) == .open, "a banner Approve for an unknown agent opens the app")
+    check(ActionGate.banner(bannerApprove, row: row) == bannerApprove && ActionGate.banner(bannerDeny, row: row) == bannerDeny
+          && ActionGate.banner(bannerReply, row: row) == bannerReply, "a banner on a typeable row sends as before")
+    check(ActionGate.banner(bannerDeny, row: nil) == bannerDeny, "a page not in the inbox: the banner decision stands")
     check(blocked.actions.map(\.kind) == [.openOnMac], "blocked session offers one action")
     check(blocked.action(.openOnMac)?.preview == "Can't type here · Page can't type into Ghostty yet · Studio MBP", "blocked preview names the blocker and Mac")
     check(blocked.commit == nil, "blocked row has no commit gesture")
@@ -1565,15 +1629,16 @@ do {
 // MARK: - Navigation, sheets and links
 
 do {
-    check(NWDestination.afterDrag(from: .now, translation: -60) == .sky, "drag left from Now reveals Sky")
+    check(NWDestination.afterDrag(from: .now, translation: -60) == .lanes, "drag left from Now reveals Lanes")
     check(NWDestination.afterDrag(from: .now, translation: 60) == .now, "drag right from Now stays")
-    check(NWDestination.afterDrag(from: .sky, translation: 60) == .now, "drag right from Sky goes to Now")
-    check(NWDestination.afterDrag(from: .sky, translation: -60) == .sky, "drag left from Sky stays")
+    check(NWDestination.afterDrag(from: .lanes, translation: 60) == .now, "drag right from Lanes goes to Now")
+    check(NWDestination.afterDrag(from: .lanes, translation: -60) == .lanes, "drag left from Lanes stays")
     check(NWDestination.afterDrag(from: .now, translation: -60, vertical: 80) == .now, "vertical drag is a scroll")
     check(NWDestination.afterDrag(from: .now, translation: -45, vertical: 40) == .now, "drag of 45 with 40 down is not horizontal")
-    check(NWDestination.afterDrag(from: .now, translation: -45) == .sky, "drag of 45 with no vertical switches")
+    check(NWDestination.afterDrag(from: .now, translation: -45) == .lanes, "drag of 45 with no vertical switches")
     check(NWDestination.isHorizontal(dx: 60, dy: 40) && !NWDestination.isHorizontal(dx: 50, dy: 40), "horizontal threshold is 1.5x")
-    check(NWDestination.now.other == .sky && NWDestination.sky.other == .now, "other destination")
+    check(NWDestination.now.other == .lanes && NWDestination.lanes.other == .now, "other destination")
+    check(NWDestination.allCases == [.now, .lanes], "two destinations: Now and Lanes")
 
     var q = SheetQueue()
     q.request(.dispatch)
@@ -1592,20 +1657,23 @@ do {
     check(q.pending == .history, "setting nil keeps a pending sheet")
 
     check(NWDeepLink.parse(URL(string: "page://intervention/abc")!) == .decision("abc"), "intervention link")
-    check(NWDeepLink.parse(URL(string: "page://sessions")!) == .sky, "sessions widget link opens Sky")
-    check(NWDeepLink.parse(URL(string: "page://sky")!) == .sky, "sky link")
+    check(NWDeepLink.parse(URL(string: "page://sessions")!) == .lanes, "sessions widget link opens Lanes")
+    check(NWDeepLink.parse(URL(string: "page://lanes")!) == .lanes, "lanes link")
+    check(NWDeepLink.parse(URL(string: "page://sky")!) == .lanes, "the old sky link still opens Lanes")
     check(NWDeepLink.parse(URL(string: "page://now")!) == .now, "now link")
     check(NWDeepLink.parse(URL(string: "page://tower")!) == .tower, "tower link")
     check(NWDeepLink.parse(URL(string: "https://x")!) == nil, "https is not a deep link")
     check(NWDeepLink.parse(URL(string: "page://nonsense")!) == nil, "unknown page host is nil")
 
-    check(SkyMode(stored: nil) == .sky && SkyMode(stored: "bogus") == .sky, "missing or unknown Sky mode is Sky")
-    check(SkyMode(stored: "lanes") == .lanes, "lanes loads")
-    let suite = "page.logic.sky.\(UUID().uuidString)"
+    // The old Sky/Lanes toggle's remembered mode is cleared, whatever it held.
+    let suite = "page.logic.lanes.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
-    SkyMode.lanes.save(to: defaults)
-    check(SkyMode.load(from: defaults) == .lanes, "Sky mode round-trips")
+    defaults.set("sky", forKey: LegacySkyMode.storageKey)
+    LegacySkyMode.forget(in: defaults)
+    check(defaults.object(forKey: LegacySkyMode.storageKey) == nil, "an old stored Sky mode is forgotten")
+    LegacySkyMode.forget(in: defaults)
+    check(defaults.object(forKey: LegacySkyMode.storageKey) == nil, "forgetting with nothing stored is harmless")
 }
 
 // MARK: - Pulse and Stop-all
@@ -2109,37 +2177,29 @@ do {
     check(InFlightStrand.build(sessions: (0..<20).map { nwSession("x\($0)", state: "active") }, workflows: [:], now: nwNow).count == 12, "at most twelve strands")
 }
 
-// MARK: - Night Watch (iOS): Sky, Lanes, the activity strip, Tower, widget copy
+// MARK: - Night Watch (iOS): Lanes, the activity strip, Tower, widget copy
 
 do {
     let s1 = nwSession("s1", title: "page", state: "active", cwd: "~/projects/page", activeAt: nwT0 - 20)
     let s2 = nwSession("s2", title: "page-2", state: "waitingOnApproval", cwd: "~/projects/page", interventionId: "a1", activeAt: nwT0 - 60)
     let s3 = nwSession("s3", title: "bottle", state: "idle", cwd: "~/projects/bottle-flip")
     let sky = SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    check(sky.constellations.map(\.name) == ["bottle-flip", "page"], "constellations ordered by project name")
-    check(sky.headline == "3 sessions · 2 projects" && sky.starCount == 3, "sky headline and star count")
+    check(sky.constellations.map(\.name) == ["bottle-flip", "page"], "projects ordered by name")
+    check(sky.headline == "3 sessions · 2 projects" && sky.starCount == 3, "fleet headline and session count")
     let page = sky.constellations.first { $0.name == "page" }
-    check(page?.links.count == 1 && page?.stars.count == 2, "stars in one repo are linked")
-    check(page?.urgentState == .needsYou, "a constellation shows its most urgent star")
+    check(page?.stars.count == 2, "sessions in one repo share a project")
+    check(page?.urgentState == .needsYou, "a project shows its most urgent session")
     let stars = Dictionary((sky.constellations.flatMap(\.stars)).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
     check(stars["s2"]?.state == .needsYou && stars["s1"]?.state == .working && stars["s3"]?.state == .idle, "star states")
-    check(nwNear(stars["s1"]?.brightness ?? 0, 1), "a star that just acted is full bright")
-    check((stars["s2"]?.brightness ?? 0) >= 0.8, "a star waiting on you is never dim")
-    check(sky.constellations.flatMap(\.stars).allSatisfy { $0.x >= 0.05 && $0.x <= 0.95 && $0.y >= 0.05 && $0.y <= 0.95 }, "positions stay on the sky")
-    check(SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow) == sky, "equal input gives equal sky")
+    check(SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow) == sky, "equal input gives an equal fleet")
     let stuck = SkyModel.build(sessions: [s1], interventions: [nwIv("l", .idle, "x", session: "s1", subtype: "looping")], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    check(stuck.constellations.first?.stars.first?.state == .stuck, "a stuck page makes a star stuck")
+    check(stuck.constellations.first?.stars.first?.state == .stuck, "a stuck page makes a lane stuck")
     let paused = SkyModel.build(sessions: [s1, s2, s3], interventions: [], status: nil, rings: [], macName: "M", paused: true, now: nwNow)
     let pausedStars = Dictionary((paused.constellations.flatMap(\.stars)).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-    check(pausedStars["s1"]?.state == .paused && pausedStars["s2"]?.state == .needsYou, "battery pause dims working stars, not waiting ones")
-    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).headline == "No live sessions", "empty sky headline")
-    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).isEmpty, "empty sky is empty")
+    check(pausedStars["s1"]?.state == .paused && pausedStars["s2"]?.state == .needsYou, "battery pause pauses working lanes, not waiting ones")
+    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).headline == "No live sessions", "empty fleet headline")
+    check(SkyModel.build(sessions: [], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow).isEmpty, "empty fleet is empty")
 
-    check(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-30), state: .working, now: nwNow) == 1, "full for 30 s")
-    check(nwNear(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-600), state: .working, now: nwNow), 0.35), "working star dims to 0.35 at ten minutes")
-    check(SkyModel.brightness(lastActivityAt: nil, state: .needsYou, now: nwNow) == 1, "unknown activity waiting on you is full")
-    check(nwNear(SkyModel.brightness(lastActivityAt: nil, state: .idle, now: nwNow), 0.35), "unknown activity sits at the floor")
-    check(SkyModel.brightness(lastActivityAt: nwNow.addingTimeInterval(-600), state: .needsYou, now: nwNow) >= 0.8, "needs-you floor is 0.8")
     check(SkyModel.projectName(cwd: "~/projects/page", fallback: "x") == "page", "project name is the folder")
     check(SkyModel.projectName(cwd: "~/projects/page/", fallback: "x") == "page", "trailing slash ignored")
     check(SkyModel.projectName(cwd: "~", fallback: "fb") == "~", "home reads ~, as on the Mac")
@@ -2167,27 +2227,10 @@ do {
     check(LanesModel.build(sky: sky2, log: seen, now: nwNow).groups.first?.rows.first?.id == needs.id, "needs-you row first")
 }
 
-// MARK: - Sky labels: ellipsis, star placement, the label layout
+// MARK: - Lanes: a crowded fleet
 
-/// What the Sky's labels must never do: overlap each other, cover a star or the moon, or leave the canvas.
-/// Returns what it found (empty when the layout holds).
-func skyLabelProblems(_ placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, avoid: [SkyRect] = []) -> [String] {
-    var out: [String] = []
-    for (i, p) in placed.enumerated() {
-        if !canvas.contains(p.rect) { out.append("\(p.text) leaves the canvas") }
-        for n in nodes {
-            let star = SkyRect(x: n.center.x - n.radius, y: n.center.y - n.radius, width: n.radius * 2, height: n.radius * 2)
-            if p.rect.intersects(star) { out.append("\(p.text) covers \(n.id)") }
-        }
-        for r in avoid where p.rect.intersects(r) { out.append("\(p.text) covers an avoided rect") }
-        for q in placed[(i + 1)...] where p.rect.intersects(q.rect) { out.append("\(p.text) overlaps \(q.text)") }
-    }
-    return out
-}
-
-/// A fleet over named projects: each project gets `perProject` sessions, and every third one is waiting on you,
-/// so the sky has captions as well as names.
-func skyFleet(_ names: [String], perProject: Int) -> [LiveSession] {
+/// A fleet over named projects: each project gets `perProject` sessions, and every third one is waiting on you.
+func laneFleet(_ names: [String], perProject: Int) -> [LiveSession] {
     var out: [LiveSession] = []
     for (p, name) in names.enumerated() {
         for k in 0..<perProject {
@@ -2198,165 +2241,6 @@ func skyFleet(_ names: [String], perProject: Int) -> [LiveSession] {
         }
     }
     return out
-}
-
-/// A built sky laid out at a phone size, with what the layout was given: its nodes, its canvas (above the Tonight
-/// card, below the top pad) and the moon it avoids.
-func skyLayoutAt(_ sessions: [LiveSession], width: Double, height: Double)
-    -> (placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, moon: SkyRect) {
-    let size = SkySize(width: width, height: height)
-    let sky = SkyModel.build(sessions: sessions, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    let points = SkyModel.starPoints(sky.constellations, in: size)
-    let nodes = sky.constellations.flatMap(\.stars).map {
-        SkyLabelNode(id: $0.id, center: points[$0.id] ?? SkyModel.starPoint($0, in: size), radius: SkyModel.nodeRadius($0.state))
-    }
-    let bottom = min(SkyModel.labelTopPad + height * SkyModel.labelSkyShare + 6, height - SkyModel.labelBottomReserve)
-    let canvas = SkyRect(x: 8, y: 8, width: max(0, width - 16), height: max(0, bottom - 8))
-    let moon = SkyRect(x: width - 134, y: 8, width: 140, height: 52)
-    return (SkyModel.labelLayout(sky.constellations, in: size), nodes, canvas, moon)
-}
-
-/// Project names that sit nearer to another project's star than to one of their own (measured from the
-/// label's nearest edge), and shortened names that are only the start of another project's name.
-func skyOwnershipProblems(_ sessions: [LiveSession], width: Double, height: Double) -> [String] {
-    let size = SkySize(width: width, height: height)
-    let sky = SkyModel.build(sessions: sessions, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    let points = SkyModel.starPoints(sky.constellations, in: size)
-    let layout = SkyModel.labelLayout(sky.constellations, in: size)
-    func dist(_ p: SkyPoint, _ r: SkyRect) -> Double { hypot(max(r.minX - p.x, 0, p.x - r.maxX), max(r.minY - p.y, 0, p.y - r.maxY)) }
-    var out: [String] = []
-    for l in layout where l.kind == .project {
-        guard let c = sky.constellations.first(where: { $0.key == l.id }) else { continue }
-        let own = c.stars.compactMap { points[$0.id] }.map { dist($0, l.rect) }.min() ?? .infinity
-        let other = sky.constellations.filter { $0.key != c.key }.flatMap(\.stars).compactMap { points[$0.id] }.map { dist($0, l.rect) }.min() ?? .infinity
-        if other < own - 0.5 { out.append("\(l.text) is nearer another project's star (\(Int(other)) < \(Int(own)))") }
-        if l.text.hasSuffix("…") {
-            let stem = String(l.text.dropLast())
-            if sky.constellations.contains(where: { $0.key != c.key && $0.name.uppercased().hasPrefix(stem) }) { out.append("\(l.text) could be another project") }
-        }
-    }
-    return out
-}
-
-/// Stars in one sky that are closer than their two drawings are wide.
-func skyStarOverlaps(_ r: (placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, moon: SkyRect)) -> [String] {
-    var out: [String] = []
-    for (i, a) in r.nodes.enumerated() {
-        for b in r.nodes[(i + 1)...] where hypot(a.center.x - b.center.x, a.center.y - b.center.y) < a.radius + b.radius - 1 {
-            out.append("\(a.id) overlaps \(b.id)")
-        }
-    }
-    return out
-}
-
-do {
-    // Shortening: from the end, at a word edge when that keeps half the room, always with "…" and never a separator before it.
-    check(SkyModel.ellipsize("mac-on-claude-code-extra-long", maxChars: 20) == "mac-on-claude-code…", "ellipsize at a dash")
-    check(SkyModel.ellipsize("rm -rf Builds/Dev/*.app", maxChars: 12) == "rm -rf…", "ellipsize at a space")
-    check(SkyModel.ellipsize("cargo test ×6", maxChars: 12) == "cargo test…", "ellipsize keeps the whole word")
-    check(SkyModel.ellipsize("a very long label here", maxChars: 9) == "a very…", "no space before the dots")
-    check(SkyModel.ellipsize("foo bar", maxChars: 5) == "foo…", "a word edge with room")
-    check(SkyModel.ellipsize("abcdef", maxChars: 3) == "ab…", "no word edge: a hard cut")
-    check(SkyModel.ellipsize("averyveryverylongword", maxChars: 8) == "averyve…", "a long word is cut")
-    check(SkyModel.ellipsize("abc", maxChars: 1) == "…", "one character is only the dots")
-    check(SkyModel.ellipsize("  hi  ", maxChars: 5) == "hi", "fits: trimmed, no dots")
-    check(SkyModel.ellipsize("anything", maxChars: 0) == "", "no room, no text")
-    check(SkyModel.ellipsize("line\nbreak", maxChars: 20) == "line break", "a newline reads as a space")
-    var budgetHolds = true
-    for n in 1...25 {
-        for s in ["mac-on-claude-code-extra-long", "rm -rf Builds/Dev/*.app", "cargo test ×6", "a-b-c-d-e-f-g", "x"] {
-            let t = SkyModel.ellipsize(s, maxChars: n)
-            if t.count > n || t.contains(" …") || t.contains("-…") { budgetHolds = false }
-        }
-    }
-    check(budgetHolds, "ellipsize never runs past its budget or leaves a separator before the dots")
-
-    // Star placement: a short sky squeezes its stars above the Tonight card; a tall one keeps the old spacing.
-    func star(_ y: Double, x: Double = 0.5) -> SkyStar {
-        SkyStar(id: "s", title: "s", state: .working, x: x, y: y, brightness: 1, lastAction: "", interventionId: nil,
-                agent: "Claude", canType: true, seed: 0)
-    }
-    let shortSky = SkySize(width: 393, height: 548)
-    check(SkyModel.starPoint(star(0.94), in: shortSky).y <= shortSky.height - SkyModel.labelBottomReserve - 20 + 1e-6,
-          "a short sky keeps its lowest star above the Tonight card")
-    let tallSky = SkySize(width: 393, height: 740)
-    check(nwNear(SkyModel.starPoint(star(0.94), in: tallSky).y, 54 + 0.94 * 740 * 0.58), "a tall sky keeps the old spacing")
-    check(nwNear(SkyModel.starPoint(star(0.5, x: 0.25), in: tallSky).x, 0.25 * 393), "x runs across the width")
-    check(SkyModel.starPoint(star(0.94), in: shortSky) == SkyModel.starPoint(star(0.94), in: shortSky), "star placement is repeatable")
-    check(SkyModel.nodeRadius(.needsYou) == 22 && SkyModel.nodeRadius(.stuck) == 24 && SkyModel.nodeRadius(.rateLimited) == 14
-          && SkyModel.nodeRadius(.working) == 17 && SkyModel.nodeRadius(.idle) == 17, "node radii")
-
-    // Rectangles: an edge is not an overlap; contains allows rounding.
-    let box = SkyRect(x: 0, y: 0, width: 10, height: 10)
-    check(!box.intersects(SkyRect(x: 10, y: 0, width: 10, height: 10)), "rects that only share an edge do not intersect")
-    check(box.intersects(SkyRect(x: 9.5, y: 9.5, width: 10, height: 10)), "overlapping corners intersect")
-    check(box.contains(box) && !box.contains(SkyRect(x: 1, y: 1, width: 10, height: 10)), "contains: itself yes, an overhang no")
-    check(box.contains(SkyRect(x: 0, y: 0, width: 10 + 1e-10, height: 10)), "contains tolerates rounding")
-
-    // The layout itself, on hand-made nodes.
-    let canvas = SkyRect(x: 8, y: 8, width: 377, height: 600)
-    let near = [SkyLabelNode(id: "a", center: SkyPoint(x: 100, y: 200), radius: 17),
-                SkyLabelNode(id: "b", center: SkyPoint(x: 110, y: 200), radius: 17)]
-    let pair = [SkyLabelRequest(id: "a", kind: .project, text: "PAGE", anchors: ["a"]),
-                SkyLabelRequest(id: "b", kind: .project, text: "BOTTLE-FLIP", anchors: ["b"])]
-    let pairPlaced = SkyModel.layoutLabels(nodes: near, requests: pair, canvas: canvas)
-    check(pairPlaced.map(\.id) == ["a", "b"], "two stars 10 pt apart: both names placed, in request order")
-    check(skyLabelProblems(pairPlaced, nodes: near, canvas: canvas).isEmpty, "two close names overlap nothing: \(skyLabelProblems(pairPlaced, nodes: near, canvas: canvas))")
-    check(SkyModel.layoutLabels(nodes: near, requests: [pair[1], SkyLabelRequest(id: "z", kind: .project, text: "NOWHERE", anchors: ["missing"]), pair[0]],
-                                canvas: canvas).map(\.id) == ["b", "a"], "output follows the request order and drops the unknown star's label")
-    check(SkyModel.layoutLabels(nodes: near, requests: [SkyLabelRequest(id: "z", kind: .project, text: "NOWHERE", anchors: ["missing"])],
-                                canvas: canvas).isEmpty, "a label whose stars are unknown is dropped")
-    check(SkyModel.layoutLabels(nodes: near, requests: pair, canvas: SkyRect(x: 8, y: 8, width: 300, height: 20)).isEmpty,
-          "a canvas too short for any label gives no labels, not overlapping ones")
-    check(SkyModel.layoutLabels(nodes: near, requests: pair, canvas: SkyRect(x: 0, y: 0, width: 0, height: 100)).isEmpty, "a canvas with no width gives nothing")
-    let longName = SkyLabelRequest(id: "long", kind: .project, text: "A-VERY-LONG-PROJECT-NAME-THAT-GOES-ON-AND-ON-FOREVER", anchors: ["a"])
-    let narrow = SkyRect(x: 8, y: 8, width: 304, height: 600)
-    let shortened = SkyModel.layoutLabels(nodes: near, requests: [longName], canvas: narrow)
-    check(shortened.count == 1 && shortened[0].text.hasSuffix("…"), "a name too long for a narrow canvas is shortened with …")
-    check(shortened.allSatisfy { narrow.contains($0.rect) }, "the shortened name stays on the canvas")
-    let deterministic = SkyModel.layoutLabels(nodes: near, requests: pair, canvas: canvas) == pairPlaced
-    check(deterministic, "the same input gives the same rects")
-
-    // A real sky, built as the phone builds it, at phone sizes: no overlaps, nothing on a star or the moon, all on the canvas.
-    let names = ["page", "bottle-flip", "llm-play", "sate-t", "payments", "widget", "dotfiles", "cargo", "notes"]
-    let crowdedNames = ["a-very-long-project-name-that-keeps-going-on-and-on", "llm-play", "page", "sate-t", "mac-on-claude-code",
-                        "ios-widget-kit-experiments", "payments-service-v2", "bottle-flip", "x", "cargo-tools", "dotfiles-and-more-config-stuff"]
-    let fleets: [(String, [LiveSession])] = [
-        ("nine", skyFleet(names, perProject: 2)),
-        ("crowded", skyFleet(crowdedNames, perProject: 2)),
-        ("one long", skyFleet(["a-very-long-project-name-that-keeps-going-on-and-on-and-on"], perProject: 3)),
-    ]
-    let sizes: [(Double, Double)] = [(320, 540), (320, 568), (360, 640), (393, 600), (393, 852), (430, 740), (466, 668)]
-    var layoutProblems: [String] = []
-    for (w, h) in sizes {
-        for (label, fleet) in fleets {
-            let r = skyLayoutAt(fleet, width: w, height: h)
-            let problems = skyLabelProblems(r.placed, nodes: r.nodes, canvas: r.canvas, avoid: [r.moon])
-            if !problems.isEmpty { layoutProblems.append("\(label) \(Int(w))x\(Int(h)): \(problems.prefix(3).joined(separator: "; "))") }
-        }
-    }
-    var ownerProblems: [String] = []
-    var starOverlaps: [String] = []
-    let sevenByThree = skyFleet(["payments-api", "payments-gateway", "payments-worker", "page", "docs-site", "docs-api", "notes"], perProject: 3)
-    for (w, h) in sizes {
-        for (label, fleet) in fleets + [("seven", sevenByThree)] {
-            let owners = skyOwnershipProblems(fleet, width: w, height: h)
-            if !owners.isEmpty { ownerProblems.append("\(label) \(Int(w))x\(Int(h)): \(owners.prefix(2).joined(separator: "; "))") }
-            let overlaps = skyStarOverlaps(skyLayoutAt(fleet, width: w, height: h))
-            if !overlaps.isEmpty { starOverlaps.append("\(label) \(Int(w))x\(Int(h)): \(overlaps.prefix(2).joined(separator: "; "))") }
-        }
-    }
-    check(ownerProblems.isEmpty, "a project's name sits nearer one of its own stars than another project's, and is never a stub of another name: \(ownerProblems.prefix(3))")
-    check(starOverlaps.isEmpty, "stars are kept apart: \(starOverlaps.prefix(3))")
-    check(layoutProblems.isEmpty, "every sky layout keeps its labels apart, off the stars and the moon, on the canvas: \(layoutProblems.prefix(3))")
-    let nine = skyLayoutAt(fleets[0].1, width: 393, height: 852)
-    check(nine.placed.filter { $0.kind == .project }.count == 9, "393 pt, nine projects of two sessions: every name is placed")
-    check(nine.placed.contains { $0.kind == .caption }, "the waiting stars get their captions")
-    check(skyLayoutAt(fleets[1].1, width: 393, height: 852).placed == skyLayoutAt(fleets[1].1, width: 393, height: 852).placed,
-          "a crowded sky lays out the same way twice")
-    let longOnly = skyLayoutAt(fleets[2].1, width: 320, height: 540)
-    check(longOnly.placed.filter { $0.kind == .project }.allSatisfy { $0.text.hasSuffix("…") && $0.rect.width <= 320 - 16 },
-          "a long name is shortened with … and fits a 320 pt screen")
 }
 
 do {
@@ -2442,6 +2326,112 @@ do {
     check(ws(.online, 0).runway(now: nwNow, timeZone: nwUTC).onAC && ws(.online, 0).runway(now: nwNow, timeZone: nwUTC).markers.isEmpty, "no snapshot, no runway")
     let withFc = ws(.online, 0, snapshot: nwStatus(connected: true, age: 5, battery: 41, onAC: false, forecast: MacBatteryForecast(cutoff: 10, minutes: 148, drainPerHour: 0)))
     check(withFc.runway(now: nwNow, timeZone: nwUTC).markers.contains { $0.id == "battery-cutoff" }, "widget runway has the cutoff")
+}
+
+// MARK: - Lanes only (iOS): no Sky left
+
+do {
+    func saysSky(_ s: String) -> Bool {
+        s.range(of: "(?<![A-Za-z])sky(?![A-Za-z])", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+    check(saysSky("Open Sky") && saysSky("sky") && !saysSky("page.skyMode") && !saysSky("Skyline"), "the Sky word test tells the word from its neighbours")
+
+    // Two destinations, Now and Lanes. The old raw value is no destination.
+    check(NWDestination.allCases.map(\.rawValue) == ["now", "lanes"], "destinations are now, then lanes")
+    check(NWDestination(rawValue: "sky") == nil, "there is no sky destination")
+    check(NWDeepLink.parse(URL(string: "page://now")!) == .now, "the now link still opens Now")
+
+    // An old stored Sky mode is cleared, whatever it held; nothing reads it.
+    let laneSuite = "page.logic.lanesonly.\(UUID().uuidString)"
+    if let laneDefaults = UserDefaults(suiteName: laneSuite) {
+        for old in ["sky", "lanes", "constellations"] {
+            laneDefaults.set(old, forKey: LegacySkyMode.storageKey)
+            LegacySkyMode.forget(in: laneDefaults)
+            check(laneDefaults.object(forKey: LegacySkyMode.storageKey) == nil, "a stored \(old) mode is cleared")
+        }
+        laneDefaults.removePersistentDomain(forName: laneSuite)
+    }
+
+    // Deep links: the old sky link and the widget's sessions link both land on Lanes.
+    for link in ["page://lanes", "page://sky", "page://sessions"] {
+        check(NWDeepLink.parse(URL(string: link)!) == .lanes, "\(link) lands on Lanes")
+    }
+
+    // Copy the user reads: gesture tips, the shortcut list, the tip lines and the banners never say Sky.
+    var copy: [String] = [GestureGuide.title, GestureGuide.showAgainLabel]
+    for e in GestureGuide.entries + GestureGuide.shortcuts { copy += [e.gesture, e.context, e.effect, e.tipText ?? ""] }
+    copy += NWTip.allCases.map { $0.text() }
+    let bannerInputs: [NowBanner.Inputs] = [
+        NowBanner.Inputs(authRejected: true, inboxFailure: nil, connected: true, presence: .online(lastSeen: nil), notifications: .allowed, push: .registered, now: nwNow),
+        NowBanner.Inputs(authRejected: false, inboxFailure: "timeout", connected: false, presence: .online(lastSeen: nil), notifications: .allowed, push: .registered, now: nwNow),
+        NowBanner.Inputs(authRejected: false, inboxFailure: nil, connected: true, presence: .offline(lastSeen: nwNow.addingTimeInterval(-7200)), notifications: .off, push: .problem("no token"), now: nwNow),
+    ]
+    for inp in bannerInputs {
+        for b in NowBanner.build(inp) { copy += [b.title, b.message, b.actionTitle ?? ""] }
+    }
+    check(copy.count > 20, "the copy check reads the tips and banners (\(copy.count) lines)")
+    check(!copy.contains(where: saysSky), "no tip, shortcut or banner line says Sky: \(copy.filter(saysSky))")
+    check(GestureGuide.entries.contains { $0.effect.contains("Lanes") }, "a gesture tip names Lanes")
+
+    // Every user-facing string literal in the app and the widget, read from source. Route keys
+    // ("sky") and links ("page://sky") are not on screen, so they are allowed; anything else that
+    // says Sky is a string the user would read.
+    if let root = ProcessInfo.processInfo.environment["PAGE_IOS_ROOT"] {
+        let fm = FileManager.default
+        var files: [String] = []
+        for dir in ["Page", "PageWidget"] {
+            if let en = fm.enumerator(atPath: root + "/" + dir) {
+                for case let rel as String in en where rel.hasSuffix(".swift") { files.append(root + "/" + dir + "/" + rel) }
+            }
+        }
+        check(files.count > 100, "the scan reads the app and widget sources (\(files.count) files)")
+        let quoted = try! NSRegularExpression(pattern: "\"((?:[^\"\\\\]|\\\\.)*)\"")
+        var literals = 0
+        var hits: [String] = []
+        for file in files {
+            guard let text = try? String(contentsOfFile: file, encoding: .utf8) else { continue }
+            for line in text.components(separatedBy: "\n") where !line.trimmingCharacters(in: .whitespaces).hasPrefix("//") {
+                let ns = line as NSString
+                for m in quoted.matches(in: line, range: NSRange(location: 0, length: ns.length)) {
+                    let s = ns.substring(with: m.range(at: 1))
+                    literals += 1
+                    if saysSky(s) && s != "sky" && !s.contains("://") {
+                        hits.append("\(file.split(separator: "/").last ?? ""): \(s)")
+                    }
+                }
+            }
+        }
+        check(literals > 200, "the scan reads the string literals (\(literals))")
+        check(hits.isEmpty, "no user-facing string literal says Sky: \(hits)")
+
+        // The Sky screens are gone, and Lanes keeps what it must: a lane opens its decision or its
+        // session, standby Macs keep Make live, and the battery's dusk and dawn play on Lanes.
+        func source(_ rel: String) -> String { (try? String(contentsOfFile: root + "/" + rel, encoding: .utf8)) ?? "" }
+        let lanesScreen = source("Page/Design/NightWatch/NWLanes.swift")
+        let lanesContainer = source("Page/Views/LanesContainer.swift")
+        check(!fm.fileExists(atPath: root + "/Page/Design/NightWatch/NWSky.swift") && !fm.fileExists(atPath: root + "/Page/Views/SkyContainer.swift"),
+              "the Sky screen files are gone")
+        check(lanesContainer.contains("router.open(interventionId: id)") && lanesContainer.contains("router.openSession(row.id)"),
+              "a lane opens its decision, else its session")
+        check(lanesScreen.contains("Button(\"Make live\")") && lanesContainer.contains("a.makeLive = { pairing.switchTo($0) }"),
+              "standby Macs keep Make live")
+        check(lanesContainer.contains("a.tapMoon = { router.openTower(.power) }") && lanesScreen.contains("Opens the Tower at Power"),
+              "the moon still opens the Tower at Power")
+        check(lanesContainer.contains("data.duskDawn = activity.duskDawn") && lanesContainer.contains("activity.observePower(")
+              && lanesScreen.contains("data.duskDawn"), "dusk and dawn play on Lanes")
+
+        // Trust: the swipe row, its drag, its green well and VoiceOver's "Approve" all follow canSwipeApprove, and
+        // ActionCoordinator.begin refuses any action the row does not offer (the logic target does not compile Services).
+        let coordinator = source("Page/Services/ActionCoordinator.swift")
+        let rowViews = source("Page/Design/NightWatch/NWRowViews.swift")
+        check(coordinator.contains("ActionGate.canBegin(row: row, kind: kind)"), "begin refuses an action the row does not offer")
+        check(rowViews.contains("let can = row.canSwipeApprove") && rowViews.contains("guard can,") && rowViews.contains("if can { Button(\"Approve\")"),
+              "the swipe drag, green well and VoiceOver Approve follow canSwipeApprove")
+        check(source("Page/Services/NotificationService.swift").contains("ActionGate.banner(NotificationDecision.decide("),
+              "a banner action is gated on what the page's row offers")
+    } else {
+        check(false, "PAGE_IOS_ROOT is not set: run through iOS/Tests/run-logic-tests.sh")
+    }
 }
 
 // MARK: - Dispatch
@@ -2838,29 +2828,18 @@ do {
 // MARK: - Steer safety: tap targets, targets on the wire, Send, receipts
 
 do {
-    // Sky: no two tap targets overlap, in a crowded sky and a short one, and each star's centre hits itself.
-    let fleet = skyFleet(["page", "riot-io-teltonika", "payments", "bottle-flip", "tokenizer-lab"], perProject: 4)
+    // Lanes: every lane opens exactly what it shows. A lane waiting on you opens its decision, any other opens its session,
+    // and no two lanes share an id (so a tap can only mean one lane), however crowded the fleet.
+    let fleet = laneFleet(["page", "riot-io-teltonika", "payments", "bottle-flip", "tokenizer-lab"], perProject: 4)
     let sky = SkyModel.build(sessions: fleet, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    for (w, h) in [(393.0, 852.0), (375.0, 667.0), (430.0, 932.0)] {
-        let size = SkySize(width: w, height: h)
-        let pts = SkyModel.starPoints(sky.constellations, in: size)
-        let radii = SkyModel.hitRadii(sky.constellations, in: size)
-        let ids = sky.constellations.flatMap(\.stars).map(\.id)
-        var overlaps = 0, misses = 0
-        for (i, a) in ids.enumerated() {
-            if (radii[a] ?? 0) > SkyModel.maxHitRadius { overlaps += 1 }
-            if SkyModel.hitTest(pts[a]!, constellations: sky.constellations, in: size) != a { misses += 1 }
-            for b in ids[(i + 1)...] {
-                let d = hypot(pts[a]!.x - pts[b]!.x, pts[a]!.y - pts[b]!.y)
-                if (radii[a] ?? 0) + (radii[b] ?? 0) > d + 1e-9 { overlaps += 1 }
-            }
-        }
-        check(overlaps == 0, "no two star tap targets overlap at \(Int(w))x\(Int(h)) (\(overlaps))")
-        check(misses == 0, "each star's centre taps itself at \(Int(w))x\(Int(h)) (\(misses))")
-        check(SkyModel.hitTest(SkyPoint(x: -50, y: -50), constellations: sky.constellations, in: size) == nil, "a tap on empty sky opens nothing")
-    }
+    let lanes = LanesModel.build(sky: sky, log: ActivityLog(), now: nwNow)
+    let rows = lanes.groups.flatMap(\.rows)
+    check(rows.count == fleet.count && Set(rows.map(\.id)).count == fleet.count, "one lane per live session, none shared")
+    check(rows.allSatisfy { r in (r.interventionId != nil) == (r.state == .needsYou) }, "only a lane that needs you opens a decision")
+    check(rows.filter { $0.interventionId != nil }.allSatisfy { r in fleet.first { $0.id == r.id }?.openPageId == r.interventionId }, "a decision lane opens its own page")
     let lone = SkyModel.build(sessions: [nwSession("only", cwd: "~/code/only")], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
-    check(SkyModel.hitRadii(lone.constellations, in: SkySize(width: 393, height: 852))["only"] == SkyModel.maxHitRadius, "a lone star gets the full target")
+    let loneRows = LanesModel.build(sky: lone, log: ActivityLog(), now: nwNow).groups.flatMap(\.rows)
+    check(loneRows.map(\.id) == ["only"] && loneRows.first?.interventionId == nil, "a lone session is one lane that opens the session")
 }
 
 do {
@@ -3484,6 +3463,18 @@ do {
     check(TowerHosts.hosts.map(\.symbol) == ["macwindow", "terminal", "rectangle.split.3x1", "square.grid.2x2",
                                              "terminal.fill", "pawprint", "rectangle.3.group", "person.3"], "host symbols match the Mac")
     check(TowerHosts.hosts.allSatisfy { !$0.line.isEmpty }, "every host has a line")
+    // Answering a question: measured end to end in every terminal but Terminal.app (the Mac's TerminalCatalog says the same).
+    let notYet = TowerHosts.hosts.filter { if case .notYet = $0.answer { return true } else { return false } }.map(\.name)
+    check(notYet == ["Terminal"], "only Terminal.app can't answer questions yet \(notYet)")
+    let yesNames = TowerHosts.hosts.filter { $0.answer == .yes }.map(\.name)
+    check(yesNames == ["iTerm2", "tmux", "cmux", "WezTerm", "kitty", "Herdr", "Claude Squad"], "the other seven answer questions \(yesNames)")
+    check(TowerHosts.Answer.yes.line == "Answer questions: yes", "the yes line")
+    check(TowerHosts.Answer.limited("a").line == "Answer questions: with limits — a", "the limits line")
+    check(TowerHosts.Answer.notYet("x").line == "Answer questions: not yet — x", "the not-yet line")
+    // The same words as the Mac's TerminalCatalog (`answer: .notYet(...)` on Terminal.app).
+    check(TowerHosts.hosts.first(where: { $0.name == "Terminal" })?.answer
+          == .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2"),
+          "Terminal's reason is the Mac's, word for word")
     check(TowerHosts.setUpLine.contains("Page ▸ Tower ▸ Terminals"), "the set-up line points at the Mac page")
     check(TowerHosts.othersLine.contains("Ghostty") && TowerHosts.othersLine.contains("Warp") && TowerHosts.othersLine.contains("VS Code"), "the unsupported terminals are named")
     check(TowerSection.allCases.contains(.terminals), "the Works with section is in the list")
@@ -3607,7 +3598,7 @@ do {
     let undo = nowIv("und", "[Bash] swift test --filter StuckTests")
     check(irrev.chip == .irreversible && undo.chip == .undoable, "fixtures are one irreversible and one undoable row")
     func inputs(_ rows: [NowRow], inFlight: [String] = [], busy: Set<String> = []) -> NowTipInputs {
-        NowTipInputs(rows: rows.map { ($0.id, $0.chip) }, inFlight: inFlight, busy: busy)
+        NowTipInputs(rows: rows, inFlight: inFlight, busy: busy)
     }
 
     // One tip at a time, in priority order, each on the first row of its kind.
@@ -3617,6 +3608,9 @@ do {
     check(book.nowTip(inputs([irrev])) == NowTipTarget(tip: .holdToApprove, anchorId: "irr"), "the first irreversible row gets the hold tip")
     check(book.nowTip(inputs([undo, irrev], inFlight: ["s-a"])) == NowTipTarget(tip: .holdToApprove, anchorId: "irr"), "hold first, then swipe, then in flight: never two at once")
     check(book.nowTip(inputs([], inFlight: ["s-a", "s-b"])) == NowTipTarget(tip: .inFlight, anchorId: "s-a"), "the first in-flight row gets its tip")
+    let blockedUndo = NowRowBuilder.row(for: nwIv("blk", .approval, "[Bash] swift test", session: "sb"), session: nwSession("sb", title: "api", host: "Ghostty", canType: false, blocker: "Page can't type into Ghostty yet"), macName: "M")
+    check(blockedUndo.chip == .undoable && !blockedUndo.canSwipeApprove && book.nowTip(inputs([blockedUndo])) == nil, "the swipe tip never anchors on a row that has no Approve")
+    check(book.nowTip(inputs([blockedUndo, undo]))?.anchorId == "und", "it skips to a row that can really be swiped")
     check(book.nowTip(inputs([undo], busy: ["und"])) == nil, "no tip points at a row with an action under way")
     check(book.nowTip(inputs([undo, nowIv("und2", "[Bash] swift build")], busy: ["und"]))?.anchorId == "und2", "it moves to the next row of its kind")
     check(book.decisionTip(hasPreview: true) == .willType && book.decisionTip(hasPreview: false) == nil, "the Decision tip needs a preview to point at")
@@ -3762,7 +3756,7 @@ do {
     check(ProjectLabel.name(cwd: "~", fallback: "") == "~" && ProjectLabel.name(cwd: "/Users/roy", fallback: "") == "~" && ProjectLabel.name(cwd: "/Users/roy/", fallback: "docs") == "~", "the home folder reads ~ whatever the session is called")
     check(ProjectLabel.name(cwd: "~/projects/page/", fallback: "x") == "page" && ProjectLabel.name(cwd: "/Users/roy/projects/page", fallback: "x") == "page", "a real folder is its own name")
     check(ProjectLabel.clean("/", cwd: "/Users/roy/projects/page") == "page" && ProjectLabel.clean(" ", cwd: "/", fallback: "web") == "web" && ProjectLabel.clean("page", cwd: "/") == "page", "a name the Mac sent as / is repaired")
-    check(SkyModel.projectName(cwd: "/", fallback: "tokenizer") == "tokenizer", "Sky and In flight share the fallback")
+    check(SkyModel.projectName(cwd: "/", fallback: "tokenizer") == "tokenizer", "Lanes and In flight share the fallback")
     let slash = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"i","sessionId":"s","openedAt":"2026-10-27T01:00:00Z","cwd":"/","projectName":"/","kind":"idle"}"#.utf8))
     check(slash.projectName != "/" && !slash.projectName.isEmpty, "a finished page from / is not named /")
     let slashRow = NowRowBuilder.row(for: slash, session: nwSession("s", title: "tokenizer", state: "idle", cwd: "/"), macName: "M")
@@ -3811,6 +3805,8 @@ do {
     // Six workflows: the Mac says six are running; the phone sends three and must not say three.
     let six = InFlightCard.build(session: liveRow(goldenSixWorkflows, preview: "Bash: swift test"), now: goldenNow)
     check(six.workflows.count == 3 && six.workflows.first?.text == "Review changes · Reviewing · 3/5 agents", "golden: the three sent workflows show in words")
+    check(liveRow(goldenSixWorkflows).flight?.workflows.map(\.agentsRunning) == [2, 1, 0], "the Mac's workflow \"running\" Int reads as its running agents")
+    check(liveRow(goldenSixWorkflows).flight?.workflows.allSatisfy(\.running) == true, "a listed workflow is running whatever its agent count (the Mac sends no status)")
     check(six.workflowHeading == "6 workflows running", "BUG: workflow count: the Mac says workflowsRunning 6, the phone counts the 3 it was sent: \"\(six.workflowHeading ?? "nil")\"")
 
     // The current step must not come back as an earlier step, in whichever words each side used.

@@ -39,7 +39,7 @@ final class ActionCoordinator: ObservableObject {
     /// Irreversible approve, whose hold plus biometrics is the arm.
     /// `onResult` gets the relay's answer for a send that happened.
     func begin(row: NowRow, kind: RowAction.Kind, text: String = "", onResult: ((ReplyOutcome) -> Void)? = nil) {
-        guard pending[row.id] == nil, ActionGate.isSendable(kind),
+        guard pending[row.id] == nil, ActionGate.isSendable(kind), ActionGate.canBegin(row: row, kind: kind),
               ActionGate.requiresBiometrics(kind: kind, commit: row.commit) == false,
               let request = ReplyMapping.request(for: kind, text: text) else { return }
         localProblems[row.id] = nil

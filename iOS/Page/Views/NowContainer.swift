@@ -109,7 +109,7 @@ struct NowContainer: View {
         d.outcomes = outcomes
         d.receipts = receipts
         // One first-time tip at a time, under the first row of its kind that has nothing under way.
-        d.tip = tips.book.nowTip(NowTipInputs(rows: model.rows.map { ($0.id, $0.chip) }, inFlight: d.inFlight.rows.map(\.id),
+        d.tip = tips.book.nowTip(NowTipInputs(rows: model.rows, inFlight: d.inFlight.rows.map(\.id),
                                               busy: Set(outcomes.keys).union(coordinator.pending.keys)))
         d.answerable = Set(model.rows.filter { row in
             let page = api.inbox.first { $0.id == row.id }
@@ -152,7 +152,7 @@ struct NowContainer: View {
         var a = NowScreenActions()
         a.open = { router.open(interventionId: $0) }
         a.approve = { row in
-            if row.chip == .undoable { tips.retire(.swipeToApprove) }
+            if row.canSwipeApprove { tips.retire(.swipeToApprove) }
             coordinator.begin(row: row, kind: .approve)
         }
         a.holdComplete = { row in
@@ -175,7 +175,7 @@ struct NowContainer: View {
         }
         a.toggleInFlight = { inFlightExpanded.toggle() }
         a.dismissTip = { tips.retire($0) }
-        a.toSky = { withAnimation { router.destination = .sky } }
+        a.toLanes = { withAnimation { router.destination = .lanes } }
         a.toggleBrief = { briefExpanded.toggle() }
         a.dismissBrief = { away.dismissBrief(); briefExpanded = false }
         a.reviewFinished = { briefExpanded = false }

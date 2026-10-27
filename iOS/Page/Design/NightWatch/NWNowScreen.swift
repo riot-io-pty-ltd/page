@@ -62,7 +62,7 @@ struct NowScreenActions {
     var openRoom: (String, RoomEntry) -> Void = { _, _ in }
     var toggleInFlight: () -> Void = {}
     var dismissTip: (NWTip) -> Void = { _ in }
-    var toSky: () -> Void = {}
+    var toLanes: () -> Void = {}
     /// The orb in the corner: the Tower (Settings).
     var openSettings: () -> Void = {}
     var toggleBrief: () -> Void = {}
@@ -190,9 +190,9 @@ struct NWNowScreen: View {
             .padding(.top, inset + 6)
         }
         .frame(height: height + inset)
-        // Swipe the Horizon to go to Sky.
+        // Swipe the Horizon to go to Lanes.
         .simultaneousGesture(DragGesture(minimumDistance: 30).onEnded { v in
-            if NWDestination.afterDrag(from: .now, translation: Double(v.translation.width), vertical: Double(v.translation.height)) == .sky { actions.toSky() }
+            if NWDestination.afterDrag(from: .now, translation: Double(v.translation.width), vertical: Double(v.translation.height)) == .lanes { actions.toLanes() }
         })
     }
 
@@ -282,7 +282,7 @@ struct NWNowScreen: View {
         if !data.inFlight.rows.isEmpty {
             let before = sections.first { $0.0 == .review }?.1.first.flatMap { order.firstIndex(of: $0.id) }.map { $0 - 1 } ?? (order.count - 1)
             NWInFlightSection(section: data.inFlight, tip: data.tip.flatMap { $0.tip == .inFlight ? $0 : nil }, biometry: data.biometry,
-                              onOpen: actions.openRoom, onToggle: actions.toggleInFlight, onHeader: actions.toSky, onDismissTip: actions.dismissTip)
+                              onOpen: actions.openRoom, onToggle: actions.toggleInFlight, onHeader: actions.toLanes, onDismissTip: actions.dismissTip)
                 .id("section-in flight")
                 .offset(y: push(below: before))
         }
@@ -319,7 +319,7 @@ struct NWNowScreen: View {
             card(row).modifier(NWResolveFold(changedAt: data.receipts[row.id]?.changedAt))
         } else {
             NWArrival(arriving: plan[row.id] != nil, delay: plan[row.id] ?? 0, pulseY: pulseY(inset: inset), tint: row.section.color,
-                      radius: row.chip == .undoable ? NightWatch.Radius.row : NightWatch.Radius.card,
+                      radius: row.canSwipeApprove ? NightWatch.Radius.row : NightWatch.Radius.card,
                       clear: wordsBand(inset: inset), pinned: pinned) {
                 card(row)
                     .background(GeometryReader { g in
@@ -340,7 +340,7 @@ struct NWNowScreen: View {
         let outcome = data.outcomes[row.id] ?? .none
         let pending = data.pending[row.id]
         switch row.section {
-        case .decide where row.chip == .undoable:
+        case .decide where row.canSwipeApprove:
             NWUndoableRow(row: row, now: data.now, outcome: outcome, pending: pending, receipt: data.receipts[row.id], fixedDrag: data.fixedDrag,
                           onApprove: { actions.approve(row) }, onOpen: { actions.open(row.id) }, onCancel: { actions.cancel(row.id) })
         case .decide where row.chip == .question:

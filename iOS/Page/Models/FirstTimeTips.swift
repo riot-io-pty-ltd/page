@@ -68,7 +68,7 @@ enum GestureGuide {
         GestureEntry(id: "stop-all", symbol: "stop.circle.fill", gesture: "Hold +", context: "on the bottom bar",
                      effect: "Stops every working agent, once your phone confirms it."),
         GestureEntry(id: "sides", symbol: "arrow.left.arrow.right", gesture: "Swipe sideways", context: "on the top or the bottom bar",
-                     effect: "Goes between Now and Sky."),
+                     effect: "Goes between Now and Lanes."),
         GestureEntry(id: "pull", symbol: "arrow.down", gesture: "Pull down", context: "on Now",
                      effect: "Checks in with your Mac again."),
         GestureEntry(id: "chip", symbol: "bolt.horizontal", gesture: "Tap the Mac chip or the Runway", context: "on Now",
@@ -82,7 +82,7 @@ enum GestureGuide {
         GestureEntry(id: "siri-stop", symbol: "stop.circle", gesture: "“Stop my agents with Page”", context: "Siri or Shortcuts",
                      effect: "Asks first, then stops every working agent."),
         GestureEntry(id: "siri-sessions", symbol: "rectangle.stack", gesture: "“Open Page sessions”", context: "Siri or Shortcuts",
-                     effect: "Opens Sky."),
+                     effect: "Opens Lanes."),
     ]
 
     static func entry(for tip: NWTip) -> GestureEntry? { entries.first { $0.tip == tip } }
@@ -101,8 +101,9 @@ struct NowTipTarget: Equatable {
 
 /// What the rows say, for `TipBook.nowTip`.
 struct NowTipInputs {
-    /// The rows in the order drawn: id and chip. A row with an action under way is left out by the caller.
-    var rows: [(id: String, chip: ChipKind)] = []
+    /// The rows in the order drawn. The swipe tip points only at a row that can really be swiped
+    /// (`canSwipeApprove`), never at an Undoable row that offers only Open on Mac.
+    var rows: [NowRow] = []
     /// The In flight rows, in the order drawn.
     var inFlight: [String] = []
     /// Rows with an arm ring, a send or a result on them: no tip points at them.
@@ -146,8 +147,8 @@ struct TipBook: Equatable {
         for tip in Self.priority where !seen.contains(tip) {
             let anchor: String?
             switch tip {
-            case .holdToApprove: anchor = i.rows.first { $0.chip == .irreversible && !i.busy.contains($0.id) }?.id
-            case .swipeToApprove: anchor = i.rows.first { $0.chip == .undoable && !i.busy.contains($0.id) }?.id
+            case .holdToApprove: anchor = i.rows.first { $0.chip == .irreversible && $0.action(.approve) != nil && !i.busy.contains($0.id) }?.id
+            case .swipeToApprove: anchor = i.rows.first { $0.canSwipeApprove && !i.busy.contains($0.id) }?.id
             case .inFlight: anchor = i.inFlight.first { !i.busy.contains($0) }
             case .willType: anchor = nil
             }

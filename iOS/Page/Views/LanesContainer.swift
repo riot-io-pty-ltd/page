@@ -1,14 +1,12 @@
 import SwiftUI
 
-/// SKY, live: the fleet as constellations or Lanes, from the session list.
-struct SkyContainer: View {
+/// LANES, live: the fleet as a list of lanes, from the session list.
+struct LanesContainer: View {
     @EnvironmentObject var api: APIClient
     @EnvironmentObject var sessions: SessionStore
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var activity: ActivityStore
-    @State private var mode = SkyMode.load()
-    @State private var selected: String?
 
     var body: some View {
         // Ages and presence re-evaluate every 5 s. The store bumps `waitTick`
@@ -35,15 +33,12 @@ struct SkyContainer: View {
         let lanes = LanesModel.build(sky: sky, log: activity.log, now: now)
         let macs = TowerMacRow.build(saved: pairing.savedMacs, activeId: pairing.activeMacId, activeStatus: api.macStatus,
                                      others: pairing.otherStatus, now: now)
-        var data = SkyScreenData(sky: sky, lanes: lanes, mode: mode, now: now, standby: macs, selectedStar: selected)
+        var data = LanesScreenData(fleet: sky, lanes: lanes, now: now, standby: macs)
         data.duskDawn = activity.duskDawn
         if availability != .ready { data.availability = SessionAvailabilityCopy(availability) }
-        var a = SkyScreenActions()
-        a.setMode = { m in mode = m; m.save() }
-        a.select = { selected = $0 }
-        a.openStar = { star in
-            selected = nil
-            if let id = star.interventionId { router.open(interventionId: id) } else { router.openSession(star.id) }
+        var a = LanesScreenActions()
+        a.openRow = { row in
+            if let id = row.interventionId { router.open(interventionId: id) } else { router.openSession(row.id) }
         }
         a.tapMoon = { router.openTower(.power) }
         a.availabilityAction = { action in
@@ -59,12 +54,16 @@ struct SkyContainer: View {
             await api.refreshAll()
             await pairing.refreshOthers()
         }
-        return NWSkyScreen(data: data, actions: a)
+        return NWLanesScreen(data: data, actions: a)
             .onChange(of: sessions.sessions) { _, list in
                 activity.observe(sessions: list, interventions: api.inbox, paused: paused)
                 activity.observePower(paused: paused, sessions: list)
             }
             .onChange(of: paused) { _, p in activity.observePower(paused: p, sessions: sessions.sessions) }
-            .onAppear { activity.observePower(paused: paused, sessions: sessions.sessions) }
+            .onAppear {
+                // The old Sky/Lanes toggle is gone; clear what it remembered.
+                LegacySkyMode.forget()
+                activity.observePower(paused: paused, sessions: sessions.sessions)
+            }
     }
 }

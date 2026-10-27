@@ -222,6 +222,13 @@ struct NowRow: Equatable, Identifiable {
     let reason: String
 
     func action(_ kind: RowAction.Kind) -> RowAction? { actions.first { $0.kind == kind } }
+
+    /// Whether the row can be approved with a swipe: it is Undoable AND it
+    /// really has an Approve action. A row Page can't type into (a blocker, an
+    /// agent Page has no adapter for) keeps its Undoable chip but offers only
+    /// Open on Mac, so it never gets the swipe or VoiceOver's "Approve".
+    var canSwipeApprove: Bool { commit == .swipe && action(.approve) != nil }
+
     /// The preview shown under the focused row: the approve line, else the
     /// first action that sends something.
     var focusPreview: String? {

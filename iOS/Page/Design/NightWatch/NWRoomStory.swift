@@ -118,7 +118,7 @@ struct NWRoomStory: View {
             } else {
                 NWQuestionCard(row: row, now: data.now, onOpen: { actions.openDecision(row.id) })
             }
-        case .decide where row.chip == .undoable:
+        case .decide where row.canSwipeApprove:
             NWUndoableRow(row: row, now: data.now, outcome: data.pageOutcome, pending: data.pagePending,
                           onApprove: { actions.approve(row) }, onOpen: { actions.openDecision(row.id) }, onCancel: { actions.cancel(row.id) })
         case .decide:

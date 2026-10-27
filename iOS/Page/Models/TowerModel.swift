@@ -34,24 +34,43 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
 /// the Mac's Terminals page (Page ▸ Tower ▸ Terminals) is where each one is
 /// set up and where its live status shows, so nothing here is a switch.
 enum TowerHosts {
+    /// Whether the phone's answer sheet can press a question's keys in that terminal. Mirrors the Mac's
+    /// `TerminalCatalog.AnswerSupport` (measured end to end on Claude Code 2.1.311).
+    enum Answer: Equatable {
+        case yes
+        /// Works, with a stated limit.
+        case limited(String)
+        /// Refused up front: why, and what to use instead.
+        case notYet(String)
+
+        var line: String {
+            switch self {
+            case .yes: return "Answer questions: yes"
+            case .limited(let why): return "Answer questions: with limits — \(why)"
+            case .notYet(let why): return "Answer questions: not yet — \(why)"
+            }
+        }
+    }
+
     struct Host: Equatable, Identifiable {
         let name: String
         /// SF Symbol that exists on iOS 16.
         let symbol: String
         /// What the phone can do there, in a line.
         let line: String
+        let answer: Answer
         var id: String { name }
     }
 
     static let hosts: [Host] = [
-        Host(name: "Terminal", symbol: "macwindow", line: "reply and approve; the Mac asks macOS for permission once"),
-        Host(name: "iTerm2", symbol: "terminal", line: "reply, approve and stop; the Mac asks macOS for permission once"),
-        Host(name: "tmux", symbol: "rectangle.split.3x1", line: "reply, approve, stop and see the screen, in any terminal app"),
-        Host(name: "cmux", symbol: "square.grid.2x2", line: "everything, and start new sessions from here"),
-        Host(name: "WezTerm", symbol: "terminal.fill", line: "reply, approve, stop and see the screen; nothing to set up"),
-        Host(name: "kitty", symbol: "pawprint", line: "reply, approve, stop and see the screen; one click turns on remote control"),
-        Host(name: "Herdr", symbol: "rectangle.3.group", line: "reply, approve, stop and see the screen; nothing to set up"),
-        Host(name: "Claude Squad", symbol: "person.3", line: "each agent is a tmux pane, so it works like tmux"),
+        Host(name: "Terminal", symbol: "macwindow", line: "reply and approve; the Mac asks macOS for permission once", answer: .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2")),
+        Host(name: "iTerm2", symbol: "terminal", line: "reply, approve and stop; the Mac asks macOS for permission once", answer: .yes),
+        Host(name: "tmux", symbol: "rectangle.split.3x1", line: "reply, approve, stop and see the screen, in any terminal app", answer: .yes),
+        Host(name: "cmux", symbol: "square.grid.2x2", line: "everything, and start new sessions from here", answer: .yes),
+        Host(name: "WezTerm", symbol: "terminal.fill", line: "reply, approve, stop and see the screen; nothing to set up", answer: .yes),
+        Host(name: "kitty", symbol: "pawprint", line: "reply, approve, stop and see the screen; one click turns on remote control", answer: .yes),
+        Host(name: "Herdr", symbol: "rectangle.3.group", line: "reply, approve, stop and see the screen; nothing to set up", answer: .yes),
+        Host(name: "Claude Squad", symbol: "person.3", line: "each agent is a tmux pane, so it works like tmux", answer: .yes),
     ]
 
     /// Where to set them up.

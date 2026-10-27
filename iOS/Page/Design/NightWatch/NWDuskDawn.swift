@@ -2,7 +2,7 @@ import SwiftUI
 
 // DUSK AND DAWN, drawn (`DawnModel` for the timing): the grey horizon band
 // that holds while agents are paused for battery, and the dawn's gold light
-// rising from it when power comes back. Shared by the Horizon, Sky and the
+// rising from it when power comes back. Shared by the Horizon, Lanes and the
 // Return Brief's sunrise.
 
 extension NightWatch.AuroraPalette {
@@ -103,10 +103,10 @@ struct NWDawnLight: View {
     }
 }
 
-// MARK: - Sky
+// MARK: - Lanes
 
-/// What Sky's power story looks like at one moment.
-struct NWSkyLight {
+/// What Lanes' power story looks like at one moment.
+struct NWLanesLight {
     var palette: NightWatch.AuroraPalette
     /// The grey band: 0 ... 1.
     var band: Double
@@ -114,9 +114,12 @@ struct NWSkyLight {
     var dawn: DawnModel.Dawn?
     /// How much of the background star field shows (it fades with the dusk).
     var stars: Double = 1
+    /// How much of the aurora behind the list shows: it fades in with the dusk, holds
+    /// through the night of a pause, and fades out as the dawn settles. 0 in the day.
+    var cover: Double = 0
 }
 
-extension SkyScreenData {
+extension LanesScreenData {
     /// `t` is a real clock (reference-date seconds), not the still frame
     /// `NWAnimated` hands out under Reduce Motion: then every change is
     /// drawn as it ends.
@@ -126,7 +129,7 @@ extension SkyScreenData {
     /// harness's pinned moment); a pause already under way when Page opened
     /// is drawn settled. nil when not paused.
     func duskElapsed(at t: Double, pin: NWMotionPin?) -> Double? {
-        guard sky.paused else { return nil }
+        guard fleet.paused else { return nil }
         if let pin, pin.kind == .dusk { return pin.time }
         guard let at = duskDawn.duskAt, at != .distantPast, Self.isClock(t) else { return DawnModel.duskDuration }
         return max(0, t - at.timeIntervalSinceReferenceDate)
@@ -134,58 +137,69 @@ extension SkyScreenData {
 
     /// Seconds into the dawn, while one plays.
     func dawnElapsed(at t: Double, pin: NWMotionPin?) -> Double? {
-        guard !sky.paused else { return nil }
+        guard !fleet.paused else { return nil }
         if let pin, pin.kind == .dawn { return pin.time }
         guard Self.isClock(t) else { return nil }
         return duskDawn.dawnAt.map { max(0, t - $0.timeIntervalSinceReferenceDate) }
     }
 
-    /// When each paused star relights: its own confirmed resume, one by one.
-    var relights: [String: TimeInterval] {
-        let ys = Dictionary(sky.constellations.flatMap(\.stars).map { ($0.id, $0.y) }, uniquingKeysWith: { a, _ in a })
-        return DawnModel.relightTimes(duskDawn.dawnStars(ys: ys))
+    /// Every lane in the order it is drawn, as a height in the list: 0 the top lane ... 1 the
+    /// bottom one. The dawn rises from the bottom, so the lower lanes relight first.
+    private var laneHeights: [String: Double] {
+        let ids = lanes.groups.flatMap(\.rows).map(\.id)
+        let n = Double(max(1, ids.count))
+        return Dictionary(ids.enumerated().map { ($0.element, (Double($0.offset) + 0.5) / n) }, uniquingKeysWith: { a, _ in a })
     }
+
+    /// When each paused lane relights: its own confirmed resume, one by one.
+    var relights: [String: TimeInterval] { DawnModel.relightTimes(duskDawn.dawnStars(ys: laneHeights)) }
 
     /// True while the power story moves and so needs a clock: the dusk
     /// falling, or the dawn rising. A pause that has settled holds still.
     func powerStoryMoving(pin: NWMotionPin?, now: Date = Date()) -> Bool {
         if pin?.kind == .dusk || pin?.kind == .dawn { return true }
-        if sky.paused, let at = duskDawn.duskAt, at != .distantPast { return now.timeIntervalSince(at) < DawnModel.duskDuration }
-        guard !sky.paused, let dawn = duskDawn.dawnAt else { return false }
+        if fleet.paused, let at = duskDawn.duskAt, at != .distantPast { return now.timeIntervalSince(at) < DawnModel.duskDuration }
+        guard !fleet.paused, let dawn = duskDawn.dawnAt else { return false }
         return !DawnModel.dawn(elapsed: now.timeIntervalSince(dawn), lastRelight: relights.values.max()).finished
     }
 
-    /// The sky at `t`: the working aurora; fading to dusk with the band
-    /// holding; or the gold dawn rising back into it.
-    func skyLight(at t: Double, pin: NWMotionPin?) -> NWSkyLight {
+    /// True when the power story has anything to draw behind the list: a pause (settled
+    /// or falling) or a dawn that is still playing.
+    func powerStoryShown(pin: NWMotionPin?, now: Date = Date()) -> Bool {
+        fleet.paused || powerStoryMoving(pin: pin, now: now)
+    }
+
+    /// The sky at `t`: fading to dusk with the band holding; or the gold dawn
+    /// rising back into the day. In the day `cover` is 0 and only the shell's sky shows.
+    func skyLight(at t: Double, pin: NWMotionPin?) -> NWLanesLight {
         if let d = duskElapsed(at: t, pin: pin) {
             let f = DawnModel.dusk(elapsed: d)
-            return NWSkyLight(palette: NightWatch.AuroraPalette.working.towardNight(f.aurora), band: f.band, dawn: nil,
-                              stars: DawnModel.starField(duskMix: f.aurora))
+            return NWLanesLight(palette: NightWatch.AuroraPalette.working.towardNight(f.aurora), band: f.band, dawn: nil,
+                                stars: DawnModel.starField(duskMix: f.aurora), cover: f.aurora)
         }
         if let w = dawnElapsed(at: t, pin: pin) {
             let f = DawnModel.dawn(elapsed: w, lastRelight: relights.values.max())
             if !f.finished {
                 // Up from the night; the sweep carries the gold, the sky behind it only warms a little.
                 let sunrise = NightWatch.AuroraPalette.night.mixed(with: .dawn, 0.35 * f.warmth)
-                return NWSkyLight(palette: sunrise.mixed(with: .working, 1 - f.aurora), band: f.band, dawn: f,
-                                  stars: DawnModel.starField(duskMix: f.aurora))
+                return NWLanesLight(palette: sunrise.mixed(with: .working, 1 - f.aurora), band: f.band, dawn: f,
+                                    stars: DawnModel.starField(duskMix: f.aurora), cover: f.aurora)
             }
         }
-        return NWSkyLight(palette: .working, band: 0, dawn: nil)
+        return NWLanesLight(palette: .working, band: 0, dawn: nil)
     }
 
-    /// A star's light in the power story: at dusk every working (or paused)
-    /// star exhales and dims together; at dawn each paused star stays dim
+    /// A lane's light in the power story: at dusk every working (or paused)
+    /// lane exhales and dims together; at dawn each paused lane stays dim
     /// until its own resume is confirmed, then relights. (1, 1) otherwise.
-    func starLight(_ s: SkyStar, at t: Double, pin: NWMotionPin?, relights: [String: TimeInterval]) -> (brightness: Double, scale: Double) {
+    func starLight(id: String, state: StarState, at t: Double, pin: NWMotionPin?, relights: [String: TimeInterval]) -> (brightness: Double, scale: Double) {
         if let d = duskElapsed(at: t, pin: pin) {
-            guard s.state == .paused || s.state == .working || duskDawn.affected.contains(s.id) else { return (1, 1) }
+            guard state == .paused || state == .working || duskDawn.affected.contains(id) else { return (1, 1) }
             let f = DawnModel.dusk(elapsed: d)
             return (f.stars, f.starScale)
         }
-        if let w = dawnElapsed(at: t, pin: pin), duskDawn.affected.contains(s.id) {
-            return (DawnModel.starBrightness(elapsed: w, relightAt: relights[s.id]), 1)
+        if let w = dawnElapsed(at: t, pin: pin), duskDawn.affected.contains(id) {
+            return (DawnModel.starBrightness(elapsed: w, relightAt: relights[id]), 1)
         }
         return (1, 1)
     }

@@ -255,8 +255,14 @@ final class NotificationService: NSObject, ObservableObject {
                                     response: NotificationResponseKind, userText: String?) async {
         // Approve from a banner only for an Undoable action; the page must be
         // in the inbox to be judged, otherwise the Decision sheet opens.
-        let level = APIClient.shared.inbox.first { $0.id == interventionId }.flatMap(PhoneReversibility.verdict(for:))?.level
-        switch NotificationDecision.decide(response, userText: userText, kind: kind, approveLevel: level) {
+        let page = APIClient.shared.inbox.first { $0.id == interventionId }
+        let level = page.flatMap(PhoneReversibility.verdict(for:))?.level
+        // And only what the page's row offers: a session Page can't type into offers
+        // Open on Mac alone, so a banner's Approve, Deny or reply opens the app instead.
+        // The Mac's name only colours previews, which a banner never shows.
+        let row = page.map { NowRowBuilder.row(for: $0, session: SessionStore.shared.session($0.sessionId), macName: "") }
+        let decision = ActionGate.banner(NotificationDecision.decide(response, userText: userText, kind: kind, approveLevel: level), row: row)
+        switch decision {
         case .open:
             AppRouter.shared.open(interventionId: interventionId)
         case .ignore:

@@ -317,7 +317,8 @@ struct NWTowerScreen: View {
             card {
                 ForEach(Array(TowerHosts.hosts.enumerated()), id: \.element.id) { i, h in
                     if i > 0 { divider }
-                    towerRow(icon: h.symbol, tint: NightWatch.Palette.teal, title: h.name, detail: h.line, trailing: nil, chevron: false, action: nil)
+                    towerRow(icon: h.symbol, tint: NightWatch.Palette.teal, title: h.name, detail: h.line, trailing: nil, chevron: false, action: nil,
+                             note: (h.answer.line, answerTint(h.answer)))
                 }
             }
             Text(TowerHosts.setUpLine).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textSecondary.color)
@@ -381,15 +382,26 @@ struct NWTowerScreen: View {
 
     // MARK: Rows
 
-    @ViewBuilder func towerRow(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool, action: (() -> Void)?) -> some View {
+    /// `note`: a second, coloured caption line under the detail (the Works with list's "Answer questions").
+    @ViewBuilder func towerRow(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool, action: (() -> Void)?,
+                               note: (text: String, tint: NightWatch.RGBA)? = nil) -> some View {
         if let action {
-            Button(action: action) { towerRowBody(icon: icon, tint: tint, title: title, detail: detail, trailing: trailing, chevron: chevron) }.buttonStyle(.plain)
+            Button(action: action) { towerRowBody(icon: icon, tint: tint, title: title, detail: detail, trailing: trailing, chevron: chevron, note: note) }.buttonStyle(.plain)
         } else {
-            towerRowBody(icon: icon, tint: tint, title: title, detail: detail, trailing: trailing, chevron: chevron)
+            towerRowBody(icon: icon, tint: tint, title: title, detail: detail, trailing: trailing, chevron: chevron, note: note)
         }
     }
 
-    func towerRowBody(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool) -> some View {
+    private func answerTint(_ answer: TowerHosts.Answer) -> NightWatch.RGBA {
+        switch answer {
+        case .yes: return NightWatch.Palette.green
+        case .limited: return NightWatch.Palette.amber
+        case .notYet: return NightWatch.Palette.textTertiary
+        }
+    }
+
+    func towerRowBody(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool,
+                      note: (text: String, tint: NightWatch.RGBA)? = nil) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon).font(.system(.body, weight: .medium)).foregroundColor(tint.color)
                 .frame(width: 44, height: 44)
@@ -397,6 +409,7 @@ struct NWTowerScreen: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(NightWatch.Typo.bodyStrong).foregroundColor(NightWatch.Palette.textPrimary.color)
                 if let detail { Text(detail).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color).fixedSize(horizontal: false, vertical: true) }
+                if let note { Text(note.text).font(NightWatch.Typo.caption).foregroundColor(note.tint.color).fixedSize(horizontal: false, vertical: true) }
             }
             Spacer(minLength: 8)
             if let trailing { Text(trailing).font(NightWatch.Typo.captionStrong).foregroundColor(NightWatch.Palette.teal.color) }

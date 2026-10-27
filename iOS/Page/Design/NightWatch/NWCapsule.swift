@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// The floating glass nav capsule: Now, the pulse, Sky. Each side carries a
+/// The floating glass nav capsule: Now, the pulse, Lanes. Each side carries a
 /// badge (the Decide count in amber, the working count in teal). Two places
 /// and one verb: a tap on a side switches, a horizontal drag on the capsule
-/// switches (Sky lies to the right of Now), a tap on the pulse opens
+/// switches (Lanes lies to the right of Now), a tap on the pulse opens
 /// Dispatch, and holding the pulse is the Stop ring (see `NWStopOverlay`).
 struct NWNavCapsule: View {
-    enum Destination: Hashable { case now, sky }
+    enum Destination: Hashable { case now, lanes }
     @Binding var selection: Destination
     var decideCount: Int
     var workingCount: Int
@@ -26,7 +26,7 @@ struct NWNavCapsule: View {
         HStack(spacing: 0) {
             side(.now, "Now", decideCount, NightWatch.Palette.amber)
             pulse
-            side(.sky, "Sky", workingCount, NightWatch.Palette.teal)
+            side(.lanes, "Lanes", workingCount, NightWatch.Palette.teal)
         }
         .padding(.horizontal, 8)
         .frame(height: 68)
@@ -37,8 +37,8 @@ struct NWNavCapsule: View {
     /// pulse in the middle keeps its own gestures, so a slow tap never switches.
     private var switchDrag: some Gesture {
         DragGesture(minimumDistance: 24).onEnded { v in
-            let to = NWDestination.afterDrag(from: selection == .now ? .now : .sky, translation: Double(v.translation.width), vertical: Double(v.translation.height))
-            let next: Destination = to == .now ? .now : .sky
+            let to = NWDestination.afterDrag(from: selection == .now ? .now : .lanes, translation: Double(v.translation.width), vertical: Double(v.translation.height))
+            let next: Destination = to == .now ? .now : .lanes
             if next != selection { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { selection = next } }
         }
     }

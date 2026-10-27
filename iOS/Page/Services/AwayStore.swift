@@ -1,7 +1,7 @@
 import Foundation
 
 /// The last absence of 10 minutes or more, fixed when Page came back, and
-/// whether its Return Brief is showing. It lives above Now and Sky so that
+/// whether its Return Brief is showing. It lives above Now and Lanes so that
 /// switching between them never restarts the absence or re-opens a dismissed Brief.
 @MainActor
 final class AwayStore: ObservableObject {

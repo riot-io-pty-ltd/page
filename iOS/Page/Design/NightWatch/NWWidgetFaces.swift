@@ -129,7 +129,7 @@ struct NWWidgetStatusFace: View {
             NWWidgetRunway(model: s.runway(now: now, timeZone: timeZone))
             HStack(spacing: 10) {
                 Link(destination: URL(string: "page://now")!) { pill("Open Now", NightWatch.Palette.amber, filled: true) }
-                Link(destination: URL(string: "page://sky")!) { pill("Sky", NightWatch.Palette.textPrimary, filled: false) }
+                Link(destination: URL(string: "page://lanes")!) { pill("Lanes", NightWatch.Palette.textPrimary, filled: false) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

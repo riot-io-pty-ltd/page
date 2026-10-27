@@ -37,6 +37,29 @@ enum ActionGate {
 
     /// An action that exists on the row and can be sent from the phone.
     static func isSendable(_ kind: RowAction.Kind) -> Bool { kind != .openOnMac }
+
+    /// The backstop: a row only ever sends what it offers. A row Page can't
+    /// type into offers only Open on Mac, so it has no Approve (or Deny) to begin,
+    /// whatever its chip says or a view asks for. Pure.
+    static func canBegin(row: NowRow, kind: RowAction.Kind) -> Bool { row.action(kind) != nil }
+
+    /// The same backstop for a banner action, which never goes through the
+    /// coordinator: a send the page's row doesn't offer (a session Page can't
+    /// type into, an agent it has no adapter for, a hook that takes decisions
+    /// only) opens the app on the page instead, where Open on Mac is shown.
+    /// `row` is nil when the page is not in the inbox: there is nothing to
+    /// check against, and the decision stands. Pure.
+    static func banner(_ decision: NotificationDecision, row: NowRow?) -> NotificationDecision {
+        guard case .send(_, let action) = decision, let row else { return decision }
+        let kinds: [RowAction.Kind]
+        switch action {
+        case .approve: kinds = [.approve]
+        case .deny: kinds = [.deny, .stop]
+        case .carryOn: kinds = [.carryOn]
+        case .custom: kinds = [.tellInstead]
+        }
+        return kinds.contains { canBegin(row: row, kind: $0) } ? decision : .open
+    }
 }
 
 /// The relay reply for a row action.

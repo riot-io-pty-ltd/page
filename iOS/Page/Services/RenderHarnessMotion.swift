@@ -3,7 +3,7 @@ import SwiftUI
 
 /// The signature motions, one moment at a time, for the render harness:
 /// `-NWRender motion-<name> -NWTime <seconds>` draws the real screen (the
-/// shell, Now, Sky, the Decision sheet) with that motion pinned `seconds`
+/// shell, Now, Lanes, the Decision sheet) with that motion pinned `seconds`
 /// in, so a contact sheet can be built frame by frame (iOS/Tools/
 /// render-motion.sh). In-memory fixtures only, like the rest of the harness.
 enum RenderHarnessMotion {
@@ -90,7 +90,7 @@ struct HarnessMotion: View {
         case "motion-hold", "motion-hold-burst":
             hold
         case "motion-dusk", "motion-dawn":
-            MotionShell(data: RenderFixtures.nowData("now"), destination: .sky, sky: skyData)
+            MotionShell(data: RenderFixtures.nowData("now"), destination: .lanes, lanes: lanesData)
         default:
             Text("Unknown motion \(screen)").foregroundColor(.white)
         }
@@ -159,9 +159,9 @@ struct HarnessMotion: View {
         return d
     }
 
-    // MARK: Sky
+    // MARK: Lanes
 
-    private var skyData: SkyScreenData {
+    private var lanesData: LanesScreenData {
         let dawn = screen == "motion-dawn"
         var sessions = RenderFixtures.sessions
         // Who has been seen working again since power came back, in order.
@@ -172,7 +172,7 @@ struct HarnessMotion: View {
             sessions = sessions.map { $0.state == .active && !back.contains($0.id) ? $0.with(state: .idle) : $0 }
         }
         let sky = RenderFixtures.sky(sessions: sessions, paused: !dawn)
-        var d = SkyScreenData(sky: sky, lanes: LanesModel.build(sky: sky, log: RenderFixtures.activity, now: now), mode: .sky, now: now)
+        var d = LanesScreenData(fleet: sky, lanes: LanesModel.build(sky: sky, log: RenderFixtures.activity, now: now), now: now)
         var log = DuskDawnLog()
         let active = Set(RenderFixtures.sessions.filter { $0.state == .active }.map(\.id))
         log.observe(paused: false, working: active, at: now.addingTimeInterval(-900))
@@ -247,13 +247,13 @@ private extension LiveSession {
 private struct MotionShell: View {
     let data: NowScreenData
     @State var destination: NWDestination
-    var sky: SkyScreenData? = nil
+    var lanes: LanesScreenData? = nil
     @State private var held: TimeInterval?
 
-    init(data: NowScreenData, destination: NWDestination, sky: SkyScreenData? = nil) {
+    init(data: NowScreenData, destination: NWDestination, lanes: LanesScreenData? = nil) {
         self.data = data
         _destination = State(initialValue: destination)
-        self.sky = sky
+        self.lanes = lanes
     }
 
     var body: some View {
@@ -263,8 +263,8 @@ private struct MotionShell: View {
                 pulseLongestWait: PulseModel.longestWait(since: data.model.pulseRows.map(\.waitingSince), now: data.now), stopPlan: plan,
                 biometry: "Face ID", held: $held) {
             NWNowScreen(data: data)
-        } sky: {
-            if let sky { NWSkyScreen(data: sky) }
+        } lanes: {
+            if let lanes { NWLanesScreen(data: lanes) }
         }
         .environment(\.nwTopInset, 54)
     }

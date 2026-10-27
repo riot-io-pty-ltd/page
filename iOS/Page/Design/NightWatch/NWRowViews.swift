@@ -316,8 +316,11 @@ struct NWUndoableRow: View {
     }
 
     private var swipeable: some View {
-        let x = fixedDrag ?? drag
+        // A row with no Approve action (Open on Mac only) is never swipeable, whatever its chip says.
+        let can = row.canSwipeApprove
+        let x = can ? (fixedDrag ?? drag) : 0
         return ZStack(alignment: .leading) {
+            if can {
             RoundedRectangle(cornerRadius: NightWatch.Radius.row, style: .continuous)
                 .fill(NightWatch.Palette.green.opacity(0.14 + 0.10 * Double(min(1, x / commitAt))).color)
                 .overlay(HStack(spacing: 8) {
@@ -326,6 +329,7 @@ struct NWUndoableRow: View {
                 }
                 .foregroundColor(NightWatch.Palette.green.color)
                 .padding(.leading, 18), alignment: .leading)
+            }
             rowBody
                 // Opaque, so the Approve well never shows through the row.
                 .background(NWGlassBackground(radius: NightWatch.Radius.row, fill: NightWatch.Palette.surface.opacity(1)))
@@ -334,13 +338,13 @@ struct NWUndoableRow: View {
                 // Beside the list's own scrolling; only a clearly sideways drag moves the row.
                 .simultaneousGesture(DragGesture(minimumDistance: 12)
                     .onChanged { v in
-                        guard NWDestination.isHorizontal(dx: Double(v.translation.width), dy: Double(v.translation.height)) else { drag = 0; return }
+                        guard can, NWDestination.isHorizontal(dx: Double(v.translation.width), dy: Double(v.translation.height)) else { drag = 0; return }
                         drag = max(0, min(160, v.translation.width))
                         if drag >= commitAt, !passed { passed = true; NWHaptics.tick() }
                         if drag < commitAt { passed = false }
                     }
                     .onEnded { v in
-                        let go = v.translation.width >= commitAt
+                        let go = can && v.translation.width >= commitAt
                             && NWDestination.isHorizontal(dx: Double(v.translation.width), dy: Double(v.translation.height))
                         passed = false
                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { drag = 0 }
@@ -349,7 +353,7 @@ struct NWUndoableRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("\(row.summary), \(row.projectName), undoable"))
-        .accessibilityAction(named: Text("Approve")) { onApprove() }
+        .accessibilityActions { if can { Button("Approve") { onApprove() } } }
         .accessibilityAction(named: Text("Open")) { onOpen() }
     }
 

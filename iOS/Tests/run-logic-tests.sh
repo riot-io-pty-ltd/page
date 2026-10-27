@@ -8,4 +8,5 @@ trap 'rm -rf "$out"' EXIT
 # Top-level test code must live in a file called main.swift.
 cp "$here/LogicTests.swift" "$out/main.swift"
 swiftc -swift-version 5 -o "$out/page-logic-tests" "$here"/../Page/Models/*.swift "$out/main.swift"
-"$out/page-logic-tests"
+# The source-scanning tests read the app and widget sources from here.
+PAGE_IOS_ROOT="$(cd "$here/.." && pwd)" "$out/page-logic-tests"
