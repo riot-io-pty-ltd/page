@@ -133,8 +133,9 @@ public enum WidgetDisplay {
     /// until the whole stack fits `room`. A decision always keeps at least one row; working keeps at least
     /// one while any decision leaves room for it.
     ///
-    /// `room` is what is left in the 364x382 large widget (350 inside the margins) after the headline
-    /// (46), the footer (two lines, 28) and the 10-point gaps between blocks.
+    /// `room` is what is left of the large widget's inner height (350 in the 364x382 widget, 313 in the
+    /// 329x345 one, inside 16-point margins) after the headline (46), the footer (two lines, 28) and the
+    /// 10-point gaps between blocks: `LargeLayout.room(forInnerHeight:)`.
     public static func largeRows(decisions: Int, inFlight: Int, moreDecisions: Bool = false, moreWorking: Bool = false,
                                  room: Double = LargeLayout.room) -> (decisions: Int, inFlight: Int) {
         var d = min(decisions, 4)
@@ -167,7 +168,13 @@ public enum WidgetDisplay {
         /// "+N more" and the gap above it.
         public static let more = 20.0
         public static let gap = 10.0
+        /// The headline block, the footer, and the four 10-point gaps around the blocks and the spacer.
+        public static let chrome = 46.0 + 28.0 + 4 * gap
+        /// What the 364x382 widget leaves (350 inside).
         public static let room = 236.0
+
+        /// Pure. The room the rows have in a large widget whose content area is `height` points tall.
+        public static func room(forInnerHeight height: Double) -> Double { max(0, height - chrome) }
     }
 
     // MARK: - Usage

@@ -1,21 +1,231 @@
-// Generates the macOS app icon as an .iconset directory.
-// Run from the repo root:  swift Tools/MakeIcon.swift
+// Generates Page's macOS app icon: the pulse orb with its rings, on a
+// macOS-grid plate. Run from the repo root:  swift Tools/MakeIcon.swift
 //
-// Produces Resources/AppIcon.iconset/ with every size the iconset format
-// requires. Pair with `iconutil -c icns Resources/AppIcon.iconset` to make
-// the final .icns that goes into the .app bundle.
+// Writes:
+//   Resources/AppIcon-master-1024.png   the 1024 px master
+//   Resources/AppIcon.iconset/          every size the iconset format needs
+//   .build/AppIcon.xcassets/            the same PNGs as a macOS asset catalog
+//
+// build.sh, when this file is newer than Resources/AppIcon.icns, runs it, then
+// `iconutil` (iconset -> AppIcon.icns) and, when full Xcode is there, `actool`
+// (asset catalog -> Resources/Assets.car). Both outputs are committed.
+//
+// Why both: macOS 26 draws an .icns-only icon shrunk onto a grey backing
+// plate at small sizes (the widget gallery, Finder list view, Spotlight);
+// an icon from an asset catalog (CFBundleIconName) is drawn as is. The .icns
+// stays as the CFBundleIconFile fallback for older systems.
+//
+// macOS icons carry their own shape, unlike iOS, where the system masks a
+// full-bleed square. Big Sur grid on a 1024 canvas: an 824 x 824
+// continuous-corner plate (corner radius 185.4) centred with 100 pt margins,
+// and a soft drop shadow kept inside the canvas. The iOS icon
+// (iOS/Page/Assets.xcassets) stays full-bleed and is not made here.
+//
+// Small sizes get their own art: at 16 px the rings turn to mush, so only the
+// orb is drawn; at 32 px one heavier ring; at 64 px both rings, heavier.
 
 import AppKit
 import CoreGraphics
 import Foundation
+import SwiftUI
 
-let outDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-    .appendingPathComponent("Resources/AppIcon.iconset")
-try? FileManager.default.removeItem(at: outDir)
-try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+let iconsetDir = root.appendingPathComponent("Resources/AppIcon.iconset")
+let masterURL = root.appendingPathComponent("Resources/AppIcon-master-1024.png")
 
-// Apple's iconset naming convention. Each tuple = (filename, pixel size).
-let variants: [(String, CGFloat)] = [
+// MARK: palette (Night Watch, Sources/ClaudePowerMode/UI/Theme.swift)
+
+func rgb(_ hex: UInt32, _ alpha: CGFloat = 1) -> CGColor {
+    CGColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255, green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255, alpha: alpha)
+}
+
+let teal = 0x5EEAD4 as UInt32      // NightWatch.Palette.teal
+let sky = 0x38BDF8 as UInt32       // NightWatch.Palette.sky
+let space = CGColorSpace(name: CGColorSpace.sRGB)!
+
+func gradient(_ stops: [(CGFloat, CGColor)]) -> CGGradient {
+    CGGradient(colorsSpace: space, colors: stops.map(\.1) as CFArray, locations: stops.map(\.0))!
+}
+
+// MARK: geometry (all in 1024-unit canvas space, y up)
+
+let canvas: CGFloat = 1024
+let plateRect = CGRect(x: 100, y: 100, width: 824, height: 824)
+let plateRadius: CGFloat = 185.4
+let centre = CGPoint(x: 512, y: 512)
+
+/// Apple's continuous-corner rounded rect (the same curve SwiftUI and the
+/// system use for app icons), not a circular-arc rounded rect.
+func platePath(inset: CGFloat = 0) -> CGPath {
+    let r = plateRect.insetBy(dx: inset, dy: inset)
+    return RoundedRectangle(cornerRadius: plateRadius - inset, style: .continuous).path(in: r).cgPath
+}
+
+func circle(_ c: CGPoint, _ r: CGFloat) -> CGRect {
+    CGRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2)
+}
+
+// MARK: level of detail
+
+struct Detail {
+    var orbRadius: CGFloat
+    /// (radius, stroke width, colour, alpha) for each ring, inner first.
+    var rings: [(CGFloat, CGFloat, UInt32, CGFloat)]
+    var halo: Bool
+    var shadow: Bool
+    var rim: Bool
+
+    /// Widths are in canvas units; at small sizes they are set so a ring is
+    /// at least ~1.3 px wide and lands as a clean line rather than a smear.
+    static func forPixels(_ px: Int) -> Detail {
+        switch px {
+        case ...16:
+            return Detail(orbRadius: 232, rings: [], halo: true, shadow: false, rim: false)
+        case ...32:
+            return Detail(orbRadius: 200, rings: [(318, 46, teal, 0.80)],
+                          halo: true, shadow: true, rim: false)
+        case ...64:
+            return Detail(orbRadius: 190, rings: [(266, 24, sky, 0.85), (336, 22, teal, 0.66)],
+                          halo: true, shadow: true, rim: true)
+        default:
+            return Detail(orbRadius: 180, rings: [(254, 13, sky, 0.85), (322, 11, teal, 0.62)],
+                          halo: true, shadow: true, rim: true)
+        }
+    }
+}
+
+// MARK: drawing
+
+func draw(in ctx: CGContext, detail d: Detail) {
+    let plate = platePath()
+
+    // 1. Drop shadow, inside the canvas (Big Sur template: y 10 down, blur ~20).
+    if d.shadow {
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -10), blur: 22, color: rgb(0x000000, 0.32))
+        ctx.addPath(plate)
+        ctx.setFillColor(rgb(0x05070D))
+        ctx.fillPath()
+        ctx.restoreGState()
+    }
+
+    ctx.saveGState()
+    ctx.addPath(plate)
+    ctx.clip()
+
+    // 2. Plate: Night Watch ink, lit from the top.
+    ctx.drawLinearGradient(
+        gradient([(0, rgb(0x1B2A35)), (0.45, rgb(0x0D151D)), (1, rgb(0x05070D))]),
+        start: CGPoint(x: 0, y: plateRect.maxY), end: CGPoint(x: 0, y: plateRect.minY), options: [])
+
+    // 3. Aurora: a teal bloom behind the orb, pooling slightly upward.
+    if d.halo {
+        ctx.drawRadialGradient(
+            gradient([(0, rgb(teal, 0.30)), (0.45, rgb(0x1BA8B8, 0.12)), (1, rgb(0x0B1B24, 0))]),
+            startCenter: CGPoint(x: 512, y: 530), startRadius: 0,
+            endCenter: CGPoint(x: 512, y: 530), endRadius: 430, options: [])
+    }
+
+    // 4. Rings: the pulse, brighter at the top where the plate is lit.
+    for (radius, width, hex, alpha) in d.rings {
+        ctx.saveGState()
+        ctx.addEllipse(in: circle(centre, radius))
+        ctx.setLineWidth(width)
+        ctx.replacePathWithStrokedPath()
+        ctx.clip()
+        ctx.drawLinearGradient(
+            gradient([(0, rgb(hex, alpha)), (1, rgb(hex, alpha * 0.55))]),
+            start: CGPoint(x: 0, y: centre.y + radius), end: CGPoint(x: 0, y: centre.y - radius),
+            options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        ctx.restoreGState()
+    }
+
+    // 5. Orb glow: a clean cyan falloff around the orb.
+    let orb = circle(centre, d.orbRadius)
+    ctx.drawRadialGradient(
+        gradient([(0, rgb(0x4FE3E0, 0.55)), (0.35, rgb(sky, 0.20)), (1, rgb(sky, 0))]),
+        startCenter: centre, startRadius: d.orbRadius * 0.95,
+        endCenter: centre, endRadius: d.orbRadius * 1.6, options: [])
+
+    // 6. Orb body: mint at the lit top-left, teal, then sky at the rim.
+    ctx.saveGState()
+    ctx.addEllipse(in: orb)
+    ctx.clip()
+    let lit = CGPoint(x: centre.x - d.orbRadius * 0.30, y: centre.y + d.orbRadius * 0.34)
+    ctx.drawRadialGradient(
+        gradient([(0, rgb(0xE8FFFA)), (0.28, rgb(0x9AF2E4)), (0.62, rgb(0x4FD3EA)), (1, rgb(0x1E9BE0))]),
+        startCenter: lit, startRadius: 0, endCenter: centre, endRadius: d.orbRadius, options: [.drawsAfterEndLocation])
+    // Bottom bounce light, so the orb reads as glass rather than a flat disc.
+    ctx.drawRadialGradient(
+        gradient([(0, rgb(0xB8FFF4, 0.24)), (1, rgb(0xB8FFF4, 0))]),
+        startCenter: CGPoint(x: centre.x + d.orbRadius * 0.12, y: centre.y - d.orbRadius * 1.05), startRadius: 0,
+        endCenter: CGPoint(x: centre.x + d.orbRadius * 0.12, y: centre.y - d.orbRadius * 1.05),
+        endRadius: d.orbRadius * 0.7, options: [])
+    ctx.restoreGState()
+
+    // 7. Specular highlight: a soft oval up and to the left.
+    let hi = CGPoint(x: centre.x - d.orbRadius * 0.36, y: centre.y + d.orbRadius * 0.44)
+    ctx.saveGState()
+    ctx.translateBy(x: hi.x, y: hi.y)
+    ctx.rotate(by: .pi / 5)
+    ctx.scaleBy(x: 1, y: 0.68)
+    ctx.drawRadialGradient(
+        gradient([(0, rgb(0xFFFFFF, 0.85)), (0.5, rgb(0xFFFFFF, 0.35)), (1, rgb(0xFFFFFF, 0))]),
+        startCenter: .zero, startRadius: 0, endCenter: .zero, endRadius: d.orbRadius * 0.42, options: [])
+    ctx.restoreGState()
+
+    // 8. Top sheen across the plate.
+    ctx.drawLinearGradient(
+        gradient([(0, rgb(0xFFFFFF, 0.07)), (1, rgb(0xFFFFFF, 0))]),
+        start: CGPoint(x: 0, y: plateRect.maxY), end: CGPoint(x: 0, y: plateRect.midY + 60), options: [])
+
+    // 9. Hairline rim: light along the top edge, a faint glass glow along the bottom.
+    if d.rim {
+        ctx.saveGState()
+        ctx.addPath(plate)
+        ctx.setLineWidth(5)
+        ctx.replacePathWithStrokedPath()
+        ctx.clip()
+        ctx.drawLinearGradient(
+            gradient([(0, rgb(0xFFFFFF, 0.22)), (0.5, rgb(0xFFFFFF, 0.05)), (1, rgb(0x5FD0C8, 0.16))]),
+            start: CGPoint(x: 0, y: plateRect.maxY), end: CGPoint(x: 0, y: plateRect.minY), options: [])
+        ctx.restoreGState()
+    }
+
+    ctx.restoreGState()
+}
+
+func render(pixels: Int) -> Data {
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 32
+    ) else { fatalError("Failed to create bitmap rep") }
+    rep.size = NSSize(width: pixels, height: pixels)
+
+    NSGraphicsContext.saveGraphicsState()
+    let gc = NSGraphicsContext(bitmapImageRep: rep)!
+    NSGraphicsContext.current = gc
+    let ctx = gc.cgContext
+    ctx.clear(CGRect(x: 0, y: 0, width: pixels, height: pixels))
+    ctx.interpolationQuality = .high
+    ctx.setShouldAntialias(true)
+    ctx.scaleBy(x: CGFloat(pixels) / canvas, y: CGFloat(pixels) / canvas)
+    draw(in: ctx, detail: .forPixels(pixels))
+    NSGraphicsContext.restoreGraphicsState()
+
+    guard let srgb = rep.retagging(with: .sRGB),
+          let png = srgb.representation(using: .png, properties: [:]) else {
+        fatalError("Failed to encode PNG")
+    }
+    return png
+}
+
+// MARK: output
+
+// Apple's iconset naming. Each entry = (filename, pixel size).
+let variants: [(String, Int)] = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),
     ("icon_32x32.png", 32),
@@ -28,133 +238,38 @@ let variants: [(String, CGFloat)] = [
     ("icon_512x512@2x.png", 1024)
 ]
 
-func renderIcon(size: CGFloat) -> Data {
-    let pixels = Int(size)
-    guard let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: pixels,
-        pixelsHigh: pixels,
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 32
-    ) else { fatalError("Failed to create bitmap rep") }
-    rep.size = NSSize(width: size, height: size)
+try? FileManager.default.removeItem(at: iconsetDir)
+try FileManager.default.createDirectory(at: iconsetDir, withIntermediateDirectories: true)
 
-    NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let ctx = NSGraphicsContext.current!.cgContext
-
-    // 1. Squircle background with vertical gradient (Anthropic-ish coral)
-    let cornerRadius = size * 0.2237
-    let bgRect = NSRect(x: 0, y: 0, width: size, height: size)
-    let bgPath = NSBezierPath(roundedRect: bgRect, xRadius: cornerRadius, yRadius: cornerRadius)
-
-    let topColor = NSColor(red: 0.96, green: 0.65, blue: 0.51, alpha: 1.0).cgColor
-    let bottomColor = NSColor(red: 0.72, green: 0.27, blue: 0.16, alpha: 1.0).cgColor
-    let gradient = CGGradient(
-        colorsSpace: CGColorSpaceCreateDeviceRGB(),
-        colors: [topColor, bottomColor] as CFArray,
-        locations: [0, 1]
-    )!
-    ctx.saveGState()
-    bgPath.addClip()
-    ctx.drawLinearGradient(
-        gradient,
-        start: CGPoint(x: 0, y: size),
-        end: CGPoint(x: 0, y: 0),
-        options: []
-    )
-
-    // Subtle inner highlight at the top
-    let highlight = CGGradient(
-        colorsSpace: CGColorSpaceCreateDeviceRGB(),
-        colors: [
-            NSColor(white: 1, alpha: 0.18).cgColor,
-            NSColor(white: 1, alpha: 0).cgColor
-        ] as CFArray,
-        locations: [0, 1]
-    )!
-    ctx.drawLinearGradient(
-        highlight,
-        start: CGPoint(x: 0, y: size),
-        end: CGPoint(x: 0, y: size * 0.55),
-        options: []
-    )
-    ctx.restoreGState()
-
-    // 2. Battery body (white stroked rounded rect)
-    let batWidth = size * 0.58
-    let batHeight = size * 0.34
-    let batX = (size - batWidth) / 2 - size * 0.015
-    let batY = (size - batHeight) / 2
-    let batRect = NSRect(x: batX, y: batY, width: batWidth, height: batHeight)
-    let batRadius = size * 0.045
-    let batPath = NSBezierPath(roundedRect: batRect, xRadius: batRadius, yRadius: batRadius)
-    let strokeWidth = size * 0.028
-    batPath.lineWidth = strokeWidth
-    NSColor.white.setStroke()
-    batPath.stroke()
-
-    // Battery terminal nub
-    let nubWidth = size * 0.028
-    let nubHeight = batHeight * 0.45
-    let nubX = batX + batWidth + size * 0.008
-    let nubY = batY + (batHeight - nubHeight) / 2
-    let nubRect = NSRect(x: nubX, y: nubY, width: nubWidth, height: nubHeight)
-    let nubRadius = nubWidth / 2.5
-    let nubPath = NSBezierPath(roundedRect: nubRect, xRadius: nubRadius, yRadius: nubRadius)
-    NSColor.white.setFill()
-    nubPath.fill()
-
-    // 3. Lightning bolt cutting through the battery
-    // Coordinates expressed as fractions of icon size, then scaled.
-    let cx = size * 0.49
-    let cy = size * 0.50
-    let bw = size * 0.13
-    let bh = size * 0.30
-    let bolt = NSBezierPath()
-    bolt.move(to: NSPoint(x: cx + bw * 0.15, y: cy + bh * 0.95))
-    bolt.line(to: NSPoint(x: cx - bw * 0.85, y: cy - bh * 0.05))
-    bolt.line(to: NSPoint(x: cx - bw * 0.05, y: cy - bh * 0.05))
-    bolt.line(to: NSPoint(x: cx - bw * 0.25, y: cy - bh * 0.95))
-    bolt.line(to: NSPoint(x: cx + bw * 0.85, y: cy + bh * 0.05))
-    bolt.line(to: NSPoint(x: cx + bw * 0.05, y: cy + bh * 0.05))
-    bolt.close()
-
-    // Glow underneath the bolt for extra punch
-    ctx.saveGState()
-    ctx.setShadow(
-        offset: .zero,
-        blur: size * 0.04,
-        color: NSColor(red: 1.0, green: 0.85, blue: 0.3, alpha: 0.7).cgColor
-    )
-    NSColor(red: 1.0, green: 0.93, blue: 0.45, alpha: 1.0).setFill()
-    bolt.fill()
-    ctx.restoreGState()
-
-    // Crisp white outline on top
-    NSColor(white: 1, alpha: 0.85).setStroke()
-    bolt.lineWidth = size * 0.012
-    bolt.stroke()
-
-    NSGraphicsContext.restoreGraphicsState()
-
-    guard let png = rep.representation(using: .png, properties: [:]) else {
-        fatalError("Failed to encode PNG")
-    }
-    return png
+var rendered: [Int: Data] = [:]
+for (filename, px) in variants {
+    let data = rendered[px] ?? render(pixels: px)
+    rendered[px] = data
+    try data.write(to: iconsetDir.appendingPathComponent(filename))
+    print("wrote \(filename) (\(px)px)")
 }
+try rendered[1024]!.write(to: masterURL)
+print("wrote \(masterURL.lastPathComponent)")
 
-for (filename, pixelSize) in variants {
-    let data = renderIcon(size: pixelSize)
-    let url = outDir.appendingPathComponent(filename)
-    try data.write(to: url)
-    print("wrote \(filename) (\(Int(pixelSize))px)")
+// Asset catalog for actool: the same files, described by a Contents.json.
+let catalogDir = root.appendingPathComponent(".build/AppIcon.xcassets")
+let appIconSet = catalogDir.appendingPathComponent("AppIcon.appiconset")
+try? FileManager.default.removeItem(at: catalogDir)
+try FileManager.default.createDirectory(at: appIconSet, withIntermediateDirectories: true)
+var images: [[String: String]] = []
+for (filename, px) in variants {
+    try rendered[px]!.write(to: appIconSet.appendingPathComponent(filename))
+    let points = filename.dropFirst("icon_".count).prefix { $0 != "x" }
+    images.append(["filename": filename, "idiom": "mac", "size": "\(points)x\(points)",
+                   "scale": filename.contains("@2x") ? "2x" : "1x"])
 }
+let info = ["author": "xcode", "version": 1] as [String: Any]
+func writeJSON(_ object: Any, to url: URL) throws {
+    try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]).write(to: url)
+}
+try writeJSON(["info": info], to: catalogDir.appendingPathComponent("Contents.json"))
+try writeJSON(["images": images, "info": info], to: appIconSet.appendingPathComponent("Contents.json"))
+print("wrote \(catalogDir.path)")
 
-print("\niconset ready at \(outDir.path)")
-print("next:  iconutil -c icns \(outDir.path) -o Resources/AppIcon.icns")
+print("\niconset ready at \(iconsetDir.path)")
+print("next:  iconutil -c icns \(iconsetDir.path) -o Resources/AppIcon.icns")

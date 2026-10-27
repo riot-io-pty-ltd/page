@@ -82,12 +82,40 @@ struct PageStatusWidget: Widget {
     }
 }
 
+/// How the system is drawing this widget: the desktop dims and tints widgets while another app is in
+/// front (accented or vibrant), and then colour must not carry meaning.
+struct FaceModeReader<Content: View>: View {
+    let content: (WidgetFaceMode) -> Content
+
+    var body: some View {
+        if #available(macOS 13.0, *) {
+            ModernFaceModeReader(content: content)
+        } else {
+            content(.fullColor)
+        }
+    }
+}
+
+@available(macOS 13.0, *)
+private struct ModernFaceModeReader<Content: View>: View {
+    @Environment(\.widgetRenderingMode) private var renderingMode
+    @Environment(\.showsWidgetContainerBackground) private var showsBackground
+    let content: (WidgetFaceMode) -> Content
+
+    var body: some View {
+        content(WidgetFaceMode.resolve(isFullColor: renderingMode == .fullColor, showsContainerBackground: showsBackground))
+            .modifier(WidgetSafeInset())
+    }
+}
+
 struct PageStatusEntryView: View {
     let entry: SnapshotEntry
     @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        PageStatusWidgetView(snapshot: entry.snapshot, size: size, now: entry.date)
+        FaceModeReader { mode in
+            PageStatusWidgetView(snapshot: entry.snapshot, size: size, now: entry.date, mode: mode)
+        }
     }
 
     private var size: WidgetFaceSize {
@@ -120,6 +148,9 @@ struct ClaudeUsageEntryView: View {
     @Environment(\.widgetFamily) private var family
 
     var body: some View {
-        ClaudeUsageWidgetView(snapshot: entry.snapshot, size: family == .systemMedium ? .medium : .small, now: entry.date)
+        FaceModeReader { mode in
+            ClaudeUsageWidgetView(snapshot: entry.snapshot, size: family == .systemMedium ? .medium : .small,
+                                  now: entry.date, mode: mode)
+        }
     }
 }

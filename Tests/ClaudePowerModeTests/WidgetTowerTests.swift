@@ -140,14 +140,47 @@ final class WidgetLargeAndPageTests: XCTestCase {
             if d > 0 && f > 0 { t += L.gap }
             return t
         }
-        for d in 0...6 { for f in 0...6 {
-            let rows = WidgetDisplay.largeRows(decisions: d, inFlight: f)
-            XCTAssertLessThanOrEqual(rows.decisions, d)
-            XCTAssertLessThanOrEqual(rows.inFlight, f)
-            if d > 0 { XCTAssertGreaterThanOrEqual(rows.decisions, 1, "a waiting decision always shows") }
-            XCTAssertLessThanOrEqual(cost(rows.decisions, rows.inFlight, moreD: d > rows.decisions, moreF: f > rows.inFlight),
-                                     WidgetDisplay.LargeLayout.room + WidgetDisplay.LargeLayout.row, "\(d) decisions, \(f) working")
-        } }
+        // The desktop's two large widgets: 364x382 and, on a smaller display, 329x345, each inside 16-point margins.
+        for inner in [350.0, 313.0] {
+            let room = WidgetDisplay.LargeLayout.room(forInnerHeight: inner)
+            for d in 0...6 { for f in 0...6 {
+                let rows = WidgetDisplay.largeRows(decisions: d, inFlight: f, room: room)
+                XCTAssertLessThanOrEqual(rows.decisions, d)
+                XCTAssertLessThanOrEqual(rows.inFlight, f)
+                if d > 0 { XCTAssertGreaterThanOrEqual(rows.decisions, 1, "a waiting decision always shows") }
+                let c = cost(rows.decisions, rows.inFlight, moreD: d > rows.decisions, moreF: f > rows.inFlight)
+                // Over the room only when the one forced row (a waiting decision) does not fit at all.
+                if rows.decisions + rows.inFlight > 1 {
+                    XCTAssertLessThanOrEqual(c, room, "\(d) decisions, \(f) working in \(inner)pt")
+                }
+            } }
+        }
+    }
+
+    func testLargeRoomIsWhatTheInnerHeightLeaves() {
+        XCTAssertEqual(WidgetDisplay.LargeLayout.room(forInnerHeight: 350), WidgetDisplay.LargeLayout.room, "the 364x382 widget")
+        XCTAssertEqual(WidgetDisplay.LargeLayout.room(forInnerHeight: 313), 199, "the 329x345 widget")
+        XCTAssertEqual(WidgetDisplay.LargeLayout.room(forInnerHeight: 40), 0, "never negative")
+        // The smaller widget shows fewer rows than the bigger one for the same snapshot.
+        let big = WidgetDisplay.largeRows(decisions: 3, inFlight: 3, room: WidgetDisplay.LargeLayout.room(forInnerHeight: 350))
+        let small = WidgetDisplay.largeRows(decisions: 3, inFlight: 3, room: WidgetDisplay.LargeLayout.room(forInnerHeight: 313))
+        XCTAssertLessThan(small.decisions + small.inFlight, big.decisions + big.inFlight)
+    }
+
+    func testTheSafeInsetOnlyAddsWhatTheSystemMarginLacks() {
+        XCTAssertEqual(WidgetInset.extra(systemMargin: 16), 0, "a normal system margin is never doubled")
+        XCTAssertEqual(WidgetInset.extra(systemMargin: WidgetInset.minimum), 0)
+        XCTAssertEqual(WidgetInset.extra(systemMargin: 0), WidgetInset.minimum, "no margin at all: the whole minimum")
+        XCTAssertEqual(WidgetInset.extra(systemMargin: 4), WidgetInset.minimum - 4)
+        XCTAssertEqual(WidgetInset.extra(systemMargin: -3), WidgetInset.minimum, "a nonsense margin counts as none")
+    }
+
+    func testTheDimmedDesktopDrawsInTheVibrantInk() {
+        XCTAssertEqual(WidgetFaceMode.resolve(isFullColor: true, showsContainerBackground: true), .fullColor)
+        XCTAssertEqual(WidgetFaceMode.resolve(isFullColor: false, showsContainerBackground: true), .vibrant, "accented or vibrant")
+        XCTAssertEqual(WidgetFaceMode.resolve(isFullColor: true, showsContainerBackground: false), .vibrant,
+                       "no backdrop of ours behind white text")
+        XCTAssertEqual(WidgetFaceMode.resolve(isFullColor: false, showsContainerBackground: false), .vibrant)
     }
 
     func testLargeKeepsEverythingWhenItFits() {

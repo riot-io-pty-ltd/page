@@ -87,6 +87,89 @@ extension RenderSurfaces {
             .background(NWBackdrop())
             out.append(Surface(name: String(format: "widgets-faces-%02d", index + 1), width: 800, view: AnyView(sheet)))
         }
+
+        out += widgetFitSurfaces(now: now, tz: tz, states: states())
+        return out
+    }
+
+    /// Overflow check at the real desktop sizes. Each face is drawn inside its content rectangle (the cyan
+    /// outline) and NOT clipped, so anything that would be cut off by the widget's edge sits outside the
+    /// outline here. Vibrant sheets simulate the dimmed desktop: system grey backdrop, colour flattened.
+    @MainActor
+    static func widgetFitSurfaces(now: Date, tz: TimeZone, states: [(String, WidgetSnapshot?)]) -> [Surface] {
+        var out: [Surface] = []
+        let picks = ["needs you", "many", "busy (overflow case)", "working", "quiet", "paused for battery", "stale", "no snapshot yet"]
+        func widget<Content: View>(_ w: CGFloat, _ h: CGFloat, margin: CGFloat, tone: WidgetTone, glow: Double, vibrant: Bool,
+                                   caption: String, @ViewBuilder _ content: () -> Content) -> some View {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack(alignment: .topLeading) {
+                    Group {
+                        if vibrant {
+                            LinearGradient(colors: [Color(white: 0.34), Color(white: 0.22)], startPoint: .top, endPoint: .bottom)
+                        } else {
+                            WidgetBackdrop(tone: tone, glow: glow)
+                        }
+                    }
+                    .frame(width: w, height: h)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    content()
+                        .padding(margin)
+                        .frame(width: w, height: h, alignment: .topLeading)
+                        .saturation(vibrant ? 0 : 1)
+                    Rectangle().strokeBorder(Color.cyan.opacity(0.55), lineWidth: 1)
+                        .frame(width: w - margin * 2, height: h - margin * 2)
+                        .offset(x: margin, y: margin)
+                    RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.white.opacity(0.25), lineWidth: 1)
+                        .frame(width: w, height: h)
+                }
+                .frame(width: w, height: h, alignment: .topLeading)
+                Text(caption).font(Font.system(size: 11, weight: .medium)).foregroundColor(.white.opacity(0.55))
+            }
+        }
+        var index = 0
+        for vibrant in [false, true] {
+            for margin in [CGFloat(16), 12] where !(vibrant && margin == 12) {
+                for label in picks {
+                    guard let entry = states.first(where: { $0.0 == label }) else { continue }
+                    if margin == 12 && label != "needs you" && label != "many" && label != "stale" { continue }
+                    let snapshot = entry.1
+                    let tone = WidgetDisplay.tone(snapshot, now: now)
+                    let glow = snapshot?.glowIntensity ?? 0
+                    let mode: WidgetFaceMode = vibrant ? .vibrant : .fullColor
+                    func page(_ size: WidgetFaceSize, _ w: CGFloat, _ h: CGFloat) -> some View {
+                        widget(w, h, margin: margin, tone: tone, glow: glow, vibrant: vibrant,
+                               caption: "Page \(size.title) \(Int(w))x\(Int(h))") {
+                            PageStatusWidgetView(snapshot: snapshot, size: size, now: now, timeZone: tz, interactive: false, mode: mode)
+                        }
+                    }
+                    func usage(_ size: WidgetFaceSize, _ w: CGFloat, _ h: CGFloat) -> some View {
+                        widget(w, h, margin: margin, tone: tone, glow: glow, vibrant: vibrant,
+                               caption: "Usage \(size.title) \(Int(w))x\(Int(h))") {
+                            ClaudeUsageWidgetView(snapshot: snapshot, size: size, now: now, timeZone: tz, mode: mode)
+                        }
+                    }
+                    let sheet = VStack(alignment: .leading, spacing: 14) {
+                        Text("FIT · \(label.uppercased()) · \(vibrant ? "VIBRANT" : "FULL COLOUR") · MARGIN \(Int(margin))")
+                            .font(Font.system(size: 11, weight: .heavy)).foregroundColor(.white.opacity(0.6))
+                        HStack(alignment: .top, spacing: 16) {
+                            page(.small, 170, 170); page(.small, 158, 158); page(.medium, 364, 170); page(.medium, 329, 155)
+                        }
+                        HStack(alignment: .top, spacing: 16) {
+                            usage(.small, 170, 170); usage(.small, 158, 158); usage(.medium, 364, 170); usage(.medium, 329, 155)
+                        }
+                        HStack(alignment: .top, spacing: 16) {
+                            page(.large, 364, 382); page(.large, 329, 345)
+                        }
+                    }
+                    .padding(24)
+                    .background(NWBackdrop())
+                    index += 1
+                    out.append(Surface(name: String(format: "widgets-fit-%02d-", index) + label.prefix(while: { $0 != " " }) +
+                                       (vibrant ? "-vibrant" : "") + (margin == 12 ? "-m12" : ""),
+                                       width: 1140, view: AnyView(sheet)))
+                }
+            }
+        }
         return out
     }
 }

@@ -30,12 +30,23 @@ DISPLAY_NAME="Page"
 SWIFT_TARGET="ClaudePowerMode"
 ICONSET="Resources/AppIcon.iconset"
 ICNS="Resources/AppIcon.icns"
+ICON_CAR="Resources/Assets.car"
 
 # Regenerate the icon if any source piece is newer than the .icns
 if [[ ! -f "$ICNS" ]] || [[ "Tools/MakeIcon.swift" -nt "$ICNS" ]]; then
     echo "==> Regenerating app icon"
     swift Tools/MakeIcon.swift >/dev/null
     iconutil -c icns "$ICONSET" -o "$ICNS"
+    # macOS 26 shows an .icns-only icon on a grey plate at small sizes; an
+    # asset-catalog icon (CFBundleIconName) is drawn as is. actool needs full
+    # Xcode — without it the committed Assets.car is kept.
+    if xcrun --find actool >/dev/null 2>&1; then
+        rm -rf .build/appicon && mkdir -p .build/appicon
+        xcrun actool .build/AppIcon.xcassets --compile .build/appicon --platform macosx \
+            --minimum-deployment-target 12.0 --app-icon AppIcon \
+            --output-partial-info-plist .build/appicon/partial.plist >/dev/null
+        cp .build/appicon/Assets.car "$ICON_CAR"
+    fi
 fi
 
 echo "==> swift build -c $CONFIG"
@@ -121,6 +132,7 @@ rm -rf "./$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_PATH" "$APP/Contents/MacOS/$BUNDLE_NAME"
 cp "$ICNS" "$APP/Contents/Resources/AppIcon.icns"
+if [[ -f "$ICON_CAR" ]]; then cp "$ICON_CAR" "$APP/Contents/Resources/Assets.car"; fi
 
 # Claude Code / Codex hook scripts. "Phone approvals…" in the app writes
 # hook entries that point at these copies, so they ship inside the bundle.
@@ -154,6 +166,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>
     <string>$DISPLAY_NAME</string>
     <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
     <string>AppIcon</string>
     <key>CFBundleVersion</key>
     <string>$BUILD_NUMBER</string>
