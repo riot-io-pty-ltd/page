@@ -63,6 +63,10 @@ struct SessionRoomContainer: View {
             }
         }
         .preferredColorScheme(.dark)
+        // Set before the sheets below, so a page or agent that covers the room
+        // holds the room's ribbon still while the sheet itself keeps animating.
+        // Backgrounding is already handled inside `NWAnimated`.
+        .environment(\.nwAnimationsPaused, agent != nil || presentedPage != nil)
         .onAppear {
             if let live { snapshot = live }
             requestChanges()

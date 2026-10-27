@@ -19,7 +19,7 @@ enum RenderHarness {
         "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
         "decision-failed",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
-        "sky", "sky-selected", "sky-empty", "sky-problem", "lanes", "lanes-standby",
+        "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
         "tower", "tower-budget", "tower-glow",
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
@@ -89,13 +89,14 @@ enum RenderFixtures {
         }
     }
 
+    private static func s(_ id: String, _ title: String, _ project: String, _ state: LiveSessionState, host: String = "cmux",
+                          ago: TimeInterval, preview: String = "", iv: String? = nil, canType: Bool = true) -> LiveSession {
+        LiveSession(id: id, backend: AgentBackend(wire: "claude"), title: title, cwd: "~/projects/\(project)", state: state,
+                    host: host, canType: canType, typeBlocker: nil, canInterrupt: true, provider: "anthropic",
+                    lastActivityAt: now.addingTimeInterval(-ago), interventionId: iv, preview: preview)
+    }
+
     static var sessions: [LiveSession] {
-        func s(_ id: String, _ title: String, _ project: String, _ state: LiveSessionState, host: String = "cmux",
-               ago: TimeInterval, preview: String = "", iv: String? = nil, canType: Bool = true) -> LiveSession {
-            LiveSession(id: id, backend: AgentBackend(wire: "claude"), title: title, cwd: "~/projects/\(project)", state: state,
-                        host: host, canType: canType, typeBlocker: nil, canInterrupt: true, provider: "anthropic",
-                        lastActivityAt: now.addingTimeInterval(-ago), interventionId: iv, preview: preview)
-        }
         return [
             s("sess-p1", "builds", "bottle-flip", .waitingOnApproval, ago: 240, preview: "rm -rf Builds/Dev/*.app", iv: "p1"),
             s("sess-p2", "SessionsView", "page", .waitingOnApproval, ago: 40, preview: "swift test", iv: "p2"),
@@ -106,6 +107,21 @@ enum RenderFixtures {
             s("w3", "flash", "sate-t", .active, host: "tmux", ago: 70, preview: "esptool write"),
             s("w4", "charges", "payments-api", .idle, ago: 3_000),
             s("w5", "web", "bottle-flip", .active, host: "Ghostty", ago: 31, preview: "npm run build"),
+        ]
+    }
+
+    /// A full sky: 17 sessions over 11 projects, long names, several that need you, one stuck.
+    /// The sky must label every constellation without a label touching another label or a star.
+    static var crowdedSessions: [LiveSession] {
+        sessions + [
+            s("c1", "deploy", "relay-worker-edge-router-service", .waitingOnApproval, ago: 90, preview: "wrangler deploy --env production"),
+            s("c2", "tests", "relay-worker-edge-router-service", .active, ago: 12, preview: "vitest"),
+            s("c3", "audit", "a-very-long-project-name-for-the-fleet-dashboard", .active, ago: 25, preview: "npm audit"),
+            s("c4", "migrate", "a-very-long-project-name-for-the-fleet-dashboard", .waitingOnApproval, ago: 200, preview: "psql -f migrate.sql"),
+            s("c5", "widgets", "ios-widgets", .active, ago: 40, preview: "xcodebuild"),
+            s("c6", "notes", "docs-site", .idle, ago: 1_800),
+            s("c7", "scratch", "x", .active, ago: 15, preview: "ls"),
+            s("c8", "lint", "mac-on-claude-code", .active, ago: 8, preview: "swiftlint"),
         ]
     }
 
@@ -395,7 +411,7 @@ struct HarnessShell: View {
     }
 
     private var skyData: SkyScreenData {
-        let list = screen == "sky-empty" ? [] : RenderFixtures.sessions
+        let list = screen == "sky-empty" ? [] : (screen == "sky-crowded" ? RenderFixtures.crowdedSessions : RenderFixtures.sessions)
         let sky = RenderFixtures.sky(sessions: list, paused: false)
         var d = SkyScreenData(sky: sky, lanes: LanesModel.build(sky: sky, log: RenderFixtures.activity, now: RenderFixtures.now),
                               mode: mode, now: RenderFixtures.now, standby: screen == "lanes-standby" ? RenderFixtures.macRows : [], selectedStar: selected)

@@ -117,7 +117,10 @@ struct NWSkyScreen: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
-                    ForEach(data.sky.constellations) { c in constellation(c, in: geo.size) }
+                    let skySize = SkySize(width: Double(geo.size.width), height: Double(geo.size.height))
+                    let points = SkyModel.starPoints(data.sky.constellations, in: skySize)
+                    let labels = SkyModel.labelLayout(data.sky.constellations, in: skySize)
+                    ForEach(data.sky.constellations) { c in constellation(c, in: geo.size, points: points, labels: labels) }
                     moon.position(x: geo.size.width - 64, y: 34)
                     if let id = data.selectedStar, let star = star(id) { tooltip(star).position(x: geo.size.width / 2, y: geo.size.height - 150) }
                 }
@@ -129,6 +132,8 @@ struct NWSkyScreen: View {
                 NWTonightCard(rings: data.sky.rings)
                 Spacer().frame(height: 96)
             }
+            // The label layout reserves a fixed height for the card (SkyModel.labelBottomReserve).
+            .dynamicTypeSize(...DynamicTypeSize.large)
             .padding(.horizontal, NightWatch.Space.gutter)
             .opacity(data.selectedStar == nil ? 1 : 0)
         }
@@ -136,10 +141,11 @@ struct NWSkyScreen: View {
 
     private func star(_ id: String) -> SkyStar? { data.sky.constellations.flatMap(\.stars).first { $0.id == id } }
 
-    private func constellation(_ c: Constellation, in size: CGSize) -> some View {
-        // The sky area is the space above the Tonight card.
-        let h = size.height * 0.58, topPad: CGFloat = 54
-        func pt(_ s: SkyStar) -> CGPoint { CGPoint(x: s.x * size.width, y: topPad + s.y * h) }
+    private func constellation(_ c: Constellation, in size: CGSize, points: [String: SkyPoint], labels: [SkyLabelPlacement]) -> some View {
+        func pt(_ s: SkyStar) -> CGPoint {
+            let p = points[s.id] ?? SkyModel.starPoint(s, in: SkySize(width: Double(size.width), height: Double(size.height)))
+            return CGPoint(x: p.x, y: p.y)
+        }
         return ZStack {
             Path { p in
                 for l in c.links where l.count == 2 && c.stars.indices.contains(l[0]) && c.stars.indices.contains(l[1]) {
@@ -147,30 +153,42 @@ struct NWSkyScreen: View {
                 }
             }
             .stroke(c.hue.color.opacity(0.32).color, lineWidth: 1)
-            let labelW = CGFloat(c.name.count) * 9 + 28
-            Text(c.name.uppercased())
-                .font(NightWatch.Typo.label).kerning(1)
-                .foregroundColor((c.urgentState == .needsYou ? NightWatch.Palette.amber : c.hue.color).color)
-                .lineLimit(1).fixedSize()
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(Capsule().fill(Color.black.opacity(0.28)))
-                .position(x: min(max(c.labelX * size.width, labelW / 2 + 8), size.width - labelW / 2 - 8), y: topPad + c.labelY * h)
-                .accessibilityAddTraits(.isHeader)
+            // Where each label sits is decided once, for the whole sky, so none lands on another or on a star.
+            if let l = labels.first(where: { $0.kind == .project && $0.id == c.key }) {
+                Text(l.text)
+                    .font(NightWatch.Typo.label).kerning(1)
+                    .foregroundColor((c.urgentState == .needsYou ? NightWatch.Palette.amber : c.hue.color).color)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                    .frame(width: CGFloat(l.rect.width), height: CGFloat(l.rect.height))
+                    .background(Capsule().fill(Color.black.opacity(0.28)))
+                    .dynamicTypeSize(...DynamicTypeSize.large)
+                    .position(x: CGFloat(l.rect.midX), y: CGFloat(l.rect.midY))
+                    .allowsHitTesting(false)
+                    .accessibilityAddTraits(.isHeader)
+            }
             ForEach(Array(c.stars.enumerated()), id: \.element.id) { i, s in
-                // Only the stars that matter carry a label (what needs you, what is stuck); the rest
-                // say what they are when tapped, so labels never pile up.
-                Button { actions.select(data.selectedStar == s.id ? nil : s.id) } label: {
-                    starView(s, flip: s.x > 0.55, labelled: s.state == .needsYou || s.state == .stuck)
-                }
+                Button { actions.select(data.selectedStar == s.id ? nil : s.id) } label: { starView(s) }
                     .buttonStyle(.plain)
                     .position(pt(s))
                     .accessibilityLabel(Text("\(s.title), \(c.name), \(s.state.label.lowercased())"))
                     .accessibilityHint(Text("Shows details"))
+                // Only the stars that matter carry a caption (what needs you, what is stuck); the rest
+                // say what they are when tapped, so labels never pile up.
+                if let l = labels.first(where: { $0.kind == .caption && $0.id == s.id }) {
+                    Text(l.text).font(NightWatch.Typo.monoMicro)
+                        .foregroundColor(NightWatch.Palette.textSecondary.opacity(0.8).color)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                        .frame(width: CGFloat(l.rect.width), height: CGFloat(l.rect.height), alignment: CGFloat(l.rect.midX) < pt(s).x ? .trailing : .leading)
+                        .dynamicTypeSize(...DynamicTypeSize.large)
+                        .position(x: CGFloat(l.rect.midX), y: CGFloat(l.rect.midY))
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
             }
         }
     }
 
-    @ViewBuilder private func starView(_ s: SkyStar, flip: Bool, labelled: Bool) -> some View {
+    @ViewBuilder private func starView(_ s: SkyStar) -> some View {
         let color = s.state.color
         let size: CGFloat = s.state == .needsYou ? 38 : 28
         ZStack {
@@ -197,14 +215,6 @@ struct NWSkyScreen: View {
                     NWStarGlyph(seed: s.seed, color: color, size: size, brightness: s.brightness * twinkle * (s.state == .paused ? 0.6 : 1))
                 }
             }
-            if labelled, !s.lastAction.isEmpty {
-                // Labels sit on the side with room: left of the stars on the right half of the sky.
-                let text = SkyModel.clip(s.lastAction, 12)
-                Text(text).font(NightWatch.Typo.monoMicro)
-                    .foregroundColor(NightWatch.Palette.textSecondary.opacity(0.8).color)
-                    .lineLimit(1).fixedSize()
-                    .offset(x: (size * 0.5 + 6 + CGFloat(text.count) * 3.1) * (flip ? -1 : 1), y: 0)
-            }
         }
         .frame(width: 56, height: 56)
         .contentShape(Rectangle())
@@ -230,6 +240,8 @@ struct NWSkyScreen: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // The label layout keeps a fixed 140 x 52 pt corner clear for it.
+        .dynamicTypeSize(...DynamicTypeSize.large)
         .accessibilityLabel(Text("\(data.sky.macName), battery \(data.sky.moon.percent), \(data.sky.moon.detail)"))
         .accessibilityHint(Text("Opens the Tower at Power"))
     }

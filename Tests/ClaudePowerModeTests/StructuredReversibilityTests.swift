@@ -123,7 +123,7 @@ final class StructuredReversibilityTests: XCTestCase {
         XCTAssertEqual(bash("cdk --version").level, .undoable)
         // Other infra queries are unchanged.
         XCTAssertEqual(bash("kubectl get pods").level, .undoable)
-        XCTAssertEqual(bash("terraform plan").level, .undoable)
+        XCTAssertEqual(bash("terraform plan").level, .considered)
     }
 
     // MARK: the fallback on display text
@@ -168,12 +168,96 @@ final class StructuredReversibilityTests: XCTestCase {
 
     func testHookFormattedPagesNeverReadAsUndoable() {
         // hooks/page-notify.sh writes "$ " + the command clipped at 1200 characters
-        // with "…", then "\n# " + the description. The "$ " prefix is not the
-        // "[Tool]" form, so the text is unknown and stays considered.
+        // with "…", then "\n# " + the description. Only the "$ " line is judged and
+        // the text is never undoable; a visibly irreversible command is irreversible.
         let clipped = "$ ls " + String(repeating: "a", count: 1195) + "…\n# List"
         XCTAssertEqual(Reversibility.classify(context: clipped, cwd: cwd).level, .considered)
         XCTAssertEqual(Reversibility.classify(context: "$ ls\n# List", cwd: cwd).level, .considered)
-        XCTAssertEqual(Reversibility.classify(context: "$ rm -rf build\n# Clean", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ rm -rf build\n# Clean", cwd: cwd).level, .irreversible)
+    }
+
+    func testHookPageDescriptionsNeverDecideTheVerdict() {
+        // The "# " line is what the model says the command does. A frightening description
+        // does not make a harmless command dangerous (it stays considered, never undoable), and
+        // a benign one does not make a dangerous command safe.
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\n# rm -rf /", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\n# Mycli wipe", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ rm -rf x\n# List", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ rm -rf x\n# Delete build output", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ git push --force origin main\n# push", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ terraform apply\n# a", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ swift test\n# Run tests", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ ls", cwd: cwd).level, .considered, "a lone command line is still a page's text")
+    }
+
+    func testHookPagesWithMoreThanOneCommandLineAreConsidered() {
+        // The description and the activity tail are not command lines.
+        let desc = Reversibility.classify(context: "$ ls\n# a\n# b", cwd: cwd)
+        XCTAssertEqual(desc.level, .considered)
+        XCTAssertEqual(desc.reason, "a hook page's command isn't confirmed")
+        // A command that spans lines is judged whole, and is never undoable.
+        let many = Reversibility.classify(context: "$ ls\nls -la\n# a", cwd: cwd)
+        XCTAssertEqual(many.level, .considered)
+        XCTAssertTrue(many.reason.contains("more than one line"), many.reason)
+        XCTAssertEqual(Reversibility.classify(context: "$ echo hi\nrm -rf ~", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\n$ rm -rf ~\n# x", cwd: cwd).level, .irreversible)
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\r\nrm -rf ~\r\n# x", cwd: cwd).level, .irreversible)
+        // A recent-activity tail after the description: still a page, still considered, never read as commands.
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\n# List\n\n— recent activity —\n[Bash] ls", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ ls\n# List\n\n— recent activity —\n[Bash] rm -rf x", cwd: cwd).level, .considered)
+        // A long tail does not make a complete command "cut short".
+        let tail = "$ ls\n# List\n\n— recent activity —\n" + String(repeating: "x", count: 1500)
+        XCTAssertEqual(Reversibility.classify(context: tail, cwd: cwd).reason, "a hook page's command isn't confirmed")
+        // Only the description line ends the command: a line after a "# " line is not judged.
+        XCTAssertNotEqual(Reversibility.classify(context: "$ ls\n# Delete\nrm -rf x", cwd: cwd).level, .undoable)
+    }
+
+    func testNoHookTextIsEverUndoable() {
+        let commands = ["ls", "swift test", "git status", "cat README.md", "pwd", "rm -rf build", "echo hi", "(no command)", "",
+                        "ls " + String(repeating: "a", count: 1195) + "…", "ls [redacted]", "ls \\\n-la", "git diff"]
+        let descriptions = ["", "# List", "# rm -rf /", "# a\n# b", "# List\n\n— recent activity —\n[Bash] ls\n" + String(repeating: "t", count: 1500)]
+        let seps = ["\n", "\r\n", "\n$ ", "\r\n$ ", "\n\n", "\r"]
+        let prefixes = ["$ ", "$ \n", "$  ", "  $ ", "\n$ ", "$\t", "＄ ", "# $ ", "#\n$ ", "\u{2028}$ ", "\u{85}$ "]
+        var texts: [String] = []
+        for p in prefixes { for c in commands { for d in descriptions { for sep in seps {
+            texts.append(p + c + (d.isEmpty ? "" : sep + d))
+        } } } }
+        texts += ["$ ls\n$ ls\n$ ls", "$ ls\r\n$ pwd", "$ " + String(repeating: "ls; ", count: 400), "[redacted", "$ [redacted]", "$ ls\u{2029}pwd"]
+        XCTAssertGreaterThan(texts.count, 200)
+        for t in texts {
+            XCTAssertNotEqual(Reversibility.classify(context: t, cwd: cwd).level, .undoable, t)
+        }
+    }
+
+    func testHookPageCommandsThatAreClippedHiddenOrLongAreConsidered() {
+        let cut = Reversibility.classify(context: "$ ls …\n# x", cwd: cwd)
+        XCTAssertEqual(cut.level, .considered)
+        XCTAssertEqual(cut.reason, "the command was cut short")
+        let clipped = "$ ls " + String(repeating: "a", count: 1195) + "…\n# List"
+        XCTAssertEqual(Reversibility.classify(context: clipped, cwd: cwd).level, .considered)
+        // At the length limit with no visible marker: the command may run past what is shown.
+        let full = "$ ls" + String(repeating: " ", count: InterventionDetector.contextLimit) + "\n# List"
+        let longVerdict = Reversibility.classify(context: full, cwd: cwd)
+        XCTAssertEqual(longVerdict.level, .considered)
+        XCTAssertEqual(longVerdict.reason, "the command was cut short")
+        let hidden = Reversibility.classify(context: "$ ls [redacted]\n# x", cwd: cwd)
+        XCTAssertEqual(hidden.level, .considered)
+        XCTAssertEqual(hidden.reason, "part of the command was hidden")
+        // A clipped command that is irreversible on what is visible stays irreversible.
+        XCTAssertEqual(Reversibility.classify(context: "$ rm -rf build …\n# x", cwd: cwd).level, .irreversible)
+    }
+
+    func testHookPagesWithoutACommandAreConsidered() {
+        XCTAssertEqual(Reversibility.classify(context: "$ \n# List", cwd: cwd).level, .considered)
+        XCTAssertEqual(Reversibility.classify(context: "$ (no command)\n# List", cwd: cwd).level, .considered)
+    }
+
+    func testTofuPulumiAndTerraformPlansAreConsideredThroughTheCall() {
+        XCTAssertEqual(bash("tofu validate").level, .considered)
+        XCTAssertEqual(bash("pulumi preview", description: "Preview the stack").level, .considered)
+        XCTAssertEqual(bash("terraform plan -destroy").level, .considered)
+        XCTAssertEqual(bash("terraform version").level, .undoable)
+        XCTAssertEqual(bash("pulumi whoami").level, .undoable)
     }
 
     // MARK: detection: the verdict comes from the call, and sits on the event

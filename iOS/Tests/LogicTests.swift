@@ -1055,7 +1055,7 @@ do {
         ("[Bash] pushd /tmp/x", .considered),
         ("[Bash] terraform fmt", .considered),
         ("[Bash] terraform fmt -check", .undoable),
-        ("[Bash] terraform plan", .undoable),
+        ("[Bash] terraform plan", .considered),
         ("[Bash] terraform plan -out=plan.bin", .considered),
         ("[Bash] terraform -chdir=/tmp/x validate", .considered),
         ("[Bash] aws s3 ls", .undoable),
@@ -1122,11 +1122,84 @@ do {
         ("[Bash] git cat-file --filters HEAD:x", .considered),
         ("[Bash] git verify-commit HEAD", .considered),
         ("[Bash] git log --show-signature", .considered),
+        // terraform, tofu and pulumi: only a version, help, format check or whoami is a query.
+        ("[Bash] terraform plan -destroy", .considered),
+        ("[Bash] tofu plan", .considered),
+        ("[Bash] tofu validate", .considered),
+        ("[Bash] terraform validate", .considered),
+        ("[Bash] terraform show", .considered),
+        ("[Bash] pulumi preview", .considered),
+        ("[Bash] pulumi watch", .irreversible),
+        ("[Bash] pulumi up --yes", .irreversible),
+        ("[Bash] terraform test", .irreversible),
+        ("[Bash] tofu test -filter=x", .irreversible),
+        ("[Bash] terragrunt plan", .considered),
+        ("[Bash] terragrunt run-all plan", .considered),
+        ("[Bash] terragrunt destroy", .irreversible),
+        ("[Bash] terragrunt run-all apply", .irreversible),
+        ("[Bash] cdktf synth", .considered),
+        ("[Bash] cdktf diff", .considered),
+        ("[Bash] cdktf deploy", .irreversible),
+        ("[Bash] cdktf destroy", .irreversible),
+        ("[Bash] npx pulumi up", .irreversible),
+        ("[Bash] npx -y cdktf deploy", .irreversible),
+        ("[Bash] bunx terragrunt apply", .irreversible),
+        ("[Bash] npx pulumi@latest up", .irreversible),
+        ("[Bash] npx pulumi version", .considered),
+        ("[Bash] npx jest", .considered),
+        ("[Bash] terraform version", .undoable),
+        ("[Bash] tofu version -json", .undoable),
+        ("[Bash] pulumi version", .undoable),
+        ("[Bash] pulumi whoami", .undoable),
+        ("[Bash] terraform apply", .irreversible),
+        ("[Bash] pulumi up --preview-only", .irreversible),
+        ("[Bash] terraform -chdir=/x version", .considered),
+        // Hook pages ("$ command" then "# description"): never undoable.
+        ("$ rm -rf build\n# Clean", .irreversible),
+        ("$ rm -rf build", .irreversible),
+        ("$ rm -rf x\n# List", .irreversible),
+        ("$ rm -rf x\n# Delete build output", .irreversible),
+        ("$ rm -rf build …\n# x", .irreversible),
+        ("$ git push --force origin main\n# push", .irreversible),
+        ("$ terraform apply\n# a", .irreversible),
+        ("$ ls\n# List", .considered),
+        ("$ ls", .considered),
+        ("$ swift test\n# Run tests", .considered),
+        ("$ ls\n# rm -rf /", .considered),
+        ("$ ls\n# Mycli wipe", .considered),
+        ("$ ls\n# a\n# b", .considered),
+        ("$ ls\n# Delete\nrm -rf x", .considered),
+        ("$ echo hi\nrm -rf ~", .irreversible),
+        ("$ ls\n$ rm -rf ~", .irreversible),
+        ("$ ls\r\nrm -rf ~\r\n# List", .irreversible),
+        ("$ ls\nls -la\n# List", .considered),
+        ("$ ls\n# List\n\n— recent activity —\n[Bash] rm -rf ~", .considered),
+        ("$ ls\n# List\n\n— recent activity —\n[Bash] ls", .considered),
+        ("$ ls …\n# x", .considered),
+        ("$ ls " + String(repeating: "a", count: 1195) + "…\n# List", .considered),
+        ("$ ls [redacted]\n# x", .considered),
+        ("$ ls" + String(repeating: " ", count: 1500) + "\n# List", .considered),
+        ("$ \n# List", .considered),
+        ("$ (no command)\n# List", .considered),
     ]
     for (ctx, want) in rvTable {
         let got = Reversibility.classify(context: ctx, cwd: rvCwd).level
         check(got == want, "ported Mac row: \(ctx.replacingOccurrences(of: "\n", with: " / ")) wanted \(want), got \(got)")
     }
+
+    // No hook-style text is ever undoable, whatever the command, line endings or tail.
+    let hookCommands = ["ls", "swift test", "git status", "cat README.md", "pwd", "rm -rf build", "echo hi", "(no command)", "",
+                        "ls " + String(repeating: "a", count: 1195) + "…", "ls [redacted]", "ls \\\n-la", "git diff"]
+    let hookDescriptions = ["", "# List", "# rm -rf /", "# a\n# b", "# List\n\n— recent activity —\n[Bash] ls\n" + String(repeating: "t", count: 1500)]
+    let hookSeps = ["\n", "\r\n", "\n$ ", "\r\n$ ", "\n\n", "\r"]
+    let hookPrefixes = ["$ ", "$ \n", "$  ", "  $ ", "\n$ ", "$\t", "＄ ", "# $ ", "#\n$ ", "\u{2028}$ ", "\u{85}$ "]
+    var hookTexts: [String] = ["$ ls\n$ ls\n$ ls", "$ ls\r\n$ pwd", "$ " + String(repeating: "ls; ", count: 400), "[redacted", "$ [redacted]", "$ ls\u{2029}pwd"]
+    for p in hookPrefixes { for c in hookCommands { for d in hookDescriptions { for sep in hookSeps {
+        hookTexts.append(p + c + (d.isEmpty ? "" : sep + d))
+    } } } }
+    check(hookTexts.count > 200, "hook text sweep is wide enough")
+    let undoableHook = hookTexts.filter { Reversibility.classify(context: $0, cwd: rvCwd).level == .undoable }
+    check(undoableHook.isEmpty, "no hook-style text is undoable: \(undoableHook.prefix(3))")
 }
 
 // MARK: - Night Watch (iOS): shared fixtures
@@ -1983,6 +2056,198 @@ do {
     brandNew.record([needs.id: .needsYou], at: nwNow)
     check(LanesModel.build(sky: sky2, log: brandNew, now: nwNow).coverageNote != nil, "a just-started watch says the strip is partial")
     check(LanesModel.build(sky: sky2, log: seen, now: nwNow).groups.first?.rows.first?.id == needs.id, "needs-you row first")
+}
+
+// MARK: - Sky labels: ellipsis, star placement, the label layout
+
+/// What the Sky's labels must never do: overlap each other, cover a star or the moon, or leave the canvas.
+/// Returns what it found (empty when the layout holds).
+func skyLabelProblems(_ placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, avoid: [SkyRect] = []) -> [String] {
+    var out: [String] = []
+    for (i, p) in placed.enumerated() {
+        if !canvas.contains(p.rect) { out.append("\(p.text) leaves the canvas") }
+        for n in nodes {
+            let star = SkyRect(x: n.center.x - n.radius, y: n.center.y - n.radius, width: n.radius * 2, height: n.radius * 2)
+            if p.rect.intersects(star) { out.append("\(p.text) covers \(n.id)") }
+        }
+        for r in avoid where p.rect.intersects(r) { out.append("\(p.text) covers an avoided rect") }
+        for q in placed[(i + 1)...] where p.rect.intersects(q.rect) { out.append("\(p.text) overlaps \(q.text)") }
+    }
+    return out
+}
+
+/// A fleet over named projects: each project gets `perProject` sessions, and every third one is waiting on you,
+/// so the sky has captions as well as names.
+func skyFleet(_ names: [String], perProject: Int) -> [LiveSession] {
+    var out: [LiveSession] = []
+    for (p, name) in names.enumerated() {
+        for k in 0..<perProject {
+            let waiting = (p + k) % 3 == 0
+            out.append(nwSession("s\(p)-\(k)", title: name, state: waiting ? "waitingOnApproval" : "active", cwd: "~/code/\(name)",
+                                 preview: "swift test \(k)", interventionId: waiting ? "i\(p)-\(k)" : nil,
+                                 activeAt: waiting ? nil : nwT0 - 20))
+        }
+    }
+    return out
+}
+
+/// A built sky laid out at a phone size, with what the layout was given: its nodes, its canvas (above the Tonight
+/// card, below the top pad) and the moon it avoids.
+func skyLayoutAt(_ sessions: [LiveSession], width: Double, height: Double)
+    -> (placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, moon: SkyRect) {
+    let size = SkySize(width: width, height: height)
+    let sky = SkyModel.build(sessions: sessions, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    let points = SkyModel.starPoints(sky.constellations, in: size)
+    let nodes = sky.constellations.flatMap(\.stars).map {
+        SkyLabelNode(id: $0.id, center: points[$0.id] ?? SkyModel.starPoint($0, in: size), radius: SkyModel.nodeRadius($0.state))
+    }
+    let bottom = min(SkyModel.labelTopPad + height * SkyModel.labelSkyShare + 6, height - SkyModel.labelBottomReserve)
+    let canvas = SkyRect(x: 8, y: 8, width: max(0, width - 16), height: max(0, bottom - 8))
+    let moon = SkyRect(x: width - 134, y: 8, width: 140, height: 52)
+    return (SkyModel.labelLayout(sky.constellations, in: size), nodes, canvas, moon)
+}
+
+/// Project names that sit nearer to another project's star than to one of their own (measured from the
+/// label's nearest edge), and shortened names that are only the start of another project's name.
+func skyOwnershipProblems(_ sessions: [LiveSession], width: Double, height: Double) -> [String] {
+    let size = SkySize(width: width, height: height)
+    let sky = SkyModel.build(sessions: sessions, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    let points = SkyModel.starPoints(sky.constellations, in: size)
+    let layout = SkyModel.labelLayout(sky.constellations, in: size)
+    func dist(_ p: SkyPoint, _ r: SkyRect) -> Double { hypot(max(r.minX - p.x, 0, p.x - r.maxX), max(r.minY - p.y, 0, p.y - r.maxY)) }
+    var out: [String] = []
+    for l in layout where l.kind == .project {
+        guard let c = sky.constellations.first(where: { $0.key == l.id }) else { continue }
+        let own = c.stars.compactMap { points[$0.id] }.map { dist($0, l.rect) }.min() ?? .infinity
+        let other = sky.constellations.filter { $0.key != c.key }.flatMap(\.stars).compactMap { points[$0.id] }.map { dist($0, l.rect) }.min() ?? .infinity
+        if other < own - 0.5 { out.append("\(l.text) is nearer another project's star (\(Int(other)) < \(Int(own)))") }
+        if l.text.hasSuffix("…") {
+            let stem = String(l.text.dropLast())
+            if sky.constellations.contains(where: { $0.key != c.key && $0.name.uppercased().hasPrefix(stem) }) { out.append("\(l.text) could be another project") }
+        }
+    }
+    return out
+}
+
+/// Stars in one sky that are closer than their two drawings are wide.
+func skyStarOverlaps(_ r: (placed: [SkyLabelPlacement], nodes: [SkyLabelNode], canvas: SkyRect, moon: SkyRect)) -> [String] {
+    var out: [String] = []
+    for (i, a) in r.nodes.enumerated() {
+        for b in r.nodes[(i + 1)...] where hypot(a.center.x - b.center.x, a.center.y - b.center.y) < a.radius + b.radius - 1 {
+            out.append("\(a.id) overlaps \(b.id)")
+        }
+    }
+    return out
+}
+
+do {
+    // Shortening: from the end, at a word edge when that keeps half the room, always with "…" and never a separator before it.
+    check(SkyModel.ellipsize("mac-on-claude-code-extra-long", maxChars: 20) == "mac-on-claude-code…", "ellipsize at a dash")
+    check(SkyModel.ellipsize("rm -rf Builds/Dev/*.app", maxChars: 12) == "rm -rf…", "ellipsize at a space")
+    check(SkyModel.ellipsize("cargo test ×6", maxChars: 12) == "cargo test…", "ellipsize keeps the whole word")
+    check(SkyModel.ellipsize("a very long label here", maxChars: 9) == "a very…", "no space before the dots")
+    check(SkyModel.ellipsize("foo bar", maxChars: 5) == "foo…", "a word edge with room")
+    check(SkyModel.ellipsize("abcdef", maxChars: 3) == "ab…", "no word edge: a hard cut")
+    check(SkyModel.ellipsize("averyveryverylongword", maxChars: 8) == "averyve…", "a long word is cut")
+    check(SkyModel.ellipsize("abc", maxChars: 1) == "…", "one character is only the dots")
+    check(SkyModel.ellipsize("  hi  ", maxChars: 5) == "hi", "fits: trimmed, no dots")
+    check(SkyModel.ellipsize("anything", maxChars: 0) == "", "no room, no text")
+    check(SkyModel.ellipsize("line\nbreak", maxChars: 20) == "line break", "a newline reads as a space")
+    var budgetHolds = true
+    for n in 1...25 {
+        for s in ["mac-on-claude-code-extra-long", "rm -rf Builds/Dev/*.app", "cargo test ×6", "a-b-c-d-e-f-g", "x"] {
+            let t = SkyModel.ellipsize(s, maxChars: n)
+            if t.count > n || t.contains(" …") || t.contains("-…") { budgetHolds = false }
+        }
+    }
+    check(budgetHolds, "ellipsize never runs past its budget or leaves a separator before the dots")
+
+    // Star placement: a short sky squeezes its stars above the Tonight card; a tall one keeps the old spacing.
+    func star(_ y: Double, x: Double = 0.5) -> SkyStar {
+        SkyStar(id: "s", title: "s", state: .working, x: x, y: y, brightness: 1, lastAction: "", interventionId: nil,
+                agent: "Claude", canType: true, seed: 0)
+    }
+    let shortSky = SkySize(width: 393, height: 548)
+    check(SkyModel.starPoint(star(0.94), in: shortSky).y <= shortSky.height - SkyModel.labelBottomReserve - 20 + 1e-6,
+          "a short sky keeps its lowest star above the Tonight card")
+    let tallSky = SkySize(width: 393, height: 740)
+    check(nwNear(SkyModel.starPoint(star(0.94), in: tallSky).y, 54 + 0.94 * 740 * 0.58), "a tall sky keeps the old spacing")
+    check(nwNear(SkyModel.starPoint(star(0.5, x: 0.25), in: tallSky).x, 0.25 * 393), "x runs across the width")
+    check(SkyModel.starPoint(star(0.94), in: shortSky) == SkyModel.starPoint(star(0.94), in: shortSky), "star placement is repeatable")
+    check(SkyModel.nodeRadius(.needsYou) == 22 && SkyModel.nodeRadius(.stuck) == 24 && SkyModel.nodeRadius(.rateLimited) == 14
+          && SkyModel.nodeRadius(.working) == 17 && SkyModel.nodeRadius(.idle) == 17, "node radii")
+
+    // Rectangles: an edge is not an overlap; contains allows rounding.
+    let box = SkyRect(x: 0, y: 0, width: 10, height: 10)
+    check(!box.intersects(SkyRect(x: 10, y: 0, width: 10, height: 10)), "rects that only share an edge do not intersect")
+    check(box.intersects(SkyRect(x: 9.5, y: 9.5, width: 10, height: 10)), "overlapping corners intersect")
+    check(box.contains(box) && !box.contains(SkyRect(x: 1, y: 1, width: 10, height: 10)), "contains: itself yes, an overhang no")
+    check(box.contains(SkyRect(x: 0, y: 0, width: 10 + 1e-10, height: 10)), "contains tolerates rounding")
+
+    // The layout itself, on hand-made nodes.
+    let canvas = SkyRect(x: 8, y: 8, width: 377, height: 600)
+    let near = [SkyLabelNode(id: "a", center: SkyPoint(x: 100, y: 200), radius: 17),
+                SkyLabelNode(id: "b", center: SkyPoint(x: 110, y: 200), radius: 17)]
+    let pair = [SkyLabelRequest(id: "a", kind: .project, text: "PAGE", anchors: ["a"]),
+                SkyLabelRequest(id: "b", kind: .project, text: "BOTTLE-FLIP", anchors: ["b"])]
+    let pairPlaced = SkyModel.layoutLabels(nodes: near, requests: pair, canvas: canvas)
+    check(pairPlaced.map(\.id) == ["a", "b"], "two stars 10 pt apart: both names placed, in request order")
+    check(skyLabelProblems(pairPlaced, nodes: near, canvas: canvas).isEmpty, "two close names overlap nothing: \(skyLabelProblems(pairPlaced, nodes: near, canvas: canvas))")
+    check(SkyModel.layoutLabels(nodes: near, requests: [pair[1], SkyLabelRequest(id: "z", kind: .project, text: "NOWHERE", anchors: ["missing"]), pair[0]],
+                                canvas: canvas).map(\.id) == ["b", "a"], "output follows the request order and drops the unknown star's label")
+    check(SkyModel.layoutLabels(nodes: near, requests: [SkyLabelRequest(id: "z", kind: .project, text: "NOWHERE", anchors: ["missing"])],
+                                canvas: canvas).isEmpty, "a label whose stars are unknown is dropped")
+    check(SkyModel.layoutLabels(nodes: near, requests: pair, canvas: SkyRect(x: 8, y: 8, width: 300, height: 20)).isEmpty,
+          "a canvas too short for any label gives no labels, not overlapping ones")
+    check(SkyModel.layoutLabels(nodes: near, requests: pair, canvas: SkyRect(x: 0, y: 0, width: 0, height: 100)).isEmpty, "a canvas with no width gives nothing")
+    let longName = SkyLabelRequest(id: "long", kind: .project, text: "A-VERY-LONG-PROJECT-NAME-THAT-GOES-ON-AND-ON-FOREVER", anchors: ["a"])
+    let narrow = SkyRect(x: 8, y: 8, width: 304, height: 600)
+    let shortened = SkyModel.layoutLabels(nodes: near, requests: [longName], canvas: narrow)
+    check(shortened.count == 1 && shortened[0].text.hasSuffix("…"), "a name too long for a narrow canvas is shortened with …")
+    check(shortened.allSatisfy { narrow.contains($0.rect) }, "the shortened name stays on the canvas")
+    let deterministic = SkyModel.layoutLabels(nodes: near, requests: pair, canvas: canvas) == pairPlaced
+    check(deterministic, "the same input gives the same rects")
+
+    // A real sky, built as the phone builds it, at phone sizes: no overlaps, nothing on a star or the moon, all on the canvas.
+    let names = ["page", "bottle-flip", "llm-play", "sate-t", "payments", "widget", "dotfiles", "cargo", "notes"]
+    let crowdedNames = ["a-very-long-project-name-that-keeps-going-on-and-on", "llm-play", "page", "sate-t", "mac-on-claude-code",
+                        "ios-widget-kit-experiments", "payments-service-v2", "bottle-flip", "x", "cargo-tools", "dotfiles-and-more-config-stuff"]
+    let fleets: [(String, [LiveSession])] = [
+        ("nine", skyFleet(names, perProject: 2)),
+        ("crowded", skyFleet(crowdedNames, perProject: 2)),
+        ("one long", skyFleet(["a-very-long-project-name-that-keeps-going-on-and-on-and-on"], perProject: 3)),
+    ]
+    let sizes: [(Double, Double)] = [(320, 540), (320, 568), (360, 640), (393, 600), (393, 852), (430, 740), (466, 668)]
+    var layoutProblems: [String] = []
+    for (w, h) in sizes {
+        for (label, fleet) in fleets {
+            let r = skyLayoutAt(fleet, width: w, height: h)
+            let problems = skyLabelProblems(r.placed, nodes: r.nodes, canvas: r.canvas, avoid: [r.moon])
+            if !problems.isEmpty { layoutProblems.append("\(label) \(Int(w))x\(Int(h)): \(problems.prefix(3).joined(separator: "; "))") }
+        }
+    }
+    var ownerProblems: [String] = []
+    var starOverlaps: [String] = []
+    let sevenByThree = skyFleet(["payments-api", "payments-gateway", "payments-worker", "page", "docs-site", "docs-api", "notes"], perProject: 3)
+    for (w, h) in sizes {
+        for (label, fleet) in fleets + [("seven", sevenByThree)] {
+            let owners = skyOwnershipProblems(fleet, width: w, height: h)
+            if !owners.isEmpty { ownerProblems.append("\(label) \(Int(w))x\(Int(h)): \(owners.prefix(2).joined(separator: "; "))") }
+            let overlaps = skyStarOverlaps(skyLayoutAt(fleet, width: w, height: h))
+            if !overlaps.isEmpty { starOverlaps.append("\(label) \(Int(w))x\(Int(h)): \(overlaps.prefix(2).joined(separator: "; "))") }
+        }
+    }
+    check(ownerProblems.isEmpty, "a project's name sits nearer one of its own stars than another project's, and is never a stub of another name: \(ownerProblems.prefix(3))")
+    check(starOverlaps.isEmpty, "stars are kept apart: \(starOverlaps.prefix(3))")
+    check(layoutProblems.isEmpty, "every sky layout keeps its labels apart, off the stars and the moon, on the canvas: \(layoutProblems.prefix(3))")
+    let nine = skyLayoutAt(fleets[0].1, width: 393, height: 852)
+    check(nine.placed.filter { $0.kind == .project }.count == 9, "393 pt, nine projects of two sessions: every name is placed")
+    check(nine.placed.contains { $0.kind == .caption }, "the waiting stars get their captions")
+    check(skyLayoutAt(fleets[1].1, width: 393, height: 852).placed == skyLayoutAt(fleets[1].1, width: 393, height: 852).placed,
+          "a crowded sky lays out the same way twice")
+    let longOnly = skyLayoutAt(fleets[2].1, width: 320, height: 540)
+    check(longOnly.placed.filter { $0.kind == .project }.allSatisfy { $0.text.hasSuffix("…") && $0.rect.width <= 320 - 16 },
+          "a long name is shortened with … and fits a 320 pt screen")
 }
 
 do {

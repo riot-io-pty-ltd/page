@@ -624,7 +624,7 @@ final class ReversibilityTests: XCTestCase {
             (#"[Bash] pushd /tmp/x"#, .considered),
             (#"[Bash] terraform fmt"#, .considered),
             (#"[Bash] terraform fmt -check"#, .undoable),
-            (#"[Bash] terraform plan"#, .undoable),
+            (#"[Bash] terraform plan"#, .considered),
             (#"[Bash] terraform plan -out=plan.bin"#, .considered),
             (#"[Bash] terraform -chdir=/tmp/x validate"#, .considered),
             (#"[Bash] aws s3 ls"#, .undoable),
@@ -646,6 +646,50 @@ final class ReversibilityTests: XCTestCase {
             (#"[Bash] cloc --counted=out ."#, .considered),
             (#"[Bash] diff --paginate a b"#, .considered),
         ])
+    }
+
+    // MARK: terraform, tofu and pulumi run providers or project code unless asked for a query
+
+    func testTerraformTofuAndPulumiOnlyQueriesAreUndoable() {
+        assertLevels([
+            (#"[Bash] terraform plan"#, .considered),
+            (#"[Bash] terraform plan -destroy"#, .considered),
+            (#"[Bash] tofu plan"#, .considered),
+            (#"[Bash] tofu validate"#, .considered),
+            (#"[Bash] terraform validate"#, .considered),
+            (#"[Bash] terraform show"#, .considered),
+            (#"[Bash] pulumi preview"#, .considered),
+            (#"[Bash] pulumi watch"#, .irreversible),
+            (#"[Bash] pulumi up --yes"#, .irreversible),
+            (#"[Bash] terraform test"#, .irreversible),
+            (#"[Bash] tofu test -filter=x"#, .irreversible),
+            (#"[Bash] terragrunt plan"#, .considered),
+            (#"[Bash] terragrunt run-all plan"#, .considered),
+            (#"[Bash] terragrunt destroy"#, .irreversible),
+            (#"[Bash] terragrunt run-all apply"#, .irreversible),
+            (#"[Bash] cdktf synth"#, .considered),
+            (#"[Bash] cdktf diff"#, .considered),
+            (#"[Bash] cdktf deploy"#, .irreversible),
+            (#"[Bash] cdktf destroy"#, .irreversible),
+            (#"[Bash] npx pulumi up"#, .irreversible),
+            (#"[Bash] npx -y cdktf deploy"#, .irreversible),
+            (#"[Bash] bunx terragrunt apply"#, .irreversible),
+            (#"[Bash] npx pulumi@latest up"#, .irreversible),
+            (#"[Bash] npx pulumi version"#, .considered),
+            (#"[Bash] npx jest"#, .considered),
+            (#"[Bash] terraform version"#, .undoable),
+            (#"[Bash] tofu version -json"#, .undoable),
+            (#"[Bash] pulumi version"#, .undoable),
+            (#"[Bash] pulumi whoami"#, .undoable),
+            (#"[Bash] terraform fmt -check"#, .undoable),
+            (#"[Bash] terraform fmt"#, .considered),
+            (#"[Bash] terraform apply"#, .irreversible),
+            (#"[Bash] terraform -chdir=/x version"#, .considered),
+            (#"[Bash] kubectl get pods"#, .undoable),
+            (#"[Bash] helm diff upgrade x"#, .irreversible),
+        ])
+        // `up` is matched as a deploy word first, so `--preview-only` is still at least considered.
+        XCTAssertGreaterThanOrEqual(level("[Bash] pulumi up --preview-only"), .considered)
     }
 
     // MARK: the reviewed bypass list, verbatim
@@ -835,7 +879,7 @@ final class ReversibilityTests: XCTestCase {
             ("[Bash] pushd /tmp/x", .considered),
             ("[Bash] terraform fmt", .considered),
             ("[Bash] terraform fmt -check", .undoable),
-            ("[Bash] terraform plan", .undoable),
+            ("[Bash] terraform plan", .considered),
             ("[Bash] terraform plan -out=plan.bin", .considered),
             ("[Bash] terraform -chdir=/tmp/x validate", .considered),
             ("[Bash] aws s3 ls", .undoable),

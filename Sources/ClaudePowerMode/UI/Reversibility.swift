@@ -94,9 +94,10 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
 
     /// Pure. Classifies what a page's `context` shows. `context` is the text
     /// `InterventionDetector.describeToolUse` writes ("[Bash] cmd\ndescription",
-    /// "[Edit] path ...", "One of these is waiting for approval:\n• ..."), or
-    /// the hook's bare "Claude is waiting for your approval", which says
-    /// nothing about the action and is therefore `.considered`. A page with
+    /// "[Edit] path ...", "One of these is waiting for approval:\n• ..."), the
+    /// hook's "$ cmd\n# description" (see `classifyHookBash`), or the hook's
+    /// bare "Claude is waiting for your approval", which says nothing about
+    /// the action and is therefore `.considered`. A page with
     /// several tool calls takes the worst of them. `cwd` is the session's
     /// project directory, used to tell edits inside it from edits outside.
     ///
@@ -117,6 +118,8 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             guard !entries.isEmpty else { return unknown("no tool call to read") }
             let verdicts = entries.map { classifyEntry($0, cwd: cwd) }
             v = verdicts.dropFirst().reduce(verdicts[0], Verdict.combine)
+        } else if text.hasPrefix("$ ") {
+            v = classifyHookBash(text)
         } else {
             v = classifyEntry(text, cwd: cwd)
         }
@@ -125,6 +128,39 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             v = Verdict(level: .considered, tags: v.tags, reason: "the command was cut short")
         }
         return v
+    }
+
+    /// A page posted by hooks/page-notify.sh shows a Bash call as
+    /// `"$ <command>\n# <description>"` (the command clipped at 1200 characters
+    /// with "…", the whole text redacted), then maybe a "— recent activity —"
+    /// tail. The command is every line from the `$ ` up to the description's
+    /// `# ` line or the tail, so a command that spans lines, or a second `$ `
+    /// line, is judged whole; the description, which the model writes, and the
+    /// tail are ignored. The text can only ever raise the verdict to
+    /// `.irreversible`: it is never `.undoable`, since a hook row is a page to
+    /// answer, not a command to wave through, and a clipped, redacted or longer
+    /// text may hide what runs. A command that is `.irreversible` on its own
+    /// stays so.
+    private static func classifyHookBash(_ text: String) -> Verdict {
+        var head = text.replacingOccurrences(of: "\r\n", with: "\n")
+        // The last marker: a command that quotes the marker must not hide what follows it.
+        if let tail = head.range(of: "\n\n— recent activity —", options: .backwards) { head = String(head[..<tail.lowerBound]) }
+        var lines = head.components(separatedBy: "\n")
+        lines[0] = String(lines[0].dropFirst(2))
+        if let end = lines.indices.dropFirst().first(where: { lines[$0].hasPrefix("# ") || lines[$0] == "#" }) {
+            lines.removeSubrange(end...)
+        }
+        let raw = lines.joined(separator: "\n")
+        let command = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !command.isEmpty, command != "(no command)" else { return unknown("no command shown") }
+        let v = classifyBash(command, depth: 0)
+        guard v.level < .considered else { return v }
+        let why: String
+        if command.hasSuffix("…") || raw.count >= InterventionDetector.contextLimit { why = "the command was cut short" }
+        else if command.contains("[redacted") { why = "part of the command was hidden" }
+        else if command.contains("\n") { why = "more than one line of command" }
+        else { why = "a hook page's command isn't confirmed" }
+        return Verdict(level: .considered, tags: v.tags, reason: why)
     }
 
     /// Pure. Classifies a shell command line the way Claude's Bash tool would
@@ -416,7 +452,7 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
     private static let sqlClients: Set<String> = ["psql", "mysql", "sqlite3", "mongosh", "mongo", "redis-cli", "mariadb", "usql", "dropdb"]
     private static let networkCommands: Set<String> = ["curl", "wget", "ssh", "scp", "rsync", "sftp", "ftp", "nc", "telnet", "ping"]
     private static let infraCLIs: Set<String> = [
-        "aws", "gcloud", "az", "kubectl", "helm", "terraform", "tofu", "pulumi", "heroku", "fly", "flyctl", "vercel",
+        "aws", "gcloud", "az", "kubectl", "helm", "terraform", "tofu", "terragrunt", "pulumi", "cdktf", "heroku", "fly", "flyctl", "vercel",
         "netlify", "wrangler", "firebase", "serverless", "sls", "cdk", "supabase", "railway", "doctl", "gh", "docker",
         "podman", "npm", "yarn", "pnpm", "cargo", "gem", "twine", "bun", "hub", "az", "oc", "eb", "sam", "amplify"
     ]
@@ -523,6 +559,17 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             return considered("runs a script")
         case "python", "python3", "node", "ruby", "perl", "php", "deno":
             return classifyScriptInterpreter(cmd, args)
+        case "npx", "bunx", "pnpx":
+            // `npx pulumi up` runs the CLI it names: judge that, so it is as irreversible as `pulumi up`.
+            // Anything else it runs is a downloaded program, which is not one Page recognises.
+            let named = Array(args.drop(while: { ["-y", "--yes", "-q", "--quiet", "--no-install"].contains($0) }))
+            if let first = named.first, !first.hasPrefix("-") {
+                let tool = first.firstIndex(of: "@").flatMap { $0 == first.startIndex ? nil : String(first[..<$0]) } ?? first
+                if infraCLIs.contains(baseName(tool)) {
+                    let v = classifyInfra(baseName(tool), Array(named.dropFirst()))
+                    return v.level < .considered ? Verdict(level: .considered, tags: v.tags, reason: "\(cmd) may download \(tool)") : v
+                }
+            }
         case "bundle":
             if args.first == "exec", args.count > 1 {
                 return classifySegment(.init(words: Array(args.dropFirst()), writes: false, afterPipe: false, hasHeredoc: false, heredocBodies: []),
@@ -1547,8 +1594,16 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             return Verdict(level: .irreversible, tags: network + [.destructive], reason: "\(cmd) \(subs.first(where: { destructiveWords.contains($0) }) ?? "") changes live systems")
         }
         let apply: Set<String> = ["apply", "up", "push", "replace", "install", "upgrade", "release", "promote", "migrate"]
-        if ["kubectl", "terraform", "tofu", "pulumi", "helm", "oc"].contains(cmd), subs.contains(where: apply.contains) {
+        if ["kubectl", "terraform", "tofu", "terragrunt", "pulumi", "helm", "oc"].contains(cmd), subs.contains(where: apply.contains) {
             return Verdict(level: .irreversible, tags: network + [.destructive], reason: "\(cmd) changes live infrastructure")
+        }
+        // `pulumi watch` keeps deploying to the stack as files change, with no confirmation.
+        if cmd == "pulumi", subs.first == "watch" {
+            return Verdict(level: .irreversible, tags: network + [.destructive], reason: "pulumi watch keeps deploying to live infrastructure")
+        }
+        // `terraform test` applies its plans to real resources unless the providers are mocked.
+        if cmd == "terraform" || cmd == "tofu", subs.first == "test" {
+            return Verdict(level: .irreversible, tags: network + [.destructive], reason: "\(cmd) test creates real resources")
         }
         if cmd == "docker" || cmd == "podman", subs.first == "push" {
             return Verdict(level: .irreversible, tags: network + [.destructive], reason: "pushes an image")
@@ -1556,14 +1611,14 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
         if cmd == "docker" || cmd == "podman", subs.first == "system" || subs.first == "volume" || subs.first == "image", subs.contains("prune") {
             return Verdict(level: .irreversible, tags: network + [.destructive], reason: "prunes containers or images")
         }
-        // The CDK CLI runs the app (`--app`, cdk.json) to synthesize before it diffs, lists or
-        // synthesizes: only asking for its version or help is a query.
-        if cmd == "cdk" {
+        // The CDK CLIs run the app (`--app`, cdk.json) to synthesize before they diff, list or
+        // synthesize: only asking for their version or help is a query.
+        if cmd == "cdk" || cmd == "cdktf" {
             let query: Set<String> = ["--version", "-v", "--help", "-h", "version", "help"]
             if args.allSatisfy({ query.contains($0) }), !args.isEmpty {
-                return Verdict(level: .undoable, tags: [.readOnly], reason: "cdk version")
+                return Verdict(level: .undoable, tags: [.readOnly], reason: "\(cmd) version")
             }
-            return Verdict(level: .considered, tags: network, reason: "cdk \(subs.first ?? "") runs the CDK app".trimmingCharacters(in: .whitespaces))
+            return Verdict(level: .considered, tags: network, reason: "\(cmd) \(subs.first ?? "") runs the CDK app".trimmingCharacters(in: .whitespaces))
         }
         // Options that point a CLI at another config, cluster, host or server (a kubeconfig or
         // docker config can name a program to run) or make it write a file are not a plain query.
@@ -1575,6 +1630,12 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             return Verdict(level: .considered, tags: network, reason: "\(cmd) option points somewhere else or writes a file")
         }
         if let first = subs.first, readOnlySubcommands.contains(first) {
+            // `plan`, `validate`, `show` and `preview` start provider plugins and run project code
+            // (a `data "external"` block, a Pulumi program), like the CDK app above: only asking for
+            // a version or help, a format check or `whoami` is a query.
+            if ["terraform", "tofu", "terragrunt", "pulumi"].contains(cmd), !["version", "help", "fmt", "whoami"].contains(first) {
+                return Verdict(level: .considered, tags: network, reason: "\(cmd) \(first) runs providers or project code")
+            }
             // `terraform fmt` rewrites files unless it only checks.
             if first == "fmt", !(args.contains("-check") || args.contains("-write=false")) {
                 return Verdict(level: .considered, tags: network, reason: "\(cmd) fmt rewrites files")

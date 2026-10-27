@@ -328,8 +328,8 @@ struct WorkflowRun: Equatable, Identifiable, Decodable {
         summary = c.lenientString(.summary).flatMap { $0.isEmpty ? nil : String($0.prefix(300)) }
         status = String((c.lenientString(.status) ?? "running").prefix(20))
         phase = c.lenientString(.phase).flatMap { $0.isEmpty ? nil : String($0.prefix(60)) }
-        done = max(0, (try? c.decodeIfPresent(Int.self, forKey: .done)) ?? 0 ?? 0)
-        total = max(0, (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? 0 ?? 0)
+        done = max(0, (try? c.decodeIfPresent(Int.self, forKey: .done)) ?? 0)
+        total = max(0, (try? c.decodeIfPresent(Int.self, forKey: .total)) ?? 0)
         startedAt = Self.millisDate(c, .startedAt)
         endedAt = Self.millisDate(c, .endedAt)
         tokens = (try? c.decodeIfPresent(Int.self, forKey: .tokens)) ?? nil
