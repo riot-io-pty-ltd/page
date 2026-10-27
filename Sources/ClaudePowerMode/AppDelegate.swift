@@ -164,7 +164,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     /// `page-mac://now`, `page-mac://item/<id>`, `page-mac://widgets`: a click on a widget.
-    /// A route only shows the popover (selecting a row at most) or the Tower; it never answers anything.
+    /// A route only shows the popover (selecting a row at most) or the Tower; it never answers anything,
+    /// and the popover it shows doesn't take the keyboard until it is clicked (any app can open a link).
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             guard let route = WidgetRoute.parse(url) else {
@@ -179,9 +180,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func open(_ route: WidgetRoute) {
         switch route {
         case .now:
-            nowPanel.show()
+            nowPanel.show(takesKeyboard: false)
         case .item(let id):
-            nowPanel.show()
+            nowPanel.show(takesKeyboard: false)
             nowStore.select(id)
         case .widgets:
             showTower(section: .widgets)

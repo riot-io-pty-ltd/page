@@ -199,7 +199,10 @@ final class NowPanelController: NSObject {
         if isShown { close(restoreFocus: true) } else { show() }
     }
 
-    func show() {
+    /// `takesKeyboard: false` is for a show nobody pressed a key for (a `page-mac://`
+    /// link, which any app or web page can open): the panel appears but stays out of
+    /// the keyboard until it is clicked, so typing elsewhere can never land as 1 / Return / Esc.
+    func show(takesKeyboard: Bool = true) {
         guard !isShown else { return }
         let front = NSWorkspace.shared.frontmostApplication
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
@@ -213,7 +216,7 @@ final class NowPanelController: NSObject {
         // the In-flight cards scroll instead of pushing the footer off screen.
         store.bodyBudget = max(320, top - vf.minY - 8 - NWAuroraHeader.headerHeight - NightWatch.Space.panelFooterHeight)
         panel.place(content: host, width: NightWatch.Space.popoverWidth, centerX: centerX, top: top, screen: screen)
-        panel.makeKeyAndOrderFront(nil)
+        if takesKeyboard { panel.makeKeyAndOrderFront(nil) } else { panel.orderFrontRegardless() }
         store.animates = true
         gate.setShown(true)
         installMonitors()
