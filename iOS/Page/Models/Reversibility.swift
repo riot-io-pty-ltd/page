@@ -283,12 +283,18 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
     /// carries on onto the next line.
     private static func endsOpen(_ line: String) -> Bool {
         if line.hasSuffix("\\") || line.contains("<<") { return true }
-        var single = false, double = false, escaped = false
-        for ch in line {
-            if escaped { escaped = false; continue }
-            if ch == "\\" && !single { escaped = true; continue }
-            if ch == "'" && !double { single.toggle() }
+        // `$'...'` is ANSI-C quoting: a backslash inside it takes the next character, even a quote.
+        var single = false, double = false, escaped = false, ansi = false
+        let cs = Array(line)
+        var k = 0
+        while k < cs.count {
+            let ch = cs[k]
+            if escaped { escaped = false; k += 1; continue }
+            if ch == "\\" && (!single || ansi) { escaped = true; k += 1; continue }
+            if ch == "$" && !single && !double && k + 1 < cs.count && cs[k + 1] == "'" { single = true; ansi = true; k += 2; continue }
+            if ch == "'" && !double { single.toggle(); if !single { ansi = false } }
             else if ch == "\"" && !single { double.toggle() }
+            k += 1
         }
         return single || double
     }
@@ -1711,7 +1717,10 @@ enum ShellParse {
         var substitutions: [String]
         /// A heredoc whose body is shell or SQL text for an interpreter.
         var interpreterHeredocBodies: [String]
-        /// A heredoc body with `$(` or a backtick that might run something.
+        /// Something the parser cannot read the way the shell does, so it can
+        /// never be `.undoable`: a heredoc body with `$(` or a backtick, a heredoc
+        /// that never reaches its delimiter line, or an ANSI-C (`$'...'`) or
+        /// locale (`$"..."`) quoted word, whose escapes can spell any command.
         var hasOpaqueHeredoc: Bool
     }
 
@@ -1757,6 +1766,17 @@ enum ShellParse {
             segAfterPipe = nextAfterPipe
         }
 
+        /// The raw text of an ANSI-C string (`$'...'`) whose opening quote is at `start`, and the
+        /// index after its closing quote. A backslash takes the next character, a quote included.
+        func ansiC(from start: Int) -> (String, Int) {
+            var j = start + 1
+            var inner = ""
+            while j < n, chars[j] != "'" {
+                if chars[j] == "\\", j + 1 < n { inner.append(chars[j]); inner.append(chars[j + 1]); j += 2; continue }
+                inner.append(chars[j]); j += 1
+            }
+            return (inner, min(n, j + 1))
+        }
         /// Text between a balanced "(" at `start` and its ")", and the index after it.
         func balanced(from start: Int) -> (String, Int) {
             var depth = 0
@@ -1766,6 +1786,12 @@ enum ShellParse {
             while j < n {
                 let c = chars[j]
                 if c == "\\" && j + 1 < n && !single { inner.append(c); inner.append(chars[j + 1]); j += 2; continue }
+                if c == "$", j + 1 < n, chars[j + 1] == "'", !single, !double { // ANSI-C: a backslash can escape the closing quote
+                    let (text, after) = ansiC(from: j + 1)
+                    inner.append("$'"); inner.append(text); inner.append("'")
+                    j = after
+                    continue
+                }
                 if c == "'" && !double { single.toggle() }
                 else if c == "\"" && !single { double.toggle() }
                 else if !single && !double {
@@ -1786,29 +1812,49 @@ enum ShellParse {
             }
             return (inner, min(n, j + 1))
         }
-        /// The word after a redirect operator. A target that holds `$(`, a backtick
-        /// or `<(` is not read here: it is left for the main loop so the command
-        /// inside is classified (the returned word is then empty).
+        /// The word after a redirect operator, or the delimiter after `<<` / `<<-`, with the
+        /// shell's quote removal applied anywhere in it: `E"OF"`, `'E'OF`, `E\OF` and `"EOF"` all
+        /// read `EOF`, and `x'a b'` or `"a\" b"` stay one word. A `$'...'` or `$"..."` part makes the
+        /// parse opaque. A word that holds `$(`, a backtick or `<(` is not read here: it is left for
+        /// the main loop so the command inside is classified (the returned word is then empty).
         func readTarget(from start: Int) -> (String, Int) {
             var j = start
             while j < n, chars[j] == " " || chars[j] == "\t" { j += 1 }
-            func runsSomething(_ k: Int) -> Bool {
-                chars[k] == "`" || (chars[k] == "$" && k + 1 < n && chars[k + 1] == "(")
-            }
             var word = ""
-            if j < n, chars[j] == "\"" || chars[j] == "'" {
-                let q = chars[j]
-                var k = j + 1
-                var inner = ""
-                while k < n, chars[k] != q { inner.append(chars[k]); k += 1 }
-                if q == "\"", inner.contains("$(") || inner.contains("`") { return ("", j) }
-                return (inner, min(n, k + 1))
-            }
             while j < n, !" \t\n;&|<>()".contains(chars[j]) {
-                if runsSomething(j) { return ("", j) }
-                word.append(chars[j]); j += 1
+                let ch = chars[j]
+                if ch == "\\" {
+                    if j + 1 < n { if chars[j + 1] != "\n" { word.append(chars[j + 1]) }; j += 2 } else { j += 1 }
+                } else if ch == "'" {
+                    j += 1
+                    while j < n, chars[j] != "'" { word.append(chars[j]); j += 1 }
+                    j += 1
+                } else if ch == "\"" {
+                    let open = j
+                    j += 1
+                    while j < n, chars[j] != "\"" {
+                        if chars[j] == "`" || (chars[j] == "$" && j + 1 < n && chars[j + 1] == "(") { return ("", open) }
+                        if chars[j] == "\\", j + 1 < n, "$`\"\\\n".contains(chars[j + 1]) {
+                            if chars[j + 1] != "\n" { word.append(chars[j + 1]) }
+                            j += 2; continue
+                        }
+                        word.append(chars[j]); j += 1
+                    }
+                    j += 1
+                } else if ch == "$", j + 1 < n, chars[j + 1] == "'" { // ANSI-C
+                    opaque = true
+                    let (inner, after) = ansiC(from: j + 1)
+                    word += inner; j = after
+                } else if ch == "$", j + 1 < n, chars[j + 1] == "\"" { // `$"..."`
+                    opaque = true
+                    j += 1
+                } else if ch == "`" || (ch == "$" && j + 1 < n && chars[j + 1] == "(") {
+                    return ("", j)
+                } else {
+                    word.append(ch); j += 1
+                }
             }
-            return (word, j)
+            return (word, min(n, j))
         }
 
         while i < n {
@@ -1819,6 +1865,13 @@ enum ShellParse {
                 if let next { if next != "\n" { cur.append(next); inWord = true }; i += 2 } else { i += 1 }
                 continue
             }
+            if c == "$", next == "'" { // ANSI-C quoting: `$'\x72m'` is `rm`, so the word is opaque
+                inWord = true; opaque = true
+                let (inner, after) = ansiC(from: i + 1)
+                cur += inner; i = after
+                continue
+            }
+            if c == "$", next == "\"" { opaque = true; i += 1; continue } // `$"..."`: the double-quote branch reads the rest
             if c == "'" {
                 inWord = true
                 i += 1
@@ -1876,16 +1929,20 @@ enum ShellParse {
                 // A heredoc body runs to its delimiter line.
                 for delim in pendingDelims {
                     var body: [String] = []
+                    var closed = false
                     while i < n {
                         var line = ""
                         while i < n, chars[i] != "\n" { line.append(chars[i]); i += 1 }
                         i += 1
-                        if line.trimmingCharacters(in: .whitespaces) == delim { break }
+                        if line.trimmingCharacters(in: .whitespaces) == delim { closed = true; break }
                         body.append(line)
                     }
                     let text = body.joined(separator: "\n")
                     segBodies.append(text); bodies.append(text)
                     if text.contains("$(") || text.contains("`") { opaque = true }
+                    // No delimiter line: the shell may read the rest of the input as commands (or the
+                    // delimiter was misread), so the swallowed text is opaque and is judged as commands too.
+                    if !closed { opaque = true; if !text.isEmpty { subs.append(text) } }
                 }
                 pendingDelims = []
                 endSegment(nextAfterPipe: false)
@@ -1926,8 +1983,8 @@ enum ShellParse {
                     if i < n, chars[i] == "-" { i += 1 }
                     let (delim, after) = readTarget(from: i)
                     i = after
-                    // A quoted delimiter (`<<\EOF`, `<<'EOF'`) names the same end line as a bare one.
-                    pendingDelims.append(delim.filter { $0 != "\\" })
+                    // A quoted delimiter (`<<\EOF`, `<<'EOF'`, `<<E"OF"`) names the same end line as a bare one.
+                    pendingDelims.append(delim)
                     heredoc = true
                     continue
                 }

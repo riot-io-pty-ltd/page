@@ -27,7 +27,12 @@ object ShellParse {
         val substitutions: List<String>,
         /** A heredoc whose body is shell or SQL text for an interpreter. */
         val interpreterHeredocBodies: List<String>,
-        /** A heredoc body with `$(` or a backtick that might run something. */
+        /**
+         * Something the parser cannot read the way the shell does, so it can
+         * never be `.undoable`: a heredoc body with `$(` or a backtick, a heredoc
+         * that never reaches its delimiter line, or an ANSI-C (`$'...'`) or
+         * locale (`$"..."`) quoted word, whose escapes can spell any command.
+         */
         val hasOpaqueHeredoc: Boolean,
     )
 
@@ -38,6 +43,9 @@ object ShellParse {
 
     /** The Characters that end a redirect target word: " \t\n;&|<>()". */
     private val targetEnders: Set<String> = " \t\n;&|<>()".map { it.toString() }.toSet()
+
+    /** What a backslash escapes inside double quotes: `$`, a backtick, `"`, `\` and a newline. */
+    private val doubleQuoteEscapable: Set<String> = setOf("$", "`", "\"", "\\", "\n")
 
     fun parse(input: String): Parsed {
         // "\r\n" is one Character to Swift but two bytes to the shell, where the "\n" ends the command.
@@ -77,6 +85,19 @@ object ShellParse {
             segAfterPipe = nextAfterPipe
         }
 
+        /**
+         * The raw text of an ANSI-C string (`$'...'`) whose opening quote is at `start`, and the
+         * index after its closing quote. A backslash takes the next character, a quote included.
+         */
+        fun ansiC(start: Int): Pair<String, Int> {
+            var j = start + 1
+            val inner = StringBuilder()
+            while (j < n && chars[j] != "'") {
+                if (chars[j] == "\\" && j + 1 < n) { inner.append(chars[j]); inner.append(chars[j + 1]); j += 2; continue }
+                inner.append(chars[j]); j += 1
+            }
+            return Pair(inner.toString(), minOf(n, j + 1))
+        }
         /** Text between a balanced "(" at `start` and its ")", and the index after it. */
         fun balanced(start: Int): Pair<String, Int> {
             var depth = 0
@@ -87,6 +108,12 @@ object ShellParse {
             while (j < n) {
                 val c = chars[j]
                 if (c == "\\" && j + 1 < n && !single) { inner.append(c); inner.append(chars[j + 1]); j += 2; continue }
+                if (c == "$" && j + 1 < n && chars[j + 1] == "'" && !single && !double) { // ANSI-C: a backslash can escape the closing quote
+                    val (text, after) = ansiC(j + 1)
+                    inner.append("$'"); inner.append(text); inner.append("'")
+                    j = after
+                    continue
+                }
                 if (c == "'" && !double) single = !single
                 else if (c == "\"" && !single) double = !double
                 else if (!single && !double) {
@@ -108,30 +135,50 @@ object ShellParse {
             return Pair(inner.toString(), minOf(n, j + 1))
         }
         /**
-         * The word after a redirect operator. A target that holds `$(`, a backtick
-         * or `<(` is not read here: it is left for the main loop so the command
-         * inside is classified (the returned word is then empty).
+         * The word after a redirect operator, or the delimiter after `<<` / `<<-`, with the
+         * shell's quote removal applied anywhere in it: `E"OF"`, `'E'OF`, `E\OF` and `"EOF"` all
+         * read `EOF`, and `x'a b'` or `"a\" b"` stay one word. A `$'...'` or `$"..."` part makes the
+         * parse opaque. A word that holds `$(`, a backtick or `<(` is not read here: it is left for
+         * the main loop so the command inside is classified (the returned word is then empty).
          */
         fun readTarget(start: Int): Pair<String, Int> {
             var j = start
             while (j < n && (chars[j] == " " || chars[j] == "\t")) j += 1
-            fun runsSomething(k: Int): Boolean =
-                chars[k] == "`" || (chars[k] == "$" && k + 1 < n && chars[k + 1] == "(")
             val word = StringBuilder()
-            if (j < n && (chars[j] == "\"" || chars[j] == "'")) {
-                val q = chars[j]
-                var k = j + 1
-                val inner = StringBuilder()
-                while (k < n && chars[k] != q) { inner.append(chars[k]); k += 1 }
-                val innerText = inner.toString()
-                if (q == "\"" && (innerText.contains("$(") || innerText.contains("`"))) return Pair("", j)
-                return Pair(innerText, minOf(n, k + 1))
-            }
             while (j < n && chars[j] !in targetEnders) {
-                if (runsSomething(j)) return Pair("", j)
-                word.append(chars[j]); j += 1
+                val ch = chars[j]
+                if (ch == "\\") {
+                    if (j + 1 < n) { if (chars[j + 1] != "\n") word.append(chars[j + 1]); j += 2 } else { j += 1 }
+                } else if (ch == "'") {
+                    j += 1
+                    while (j < n && chars[j] != "'") { word.append(chars[j]); j += 1 }
+                    j += 1
+                } else if (ch == "\"") {
+                    val open = j
+                    j += 1
+                    while (j < n && chars[j] != "\"") {
+                        if (chars[j] == "`" || (chars[j] == "$" && j + 1 < n && chars[j + 1] == "(")) return Pair("", open)
+                        if (chars[j] == "\\" && j + 1 < n && chars[j + 1] in doubleQuoteEscapable) {
+                            if (chars[j + 1] != "\n") word.append(chars[j + 1])
+                            j += 2; continue
+                        }
+                        word.append(chars[j]); j += 1
+                    }
+                    j += 1
+                } else if (ch == "$" && j + 1 < n && chars[j + 1] == "'") { // ANSI-C
+                    opaque = true
+                    val (inner, after) = ansiC(j + 1)
+                    word.append(inner); j = after
+                } else if (ch == "$" && j + 1 < n && chars[j + 1] == "\"") { // `$"..."`
+                    opaque = true
+                    j += 1
+                } else if (ch == "`" || (ch == "$" && j + 1 < n && chars[j + 1] == "(")) {
+                    return Pair("", j)
+                } else {
+                    word.append(ch); j += 1
+                }
             }
-            return Pair(word.toString(), j)
+            return Pair(word.toString(), minOf(n, j))
         }
 
         while (i < n) {
@@ -142,6 +189,13 @@ object ShellParse {
                 if (next != null) { if (next != "\n") { cur.append(next); inWord = true }; i += 2 } else { i += 1 }
                 continue
             }
+            if (c == "$" && next == "'") { // ANSI-C quoting: `$'\x72m'` is `rm`, so the word is opaque
+                inWord = true; opaque = true
+                val (inner, after) = ansiC(i + 1)
+                cur.append(inner); i = after
+                continue
+            }
+            if (c == "$" && next == "\"") { opaque = true; i += 1; continue } // `$"..."`: the double-quote branch reads the rest
             if (c == "'") {
                 inWord = true
                 i += 1
@@ -199,16 +253,20 @@ object ShellParse {
                 // A heredoc body runs to its delimiter line.
                 for (delim in pendingDelims) {
                     val body = ArrayList<String>()
+                    var closed = false
                     while (i < n) {
                         val line = StringBuilder()
                         while (i < n && chars[i] != "\n") { line.append(chars[i]); i += 1 }
                         i += 1
-                        if (Sw.trimWs(line.toString()) == delim) break
+                        if (Sw.trimWs(line.toString()) == delim) { closed = true; break }
                         body.add(line.toString())
                     }
                     val text = body.joinToString("\n")
                     segBodies.add(text); bodies.add(text)
                     if (text.contains("$(") || text.contains("`")) opaque = true
+                    // No delimiter line: the shell may read the rest of the input as commands (or the
+                    // delimiter was misread), so the swallowed text is opaque and is judged as commands too.
+                    if (!closed) { opaque = true; if (text.isNotEmpty()) subs.add(text) }
                 }
                 pendingDelims = ArrayList()
                 endSegment(nextAfterPipe = false)
@@ -249,8 +307,8 @@ object ShellParse {
                     if (i < n && chars[i] == "-") i += 1
                     val (delim, after) = readTarget(i)
                     i = after
-                    // A quoted delimiter (`<<\EOF`, `<<'EOF'`) names the same end line as a bare one.
-                    pendingDelims.add(Sw.chars(delim).filter { it != "\\" }.joinToString(""))
+                    // A quoted delimiter (`<<\EOF`, `<<'EOF'`, `<<E"OF"`) names the same end line as a bare one.
+                    pendingDelims.add(delim)
                     heredoc = true
                     continue
                 }

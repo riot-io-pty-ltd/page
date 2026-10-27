@@ -494,6 +494,54 @@ the action isn't shown at all	<nil>	CONSIDERED		the action isn't shown
 [Bash] echo hi\r\nrm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
 [Bash] ls -la $(rm x)	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
 [Bash] ls -la $(rm x)	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<E"OF"\nhi\nEOF\ngit push --force	/Users/me/proj	IRREVERSIBLE	Read-only|Network/outside repo|Destructive	force-push or remote delete
+[Bash] cat <<E"OF"\nhi\nEOF\ngit push --force	<nil>	IRREVERSIBLE	Read-only|Network/outside repo|Destructive	force-push or remote delete
+[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<E\\OF\nhi\nEOF\nrm -rf y	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<E\\OF\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<"EOF"\nhi\nEOF\nrm -rf y	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<"EOF"\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<-'X'\nhi\nX\nrm -rf y	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<-'X'\nhi\nX\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<'EOF'\nhi\nEOF	/Users/me/proj	CONSIDERED	Read-only	more than one line; a description can't be told from a command
+[Bash] cat <<'EOF'\nhi\nEOF	<nil>	CONSIDERED	Read-only	more than one line; a description can't be told from a command
+[Bash] cat <<EOF\nrm -rf x	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<EOF\nrm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<EOF\nhi	/Users/me/proj	CONSIDERED	Read-only|Runs commands	hi isn't one Page recognises
+[Bash] cat <<EOF\nhi	<nil>	CONSIDERED	Read-only|Runs commands	hi isn't one Page recognises
+[Bash] echo $'\\x72m'	/Users/me/proj	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] echo $'\\x72m'	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] $'\\x72m' -rf x	/Users/me/proj	CONSIDERED	Runs commands	\\x72m isn't one Page recognises
+[Bash] $'\\x72m' -rf x	<nil>	CONSIDERED	Runs commands	\\x72m isn't one Page recognises
+[Bash] $'rm' -rf x	/Users/me/proj	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] $'rm' -rf x	<nil>	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] ls $"a"	/Users/me/proj	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] ls $"a"	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] echo $'a\\'b' ; rm -rf x	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] echo $'a\\'b' ; rm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] ls > $'/tmp/x'	/Users/me/proj	CONSIDERED	Runs commands	writes to a file
+[Bash] ls > $'/tmp/x'	<nil>	CONSIDERED	Runs commands	writes to a file
+[Bash] echo '$'	/Users/me/proj	UNDOABLE	Read-only	read-only command
+[Bash] echo '$'	<nil>	UNDOABLE	Read-only	read-only command
+[Bash] echo "$'x'"	/Users/me/proj	UNDOABLE	Read-only	read-only command
+[Bash] echo "$'x'"	<nil>	UNDOABLE	Read-only	read-only command
+[Bash] cat < x$'a b'; rm -rf x	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < x$'a b'; rm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < x'a b' ; rm -rf x #'	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < x'a b' ; rm -rf x #'	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < "a\\" b" ; rm -rf x ; echo "y"	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < "a\\" b" ; rm -rf x ; echo "y"	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < a\\'b ; rm -rf x #'	/Users/me/proj	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat < a\\'b ; rm -rf x #'	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] ls > x$'y\\'' ; rm -rf x #'	/Users/me/proj	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] ls > x$'y\\'' ; rm -rf x #'	<nil>	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] cat > "a\\" b" ; rm -rf x #"	/Users/me/proj	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] cat > "a\\" b" ; rm -rf x #"	<nil>	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] ls > x\\; rm -rf x	/Users/me/proj	CONSIDERED	Runs commands	writes to a file
+[Bash] ls > x\\; rm -rf x	<nil>	CONSIDERED	Runs commands	writes to a file
 [Bash] pytest /tmp/x.py	/Users/me/proj	CONSIDERED	Runs commands	pytest runs a file outside the project
 [Bash] pytest /tmp/x.py	<nil>	CONSIDERED	Runs commands	pytest runs a file outside the project
 [Bash] python3 -m pytest /tmp/x.py	/Users/me/proj	CONSIDERED	Runs commands	pytest runs a file outside the project
@@ -5042,6 +5090,30 @@ $ \u{301}ls	<nil>	CONSIDERED		the action isn't shown
 [Bash] ls\u{2026}	<nil>	CONSIDERED	Runs commands	ls\u{2026} isn't one Page recognises
 [Bash] ls \u{2026}\u{301}	<nil>	UNDOABLE	Read-only	read-only command
 [Bash] ls \u{2026}	<nil>	CONSIDERED	Read-only	the command was cut short
+[Bash] cat <<E"OF"\nhi\nEOF\ngit push --force	<nil>	IRREVERSIBLE	Read-only|Network/outside repo|Destructive	force-push or remote delete
+[Bash] cat <<E"OF"\nhi	<nil>	CONSIDERED	Read-only|Runs commands	hi isn't one Page recognises
+[Bash] cat <<EOF\nhi\nrm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<E\\OF\nhi\nEOF\nls	<nil>	CONSIDERED	Read-only	more than one line; a description can't be told from a command
+[Bash] cat <<"E\\"OF"\nhi\nE"OF\nrm y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<"$(x)"\nhi\nEOF\nrm y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<'E"'\nhi\nE"\nrm y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<E\\\nOF\nhi\nEOF\nrm y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] echo $'\\x72m'	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] $'\\x72m' -rf x	<nil>	CONSIDERED	Runs commands	\\x72m isn't one Page recognises
+[Bash] $'rm' -rf x	<nil>	IRREVERSIBLE	Runs commands|Destructive	rm deletes files
+[Bash] ls $"a"	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] echo $'a\\'b' ; rm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] ls $(echo $'\\'' ; rm x)	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] ls > $'/tmp/x'	<nil>	CONSIDERED	Runs commands	writes to a file
+[Bash] cat < $'a;b' ; rm -rf x	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] ls >&$'1'	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] ls > $"/dev/null"	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
+[Bash] echo '$' "$'x'"	<nil>	UNDOABLE	Read-only	read-only command
+[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] cat <<$"EOF"\nhi\nEOF\nrm -rf y	<nil>	IRREVERSIBLE	Read-only|Runs commands|Destructive	rm deletes files
+[Bash] echo $	<nil>	UNDOABLE	Read-only	read-only command
+[Bash] echo $'	<nil>	CONSIDERED	Read-only|Runs commands	script passed in as text
  [Bash] LANG=C sort 2> /dev/null sort delete deploy > out.txt less ../x --pager=less\u{85}	<nil>	CONSIDERED	Runs commands	sort --pager runs a program
  [Bash] ! find p destroy --hard FOO=bar `ninja`\r\nbash -print\u{FF0F}\n[redacted]	/Users/me/proj	CONSIDERED	Read-only|Runs commands	runs a script
 [Bash]  rmdir --version list <<EOF\nbody\nEOF\n xcodebuild p ./x command -H x destroy `pwd` > /dev/null tail "rm x" clean src\nList files	/	IRREVERSIBLE	Runs commands|Destructive|Read-only	rmdir deletes files

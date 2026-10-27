@@ -908,6 +908,36 @@ final class ReversibilityTests: XCTestCase {
         assertLevels(toolRows)
     }
 
+    // MARK: quote shapes that hid commands from the parser
+
+    func testHeredocDelimiterQuoteRemovalAndAnsiCAreOpaqueOrSeen() {
+        // The delimiter is read with the shell's full quote removal, so the heredoc ends and `rm` is a command.
+        for cmd in ["cat <<E\"OF\"\nhi\nEOF\nrm x", "cat <<'E'OF\nhi\nEOF\nrm x", "cat <<E\\OF\nhi\nEOF\nrm x", "cat <<-'X'\nhi\nX\nrm x"] {
+            let p = ShellParse.parse(cmd)
+            XCTAssertEqual(p.segments.map(\.words), [["cat"], ["rm", "x"]], cmd)
+            XCTAssertFalse(p.hasOpaqueHeredoc, cmd)
+        }
+        // A heredoc that never reaches its delimiter is opaque, and the swallowed text is judged as commands.
+        let open = ShellParse.parse("cat <<EOF\nhi\nrm -rf x")
+        XCTAssertTrue(open.hasOpaqueHeredoc)
+        XCTAssertEqual(open.substitutions, ["hi\nrm -rf x"])
+        XCTAssertTrue(ShellParse.parse("cat <<E\"OF\"\nhi").hasOpaqueHeredoc)
+        XCTAssertFalse(ShellParse.parse("cat <<'EOF'\nhi\nEOF").hasOpaqueHeredoc)
+        // ANSI-C and locale strings are opaque, wherever they sit.
+        for cmd in ["echo $'\\x72m'", "$'\\x72m' -rf x", "echo $\"a\"", "ls > $'f'", "cat <<$'EOF'\nx\nEOF"] {
+            XCTAssertTrue(ShellParse.parse(cmd).hasOpaqueHeredoc, cmd)
+        }
+        // An escaped quote inside $'...' does not close it, so the `;` still splits the commands.
+        XCTAssertEqual(ShellParse.parse("echo $'a\\'b' ; rm x").segments.map(\.words), [["echo", "a\\'b"], ["rm", "x"]])
+        // Plain quoted dollars are untouched.
+        XCTAssertFalse(ShellParse.parse("echo '$' \"$'x'\"").hasOpaqueHeredoc)
+        // A redirect target is one word after quote removal, so the `;` after it still splits.
+        for cmd in ["cat < x'a b' ; rm x", "cat < \"a\\\" b\" ; rm x", "cat < a\\'b ; rm x"] {
+            XCTAssertEqual(ShellParse.parse(cmd).segments.map(\.words), [["cat"], ["rm", "x"]], cmd)
+        }
+        XCTAssertTrue(ShellParse.parse("cat < x$'a b' ; rm x").hasOpaqueHeredoc)
+    }
+
     // MARK: bypasses found in the sweep, kept closed
 
     func testSweepBypassesStayClassified() {
@@ -918,6 +948,34 @@ final class ReversibilityTests: XCTestCase {
             ("[Bash] cat <<'EOF'\nx\nEOF\nrm -rf y", .irreversible),
             ("[Bash] echo hi\r\nrm -rf x", .irreversible),
             ("[Bash] ls -la $(rm x)", .irreversible),
+            // a partly quoted heredoc delimiter still ends at its line, so the next command is classified
+            ("[Bash] cat <<E\"OF\"\nhi\nEOF\ngit push --force", .irreversible),
+            ("[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y", .irreversible),
+            ("[Bash] cat <<E\\OF\nhi\nEOF\nrm -rf y", .irreversible),
+            ("[Bash] cat <<\"EOF\"\nhi\nEOF\nrm -rf y", .irreversible),
+            ("[Bash] cat <<-'X'\nhi\nX\nrm -rf y", .irreversible),
+            ("[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y", .irreversible),
+            ("[Bash] cat <<'EOF'\nhi\nEOF", .considered),
+            // a heredoc with no delimiter line: the swallowed text is judged as commands too
+            ("[Bash] cat <<EOF\nrm -rf x", .irreversible),
+            ("[Bash] cat <<EOF\nhi", .considered),
+            // ANSI-C and locale quoting: `$'\\x72m'` is `rm`, so such a word is never undoable
+            ("[Bash] echo $'\\x72m'", .considered),
+            ("[Bash] $'\\x72m' -rf x", .considered),
+            ("[Bash] $'rm' -rf x", .irreversible),
+            ("[Bash] ls $\"a\"", .considered),
+            ("[Bash] echo $'a\\'b' ; rm -rf x", .irreversible),
+            ("[Bash] ls > $'/tmp/x'", .considered),
+            ("[Bash] echo '$'", .undoable),
+            ("[Bash] echo \"$'x'\"", .undoable),
+            // a redirect target gets the same quote removal: a quote or escape in it must not swallow the next command
+            ("[Bash] cat < x$'a b'; rm -rf x", .irreversible),
+            ("[Bash] cat < x'a b' ; rm -rf x #'", .irreversible),
+            ("[Bash] cat < \"a\\\" b\" ; rm -rf x ; echo \"y\"", .irreversible),
+            ("[Bash] cat < a\\'b ; rm -rf x #'", .irreversible),
+            ("[Bash] ls > x$'y\\'' ; rm -rf x #'", .irreversible),
+            ("[Bash] cat > \"a\\\" b\" ; rm -rf x #\"", .irreversible),
+            ("[Bash] ls > x\\; rm -rf x", .considered), // writes a file named `x;`; `rm` is an argument to ls
             // runners and linters that load or run the files they are given
             ("[Bash] pytest /tmp/x.py", .considered),
             ("[Bash] python3 -m pytest /tmp/x.py", .considered),

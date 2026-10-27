@@ -45,6 +45,14 @@ let hand: [(String, String?)] = [
     ("[Bash] ls [redacted]", nil), ("[Bash] ls\u{0301}", nil), ("[Bash\u{0301}] ls", nil), ("[Bash]\u{0301} ls", nil),
     ("[Bash] rm\u{0301} -rf x", nil), ("[Bash] r\u{0301}m -rf x", nil), ("$\u{0301} ls", nil), ("$ \u{0301}ls", nil), ("[Bash] ls…", nil),
     ("[Bash] ls …\u{0301}", nil), ("[Bash] ls \u{2026}", nil),
+    // Quote shapes: partly quoted heredoc delimiters, unterminated heredocs, ANSI-C / locale quoting.
+    ("[Bash] cat <<E\"OF\"\nhi\nEOF\ngit push --force", nil), ("[Bash] cat <<E\"OF\"\nhi", nil), ("[Bash] cat <<EOF\nhi\nrm -rf x", nil),
+    ("[Bash] cat <<'E'OF\nhi\nEOF\nrm -rf y", nil), ("[Bash] cat <<E\\OF\nhi\nEOF\nls", nil), ("[Bash] cat <<\"E\\\"OF\"\nhi\nE\"OF\nrm y", nil),
+    ("[Bash] cat <<\"$(x)\"\nhi\nEOF\nrm y", nil), ("[Bash] cat <<'E\"'\nhi\nE\"\nrm y", nil), ("[Bash] cat <<E\\\nOF\nhi\nEOF\nrm y", nil),
+    ("[Bash] echo $'\\x72m'", nil), ("[Bash] $'\\x72m' -rf x", nil), ("[Bash] $'rm' -rf x", nil), ("[Bash] ls $\"a\"", nil),
+    ("[Bash] echo $'a\\'b' ; rm -rf x", nil), ("[Bash] ls $(echo $'\\'' ; rm x)", nil), ("[Bash] ls > $'/tmp/x'", nil),
+    ("[Bash] cat < $'a;b' ; rm -rf x", nil), ("[Bash] ls >&$'1'", nil), ("[Bash] ls > $\"/dev/null\"", nil), ("[Bash] echo '$' \"$'x'\"", nil),
+    ("[Bash] cat <<$'EOF'\nhi\nEOF\nrm -rf y", nil), ("[Bash] cat <<$\"EOF\"\nhi\nEOF\nrm -rf y", nil), ("[Bash] echo $", nil), ("[Bash] echo $'", nil),
 ]
 corpus += hand
 
