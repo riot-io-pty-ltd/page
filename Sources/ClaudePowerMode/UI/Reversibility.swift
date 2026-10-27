@@ -1620,6 +1620,11 @@ enum Reversibility: Int, Comparable, CaseIterable, Equatable, Hashable, Codable 
             }
             return Verdict(level: .considered, tags: network, reason: "\(cmd) \(subs.first ?? "") runs the CDK app".trimmingCharacters(in: .whitespaces))
         }
+        // Terragrunt parses terragrunt.hcl (which can `run_cmd`) and runs its hooks before it
+        // passes any command, even `version` or `fmt`, through to terraform: never a query.
+        if cmd == "terragrunt" {
+            return Verdict(level: .considered, tags: network, reason: "terragrunt runs terragrunt.hcl")
+        }
         // Options that point a CLI at another config, cluster, host or server (a kubeconfig or
         // docker config can name a program to run) or make it write a file are not a plain query.
         let before = Array(args.prefix(while: { $0 != "--" }))
