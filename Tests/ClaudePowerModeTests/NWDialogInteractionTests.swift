@@ -15,7 +15,13 @@ import AppKit
 final class NWDialogInteractionTests: XCTestCase {
     private var windows: [NSWindow] = []
 
-    override func setUp() {
+    /// These put real windows and sheets on screen, so they only run when asked for
+    /// (`PAGE_ONSCREEN_TESTS=1 swift test --filter NWDialogInteractionTests`), never in an
+    /// everyday `swift test` on someone's desktop. The runModal scanner in
+    /// NWDialogRegressionTests always runs and guards the freeze.
+    override func setUpWithError() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["PAGE_ONSCREEN_TESTS"] == "1",
+                          "on-screen dialog tests: set PAGE_ONSCREEN_TESTS=1")
         _ = NSApplication.shared
     }
 
