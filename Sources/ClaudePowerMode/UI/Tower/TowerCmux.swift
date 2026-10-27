@@ -86,7 +86,7 @@ final class TowerCmuxModel: ObservableObject {
     private func render(cliFound: Bool, version: String?, status: CmuxBridge.SocketStatus?) {
         guard cliFound else {
             self.version = Line(text: "cmux: not installed (looked for cmux.app)")
-            mode = Line(text: "Install cmux, or use tmux, Terminal.app or iTerm2 for sessions you want to answer from your phone.")
+            mode = Line(text: "Install cmux, or use tmux or iTerm2 for sessions whose questions you want to answer from your phone.")
             canTest = false
             return
         }

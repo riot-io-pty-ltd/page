@@ -1090,13 +1090,30 @@ enum InjectionExecutor {
         for row in processTable { byPid[row.pid] = row }
         var current = byPid[pid]?.ppid
         var hops = 0
+        var fromLogin: String?
         while let p = current, p > 1, hops < 32 {
             guard let row = byPid[p] else { break }
-            if appName(forCommand: row.command) != nil { return row.command }
+            // kitty starts every window's shell as "login -f -l -p user …/kitty.app/Contents/MacOS/kitten
+            // run-shell …": that row names the app but is not the app, and a bundle path cut from it would
+            // begin with "/usr/bin/login …". The kitty process itself is the next one up.
+            let isLogin = row.command.hasPrefix("/usr/bin/login ")
+            if !isLogin, appName(forCommand: row.command) != nil { return row.command }
+            if isLogin, fromLogin == nil { fromLogin = appPathCommand(inLoginCommand: row.command) }
             current = row.ppid
             hops += 1
         }
-        return nil
+        // No app further up (iTerm2's session server can outlive the app that restored it): the app
+        // path named inside the login row, cut so it starts at the bundle, not at "/usr/bin/login".
+        return fromLogin
+    }
+
+    /// Pure. "/usr/bin/login -fpl user /Applications/iTerm.app/Contents/MacOS/ShellLauncher --launch_shell"
+    /// → "/Applications/iTerm.app/Contents/MacOS/ShellLauncher --launch_shell"; nil when no app is named.
+    static func appPathCommand(inLoginCommand cmd: String) -> String? {
+        guard let r = cmd.range(of: ".app/Contents/MacOS/"),
+              let start = cmd[..<r.lowerBound].range(of: " /", options: .backwards) else { return nil }
+        let tail = String(cmd[cmd.index(after: start.lowerBound)...])
+        return appName(forCommand: tail) == nil ? nil : tail
     }
 
     static func appName(forCommand cmd: String) -> String? {
@@ -1105,6 +1122,9 @@ enum InjectionExecutor {
         if cmd.contains("Warp.app/Contents/MacOS/") { return "Warp" }
         if cmd.contains("Ghostty.app/Contents/MacOS/") { return "Ghostty" }
         if cmd.contains("WezTerm.app/Contents/MacOS/") { return "WezTerm" }
+        // Homebrew links /opt/homebrew/bin/wezterm into the bundle; a mux started through the link shows that path.
+        let exe = ((cmd.split(separator: " ").first.map(String.init) ?? cmd) as NSString).lastPathComponent
+        if ["wezterm", "wezterm-gui", "wezterm-mux-server"].contains(exe) { return "WezTerm" }
         if cmd.contains("kitty.app/Contents/MacOS/") { return "kitty" }
         if cmd.contains("Alacritty.app/Contents/MacOS/") { return "Alacritty" }
         if cmd.contains("Hyper.app/Contents/MacOS/") { return "Hyper" }

@@ -149,7 +149,7 @@ struct AnswerPlanError: Error, Equatable {
 enum AnswerPlan {
     static let previewMessage = "These options have previews, which Page can't choose — answer at your Mac"
     static let incompleteMessage = "Answer every question first — Page only submits complete answers"
-    static let arrowsMessage = "Other in a multi-select needs arrow keys, which Page only sends through tmux — answer at your Mac"
+    static let arrowsMessage = "Other in a multi-select needs arrow keys, which Page can't send in this terminal — answer at your Mac"
 
     /// Checks `picks` against the raw question set: every question answered
     /// once, indices in range, a single-select exactly one choice (an option
@@ -379,11 +379,12 @@ struct QuestionScreen: Equatable {
 
 // MARK: - The driver
 
-/// What a host can send. Arrow keys are measured on tmux only; elsewhere an
-/// ESC split from its "[" could be read as a bare Esc, which cancels the dialog.
+/// What a host can send. Every host Page answers in has its arrow keys measured (tmux, iTerm2, cmux, WezTerm,
+/// kitty, Herdr: each sends ESC "[" "B" as one write, never a bare Esc, which would cancel the dialog).
+/// `plainKeysOnly` is for a transport that can only type digits, Tab and Enter; no shipped host is one.
 struct AnswerKeyCaps: Equatable {
     var arrows: Bool
-    static let tmux = AnswerKeyCaps(arrows: true)
+    static let withArrows = AnswerKeyCaps(arrows: true)
     static let plainKeysOnly = AnswerKeyCaps(arrows: false)
 }
 

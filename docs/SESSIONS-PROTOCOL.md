@@ -409,8 +409,8 @@ and sends once ("Submit all"). The Mac trusts only `promptKey`, the indices
 and the Other text: it re-reads the raw question from the transcript (the
 list's copy is redacted) and checks everything again.
 
-The key model (measured on Claude Code 2.1.311 in tmux): in a single-select a
-digit picks that option and advances (the last question goes to Review; one
+The key model (measured on Claude Code 2.1.311, in tmux first and then end to
+end in every terminal listed below): in a single-select a digit picks that option and advances (the last question goes to Review; one
 question submits at once); the Other row is `N+1`, its digit only focuses it,
 then the text and Enter. In a multi-select a digit toggles that option and Tab
 moves on; the Other row is reached with Down × N (its digit would tick an empty
@@ -442,14 +442,55 @@ Anything unexpected stops the run with a reason and leaves the dialog open
 for the Mac (`failed` with "part-filled at your Mac" when keys were already
 sent). Refused without pressing anything: previews (`hasPreview`), more than 7
 options, a screen the parser can't read (a narrow or short pane can scroll the
-question off the top: it fails closed), Terminal.app and cmux (no reading or no
-Tab key), and, off tmux, an Other in a multi-select (needs arrow keys, which
-only tmux is measured for). Results use the existing codes plus reasons
-`question_changed` and `answer_unsupported` (older phones show `detail`).
+question off the top: it fails closed) and Terminal.app (below). Results use
+the existing codes plus reasons `question_changed` and `answer_unsupported`
+(older phones show `detail`).
 
-Mac keystrokes: tmux `send-keys`; iTerm `write text` with ESC `[` `C` in one
-write; WezTerm `send-text --no-paste`; kitty `send-key`; Herdr `pane.send_keys`.
-Only tmux has been driven end to end.
+**Terminals** (each driven end to end against a throwaway Claude Code 2.1.311
+session on Haiku, through the real `AnswerDelivery.run`; the transcript's
+`toolUseResult.answers` equalled the intended answers in every run). The session
+list advertises `ask` only for a host marked yes (`AnswerDelivery.takesAnswerKeys`,
+by the wire host name, read from `TerminalCatalog`); the Mac's Terminals page and
+the phone's "Works with" list show the same fact per terminal.
+
+| Terminal (wire host) | Screen read | Keys | Answers |
+|---|---|---|---|
+| tmux, Claude Squad (`tmux`, `Claude Squad`) | `capture-pane` | `send-keys`: digits, `Tab`, `Down`, `Enter` and the text | Yes, every shape |
+| iTerm2 (`iTerm`) | AppleScript `contents` | `write text … newline NO` for digits and text; Tab and Enter as `character id 9` / `13`; arrows as ESC `[` `B` in one write | Yes, every shape |
+| cmux (`cmux`) | `cmux read-screen --surface` | `send --force` for a digit, `send-key --force` for `tab` / `down` / `enter`, `paste --force -` for the Other text | Yes, every shape |
+| WezTerm (`WezTerm`) | `cli get-text` | `cli send-text --no-paste`: digits, `\t`, `\r`, ESC `[` `B` in one write | Yes, every shape |
+| kitty (`kitty`) | `@ get-text --extent screen` | `@ send-text` (bracketed paste off) for digits and text, `@ send-key tab|down|enter` | Yes, every shape |
+| Herdr (`Herdr`) | `pane.read` (visible, text) | `pane.send_text` for digits and one-line text, `pane.send_keys` `tab` / `down` / `enter` | Yes, every shape |
+| Terminal.app (`Terminal`) | AppleScript `contents` | `do script` always appends a Return | Not yet |
+
+Every host in the table was driven with arrow keys (the Other row of a
+multi-select is Down × N away), so none is limited to digits. A host whose
+transport could only type digits, Tab and Enter would have to refuse an Other
+in a multi-select up front (`AnswerKeyCaps.plainKeysOnly`); none ships that way.
+
+Host-specific measurements that shaped the code:
+
+- **cmux** refuses every key into an open dialog unless `--force` is passed, and
+  its `surface.input_state` reads `dialog` on every question screen but reports
+  `unknown` on the final "Review your answers" screen. Page accepts `unknown`
+  only when the screen read shows "Review your answers", "Ready to submit your
+  answers?" and "1. Submit answers"; any other wording fails closed. cmux's own
+  Feed hold on a question was not exercised.
+- **iTerm2, WezTerm and kitty** need the session's real environment: a terminal
+  started with another Claude session's variables (`CLAUDE_CODE_*`) in its environment makes
+  the inner `claude` skip `~/.claude/sessions/<pid>.json`, and Page then refuses
+  the session as `unknown_state`. A normally started terminal is unaffected.
+- **kitty** starts each window's shell under `login -f -l -p user …/kitten
+  run-shell`; the host app is the kitty process above that row.
+- **WezTerm** was measured on the headless mux server (`cli spawn`); a GUI window
+  uses the same CLI against its own `WEZTERM_UNIX_SOCKET`.
+- **Terminal.app** was not measured live (the Mac's screen was locked, so no
+  AppleScript window event ran). On a tmux stand-in, the Return that `do script`
+  appends lands on the next question of a multi-question set, and dismisses
+  ("User declined to answer questions") a single-select with Other. A
+  one-question single-select without Other behaved, but is unproven in the real
+  transport, so Page refuses every Terminal.app answer with "Terminal.app adds a
+  Return to every key Page types, which would skip or dismiss questions".
 
 ## 6. Phone UX contract
 

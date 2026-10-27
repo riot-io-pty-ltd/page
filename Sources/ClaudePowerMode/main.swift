@@ -18,6 +18,14 @@ if CommandLine.arguments.contains(RenderHarness.flag) {
     dispatchMain()
 }
 
+#if DEBUG
+// `--probe-answer` / `--probe-screen`: measure answering a question dialog in a terminal (AnswerProbe.swift).
+// Compiled out of release builds; terminal like --render-ui, it never starts the app.
+if AnswerProbe.isRequested(CommandLine.arguments) {
+    exit(AnswerProbe.run(arguments: CommandLine.arguments))
+}
+#endif
+
 let delegate = AppDelegate()
 let app = NSApplication.shared
 app.delegate = delegate

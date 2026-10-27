@@ -11,11 +11,48 @@ import Foundation
 ///   - see the screen on the phone: `SessionScreen.Source` (tmux, cmux,
 ///     WezTerm, kitty, Herdr; Claude Squad is tmux);
 ///   - stop a turn with Esc: `TerminalHost.canSendLoneEscape` (not Terminal.app);
-///   - start a session from the phone: `SessionStarter` (cmux only).
+///   - start a session from the phone: `SessionStarter` (cmux only);
+///   - answer a question dialog by pressing its keys: `AnswerDelivery.capabilities(of:)`, each host measured
+///     end to end on Claude Code 2.1.311 (docs/SESSIONS-PROTOCOL.md). `AnswerSupport` here is the same fact in
+///     words, and `AnswerDelivery.takesAnswerKeys` reads it, so the phone's list can't drift from the gate.
 enum TerminalCatalog {
     enum ID: String, CaseIterable, Identifiable, Equatable {
         case terminal, iTerm, tmux, cmux, wezterm, kitty, herdr, claudeSquad
         var id: String { rawValue }
+    }
+
+    /// Whether Page can answer a question dialog from the phone in this terminal.
+    enum AnswerSupport: Equatable {
+        /// Measured end to end: every question shape Page offers.
+        case yes
+        /// Works, with a stated limit (short reason).
+        case limited(String)
+        /// Refused up front, with why and what to use instead (short reason).
+        case notYet(String)
+
+        /// The phone may offer its answer sheet for a session in this terminal.
+        var takesKeys: Bool {
+            if case .notYet = self { return false }
+            return true
+        }
+
+        /// "Yes", "With limits", "Not yet".
+        var label: String {
+            switch self {
+            case .yes: return "Yes"
+            case .limited: return "With limits"
+            case .notYet: return "Not yet"
+            }
+        }
+
+        /// "Answer questions: yes" / "…: with limits — why" / "…: not yet — why".
+        var line: String {
+            switch self {
+            case .yes: return "Answer questions: yes"
+            case .limited(let why): return "Answer questions: with limits — \(why)"
+            case .notYet(let why): return "Answer questions: not yet — \(why)"
+            }
+        }
     }
 
     struct Capabilities: Equatable {
@@ -23,6 +60,7 @@ enum TerminalCatalog {
         var viewScreen = false
         var interrupt = false
         var startSessions = false
+        var answer: AnswerSupport = .notYet("not measured here yet")
 
         /// "Reply · see the screen · stop a turn · start sessions".
         var line: String {
@@ -67,35 +105,36 @@ enum TerminalCatalog {
 
     static let entries: [Entry] = [
         Entry(id: .terminal, name: "Terminal", symbol: "macwindow",
-              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: false, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: false, startSessions: false,
+                                         answer: .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2")),
               setup: .automation, wireHost: "Terminal", downloadURL: URL(string: "https://support.apple.com/guide/terminal/welcome/mac")!,
               nothingToSetUp: "Built into macOS"),
         Entry(id: .iTerm, name: "iTerm2", symbol: "terminal",
-              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: true, startSessions: false, answer: .yes),
               setup: .automation, wireHost: "iTerm", downloadURL: URL(string: "https://iterm2.com")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .tmux, name: "tmux", symbol: "rectangle.split.3x1",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
               setup: .none, wireHost: "tmux", downloadURL: URL(string: "https://github.com/tmux/tmux/wiki")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .cmux, name: "cmux", symbol: "square.grid.2x2",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: true),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: true, answer: .yes),
               setup: .cmuxSocket, wireHost: "cmux", downloadURL: URL(string: "https://cmux.com")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .wezterm, name: "WezTerm", symbol: "terminal.fill",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
               setup: .none, wireHost: "WezTerm", downloadURL: URL(string: "https://wezterm.org")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .kitty, name: "kitty", symbol: "pawprint",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
               setup: .kittyConfig, wireHost: "kitty", downloadURL: URL(string: "https://sw.kovidgoyal.net/kitty/")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .herdr, name: "Herdr", symbol: "rectangle.3.group",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
               setup: .none, wireHost: "Herdr", downloadURL: URL(string: "https://github.com/herdrdev/herdr")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .claudeSquad, name: "Claude Squad", symbol: "person.3",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
               setup: .none, wireHost: ClaudeSquad.hostName, downloadURL: URL(string: "https://github.com/smtg-ai/claude-squad")!,
               nothingToSetUp: nothingToSetUp),
     ]
@@ -259,6 +298,8 @@ enum TerminalCatalog {
         let symbol: String
         /// What Page can do there.
         let capabilityLine: String
+        /// Answering a question dialog from the phone: yes, with limits, or not yet.
+        let answer: AnswerSupport
         /// What is true now: the setup state, or what to do.
         let note: String
         let status: Status
@@ -280,6 +321,7 @@ enum TerminalCatalog {
             }()
             return Row(id: entry.id, name: entry.name, symbol: entry.symbol,
                        capabilityLine: entry.capabilities.line,
+                       answer: entry.capabilities.answer,
                        note: note(entry, f, status, pageAddedKittyLines: pageAddedKittyLines),
                        status: status,
                        action: action(entry, f, status, pageAddedKittyLines: pageAddedKittyLines),

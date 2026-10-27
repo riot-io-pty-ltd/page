@@ -165,31 +165,52 @@ final class AnswerDeliveryTests: XCTestCase {
         XCTAssertTrue(f.keys.isEmpty)
     }
 
-    func testTerminalAppAndCmuxAreRefusedCleanly() {
-        for host in [InjectionExecutor.TerminalHost.terminalApp(tty: "/dev/ttys009")] {
-            let f = fake()
-            f.host = host
-            let r = AnswerDelivery.run(sessionId: live.sessionId, request: request, io: f.io())
-            XCTAssertEqual(r.reason, .answerUnsupported)
-            XCTAssertEqual(r.detail, AnswerDelivery.terminalAppMessage)
-            XCTAssertTrue(f.keys.isEmpty)
-        }
+    func testTerminalAppIsRefusedCleanly() {
+        let f = fake()
+        f.host = .terminalApp(tty: "/dev/ttys009")
+        let r = AnswerDelivery.run(sessionId: live.sessionId, request: request, io: f.io())
+        XCTAssertEqual(r.reason, .answerUnsupported)
+        XCTAssertEqual(r.detail, AnswerDelivery.terminalAppMessage)
+        XCTAssertTrue(f.keys.isEmpty)
         XCTAssertEqual(AnswerDelivery.capabilities(of: .unknown), .failure(AnswerPlanError("Couldn't find the session's terminal")))
-        XCTAssertEqual(AnswerDelivery.capabilities(of: .tmux(tmuxPath: "t", paneId: "%1", inMode: false)), .success(.tmux))
-        // Only tmux's keys are measured; the other terminals with a key path stay refused until probed.
-        for host in [InjectionExecutor.TerminalHost.iTerm(tty: "/dev/ttys1")] {
-            XCTAssertEqual(AnswerDelivery.capabilities(of: host), .failure(AnswerPlanError(String(format: AnswerDelivery.unverifiedHostMessage, host.label))))
+    }
+
+    /// One host of each kind Page can resolve a session to, by catalog id.
+    private func sampleHost(_ id: TerminalCatalog.ID) -> InjectionExecutor.TerminalHost {
+        switch id {
+        case .terminal: return .terminalApp(tty: "/dev/ttys1")
+        case .iTerm: return .iTerm(tty: "/dev/ttys1")
+        case .tmux, .claudeSquad: return .tmux(tmuxPath: "t", paneId: "%1", inMode: false)
+        case .cmux: return .cmux(CmuxBridge.Target(surfaceId: "5FA66D62-4F2B-4F19-90BE-80319216DE70", workspaceId: nil, cliPath: "/c", source: "environment"))
+        case .wezterm: return .wezterm(WezTermBridge.Target(cliPath: "/w", paneId: "1", socket: nil))
+        case .kitty: return .kitty(KittyBridge.Target(kittenPath: "/k", socket: "unix:/s", windowId: "3"))
+        case .herdr: return .herdr(HerdrBridge.Target(socketPath: "/s", paneId: "w1:p1", terminalId: "term_1", sessionPid: 1))
         }
     }
 
-    func testOnlyTmuxPanesTakeAnswerKeysOnThePhonesList() {
-        XCTAssertTrue(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: "tmux", canType: true, canInterrupt: true)))
-        XCTAssertTrue(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: ClaudeSquad.hostName, canType: true, canInterrupt: true)))
-        XCTAssertFalse(AnswerDelivery.takesAnswerKeys(.blocked(ClaudeSquad.hostName, ClaudeSquad.pausedMessage)))
-        XCTAssertFalse(AnswerDelivery.takesAnswerKeys(.checking))
-        for host in ["cmux", "Terminal", "iTerm", "WezTerm", "kitty", "Herdr"] {
-            XCTAssertFalse(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: host, canType: true, canInterrupt: true)), host)
+    /// Every terminal's gate, the Terminals page's "Answer questions" fact and the phone's list agree.
+    func testTheGateTheCatalogAndThePhonesListAgreePerTerminal() {
+        for entry in TerminalCatalog.entries {
+            let takes = entry.capabilities.answer.takesKeys
+            let caps = AnswerDelivery.capabilities(of: sampleHost(entry.id))
+            if takes { XCTAssertEqual(caps, .success(.withArrows), entry.name) } else if case .failure = caps {} else {
+                XCTFail("\(entry.name) is refused")
+            }
+            XCTAssertEqual(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: entry.wireHost, canType: true, canInterrupt: true)), takes, entry.name)
+            XCTAssertFalse(AnswerDelivery.takesAnswerKeys(.blocked(entry.wireHost, "why")), "\(entry.name) blocked")
         }
+    }
+
+    func testMeasuredTerminalsTakeAnswersAndTheRestAreRefusedWithAReason() {
+        let measured: Set<TerminalCatalog.ID> = [.tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr, .claudeSquad]
+        for entry in TerminalCatalog.entries {
+            XCTAssertEqual(entry.capabilities.answer.takesKeys, measured.contains(entry.id), entry.name)
+        }
+        XCTAssertEqual(TerminalCatalog.entry(.terminal).capabilities.answer, .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2"))
+        XCTAssertFalse(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: "Ghostty", canType: true, canInterrupt: true)))
+        XCTAssertFalse(AnswerDelivery.takesAnswerKeys(.checking))
+        XCTAssertFalse(AnswerDelivery.takesAnswerKeys(.blocked(ClaudeSquad.hostName, ClaudeSquad.pausedMessage)))
+        XCTAssertTrue(AnswerDelivery.takesAnswerKeys(SessionHostInfo(host: ClaudeSquad.hostName, canType: true, canInterrupt: true)))
     }
 
     func testRefusesAPausedSquadInstance() {
@@ -219,13 +240,24 @@ final class AnswerDeliveryTests: XCTestCase {
         XCTAssertTrue(r.detail.contains("may still be open"), r.detail)
     }
 
-    func testOtherTerminalsAreRefusedBeforeAnyKey() {
+    func testUnsupportedTerminalsAreRefusedBeforeAnyKey() {
         let f = fake()
-        f.host = .iTerm(tty: "/dev/ttys009")
+        f.host = .unsupported("Ghostty")
         let r = AnswerDelivery.run(sessionId: live.sessionId, request: request, io: f.io())
         XCTAssertEqual(r.reason, .answerUnsupported)
-        XCTAssertTrue(r.detail.contains("hasn't verified"), r.detail)
+        XCTAssertTrue(r.detail.contains("Ghostty"), r.detail)
         XCTAssertTrue(f.keys.isEmpty)
+    }
+
+    func testEveryMeasuredTerminalGetsItsKeys() {
+        for id in [TerminalCatalog.ID.tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr] {
+            let f = fake()
+            f.host = sampleHost(id)
+            f.transcript = transcriptLine(["Pick a color": "Green", "Pick toppings": "Cheese, Ham"])
+            let r = AnswerDelivery.run(sessionId: live.sessionId, request: request, io: f.io())
+            XCTAssertEqual(r.code, .delivered, "\(id.rawValue): \(r.detail)")
+            XCTAssertFalse(f.keys.isEmpty, id.rawValue)
+        }
     }
 
     func testStopsMidWayWhenTheSessionStopsWaitingAndSaysSo() {
@@ -276,6 +308,93 @@ final class AnswerDeliveryTests: XCTestCase {
         XCTAssertTrue(f.keys.isEmpty)
     }
 
+    // MARK: every host kind: its gate, its refusal, its reader and its keys
+
+    /// Each host Page can resolve a session to, against the verdict measured on Claude Code 2.1.311: the six
+    /// enabled hosts press arrow keys too; Terminal.app and the unresolved kinds are refused with a reason.
+    func testCapabilitiesPerHostMatchTheMeasuredVerdicts() {
+        for id in [TerminalCatalog.ID.tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr] {
+            XCTAssertEqual(AnswerDelivery.capabilities(of: sampleHost(id)), .success(.withArrows), id.rawValue)
+        }
+        XCTAssertEqual(AnswerDelivery.capabilities(of: .terminalApp(tty: "/dev/ttys009")),
+                       .failure(AnswerPlanError(AnswerDelivery.terminalAppMessage)))
+        XCTAssertEqual(AnswerDelivery.capabilities(of: .unreachable("Page can't find this pane")),
+                       .failure(AnswerPlanError("Page can't find this pane")))
+        XCTAssertEqual(AnswerDelivery.capabilities(of: .unsupported("Ghostty")),
+                       .failure(AnswerPlanError("Page can't type into Ghostty yet — use tmux or iTerm2")))
+        XCTAssertEqual(AnswerDelivery.capabilities(of: .unknown), .failure(AnswerPlanError("Couldn't find the session's terminal")))
+    }
+
+    func testEveryUnenabledHostRefusesWithItsReasonBeforeAnyKey() {
+        let refusals: [(InjectionExecutor.TerminalHost, String)] = [
+            (.terminalApp(tty: "/dev/ttys009"), AnswerDelivery.terminalAppMessage),
+            (.unreachable("Page can't find this pane"), "Page can't find this pane"),
+            (.unsupported("Ghostty"), "Page can't type into Ghostty yet — use tmux or iTerm2"),
+            (.unknown, "Couldn't find the session's terminal"),
+        ]
+        for (host, message) in refusals {
+            let f = fake()
+            f.host = host
+            f.transcript = transcriptLine(["Pick a color": "Green", "Pick toppings": "Cheese, Ham"])
+            let r = AnswerDelivery.run(sessionId: live.sessionId, request: request, io: f.io())
+            XCTAssertEqual(r.code, .refused, host.label)
+            XCTAssertEqual(r.reason, .answerUnsupported, host.label)
+            XCTAssertEqual(r.detail, message, host.label)
+            XCTAssertTrue(f.keys.isEmpty, host.label)
+        }
+    }
+
+    /// Terminal.app's `do script` adds a Return to every key, so none of these shapes may reach a key. Each is
+    /// one Page's plan accepts (so the refusal is the gate's, not the plan's).
+    func testTerminalAppRefusesEveryQuestionShapeBeforeAnyKey() {
+        let colors = [AskedOption(label: "Red", description: ""), AskedOption(label: "Green", description: ""),
+                      AskedOption(label: "Blue", description: "")]
+        func question(_ n: Int, multi: Bool) -> AskedQuestion {
+            AskedQuestion(question: "Q\(n)?", header: "H\(n)", multi: multi, options: colors, hasPreview: false)
+        }
+        func set(_ qs: [AskedQuestion]) -> AskedQuestionSet { AskedQuestionSet(toolUseId: toolId, questions: qs) }
+        let shapes: [(String, AskedQuestionSet, [AnswerPick])] = [
+            ("one single-select", set([question(0, multi: false)]), [AnswerPick(question: 0, picks: [1], other: nil)]),
+            ("one multi-select", set([question(0, multi: true)]), [AnswerPick(question: 0, picks: [0, 2], other: nil)]),
+            ("single-select with Other", set([question(0, multi: false)]), [AnswerPick(question: 0, picks: [], other: "Purple")]),
+            ("multi-select with Other", set([question(0, multi: true)]), [AnswerPick(question: 0, picks: [1], other: "Purple")]),
+            ("two questions", set([question(0, multi: false), question(1, multi: true)]),
+             [AnswerPick(question: 0, picks: [1], other: nil), AnswerPick(question: 1, picks: [0], other: nil)]),
+        ]
+        for (name, asked, picks) in shapes {
+            guard case .success = AnswerPlan.resolve(asked, picks) else { XCTFail("the plan itself refuses \(name)"); continue }
+            let f = Fake(live: live)
+            f.pending = [PendingToolUse(id: toolId, name: "AskUserQuestion", summary: "", asked: asked)]
+            f.dialog = FakeQuestionDialog(asked)
+            f.host = .terminalApp(tty: "/dev/ttys009")
+            let r = AnswerDelivery.run(sessionId: live.sessionId, request: AnswerRequest(promptKey: toolId, answers: picks), io: f.io())
+            XCTAssertEqual(r.reason, .answerUnsupported, name)
+            XCTAssertEqual(r.detail, AnswerDelivery.terminalAppMessage, name)
+            XCTAssertTrue(f.keys.isEmpty, name)
+        }
+    }
+
+    func testTerminalAppSendsNoKeyOfAnyKind() {
+        let keys: [Keystroke] = [.text("1"), .text("probe-other"), .enter, .key(.down), .key(.tab), .escape, .pause(1), .awaitPromptClosed]
+        for key in keys {
+            XCTAssertNotNil(InjectionExecutor.sendOneKey(key, to: .terminalApp(tty: "/dev/ttys009")), "\(key)")
+        }
+    }
+
+    func testEveryEnabledHostHasAScreenReaderAndTheRestHaveNone() {
+        for id in [TerminalCatalog.ID.tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr] {
+            XCTAssertNotNil(InjectionExecutor.answerScreenReader(for: sampleHost(id)), id.rawValue)
+        }
+        XCTAssertNil(InjectionExecutor.answerScreenReader(for: .unreachable("x")))
+        XCTAssertNil(InjectionExecutor.answerScreenReader(for: .unsupported("Ghostty")))
+        XCTAssertNil(InjectionExecutor.answerScreenReader(for: .unknown))
+    }
+
+    /// cmux receives these by name (`send-key --force -- <name>`), so a rename would break it silently.
+    func testNavKeyRawValuesAreTheNamesMeasuredOnEachHost() {
+        XCTAssertEqual([NavKey.tab, .down, .up, .right, .left].map(\.rawValue), ["tab", "down", "up", "right", "left"])
+    }
+
     // MARK: the host key mappings
 
     func testTmuxNamesAndTerminalBytes() {
@@ -302,6 +421,16 @@ final class AnswerDeliveryTests: XCTestCase {
         let obj = (try? JSONSerialization.jsonObject(with: Data((line ?? "{}").utf8))) as? [String: Any]
         XCTAssertEqual(obj?["method"] as? String, "pane.send_keys")
         XCTAssertEqual((obj?["params"] as? [String: Any])?["keys"] as? [String], ["tab"])
+        let down = HerdrBridge.sendRequest(id: "i", paneId: "p1", key: .key(.down))
+        let downObj = (try? JSONSerialization.jsonObject(with: Data((down ?? "{}").utf8))) as? [String: Any]
+        XCTAssertEqual((downObj?["params"] as? [String: Any])?["keys"] as? [String], ["down"])
+    }
+
+    func testCmuxReadsAReviewScreenOnlyWhenAllThreeLinesShow() {
+        let review = "Review your answers\n\n Ready to submit your answers?\n\n ❯ 1. Submit answers\n   2. Cancel"
+        XCTAssertTrue(CmuxBridge.isReviewScreen(review))
+        XCTAssertFalse(CmuxBridge.isReviewScreen("Which fruit?\n ❯ 1. Apple\n   2. Banana"))
+        XCTAssertFalse(CmuxBridge.isReviewScreen("Review your answers\n 1. Submit answers"), "the question line is part of the check")
     }
 
     func testTerminalAppAndCmuxRefuseNavigationKeys() {

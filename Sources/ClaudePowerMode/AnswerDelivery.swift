@@ -21,9 +21,9 @@ enum AnswerDelivery {
     static let unreadableMessage = "Page can't read this question's layout — answer at your Mac"
     static let holdMessage = "Page's phone-approval hook is handling this question — answer that page instead"
     static let severalMessage = "Several prompts are queued — answer at your Mac"
-    static let cmuxMessage = "Page hasn't verified pressing the answer keys in cmux yet — answer at your Mac"
-    static let unverifiedHostMessage = "Page hasn't verified pressing the answer keys in %@ yet — answer at your Mac, or use tmux"
-    static let terminalAppMessage = "Terminal.app can't press the Tab or arrow keys — answer at your Mac, or use tmux or iTerm2"
+    /// Terminal.app's `do script` appends a Return to everything it types. Measured on a tmux stand-in: that
+    /// Return lands on the next question or dismisses an Other answer, so no question shape is safe yet.
+    static let terminalAppMessage = "Terminal.app adds a Return to every key Page types, which would skip or dismiss questions — answer at your Mac, or use tmux or iTerm2"
     static let noScreenMessage = "Page can't read this terminal's screen, so it can't check the question — answer at your Mac"
     static let confirmWait: TimeInterval = 4
 
@@ -44,25 +44,27 @@ enum AnswerDelivery {
         var transcriptText: (ClaudeLiveSession) -> String?
         var sleep: (TimeInterval) -> Void = { usleep(useconds_t($0 * 1_000_000)) }
         var now: () -> Date = Date.init
+        /// Which keys a host can press. Always `AnswerDelivery.capabilities(of:)` in the app; only the
+        /// DEBUG `--probe-answer` tool swaps it, to try a host that is still gated.
+        var capabilities: (InjectionExecutor.TerminalHost) -> Swift.Result<AnswerKeyCaps, AnswerPlanError> = AnswerDelivery.capabilities(of:)
     }
 
     /// Pure. The phone's view of a session (`SessionHostInfo`): can Page press answer keys there? Only
-    /// terminals whose keys are measured (tmux, including Claude Squad's panes); a blocked or unprobed
-    /// host, a paused Squad instance, or any other terminal answers by "Tell it instead".
+    /// terminals whose keys are measured against a real dialog (`TerminalCatalog`'s `answer`, by the wire
+    /// host name); a blocked host, a paused Squad instance, Terminal.app or any other terminal answers by
+    /// "Tell it instead".
     static func takesAnswerKeys(_ host: SessionHostInfo) -> Bool {
-        host.canType && (host.host == "tmux" || host.host == ClaudeSquad.hostName)
+        guard host.canType, let id = TerminalCatalog.id(forWireHost: host.host) else { return false }
+        return TerminalCatalog.entry(id).capabilities.answer.takesKeys
     }
 
-    /// Pure. Which keys a host can press, or why it can't take an answer.
+    /// Pure. Which keys a host can press, or why it can't take an answer. Digits, Tab, Down and Enter, and
+    /// the Other text, were each measured end to end (Claude Code 2.1.311) in tmux, iTerm2, cmux, WezTerm,
+    /// kitty and Herdr; all six press arrow keys safely.
     static func capabilities(of host: InjectionExecutor.TerminalHost) -> Swift.Result<AnswerKeyCaps, AnswerPlanError> {
         switch host {
-        case .tmux: return .success(.tmux)
-        // Only tmux's Tab / arrow / digit keys are measured against a real dialog. The other hosts have a
-        // key path (`.plainKeysOnly` is what they could do) but stay refused until each is probed.
-        case .iTerm, .wezterm, .kitty, .herdr:
-            return .failure(.init(String(format: unverifiedHostMessage, host.label)))
+        case .tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr: return .success(.withArrows)
         case .terminalApp: return .failure(.init(terminalAppMessage))
-        case .cmux: return .failure(.init(cmuxMessage))
         case .unreachable(let why): return .failure(.init(why))
         case .unsupported(let app): return .failure(.init("Page can't type into \(app) yet — use tmux or iTerm2"))
         case .unknown: return .failure(.init("Couldn't find the session's terminal"))
@@ -104,7 +106,7 @@ enum AnswerDelivery {
 
         let host = io.resolveHost(session, table)
         let caps: AnswerKeyCaps
-        switch capabilities(of: host) {
+        switch io.capabilities(host) {
         case .failure(let e): return .refused(.answerUnsupported, e.message)
         case .success(let c): caps = c
         }
@@ -207,7 +209,7 @@ extension AnswerDelivery {
             squadPaused: { ClaudeSquad.isPausedLive(session: $0, host: $1) },
             resolveHost: { InjectionExecutor.resolveHost(for: $0, processTable: $1) },
             isForeground: { ProcessRunner.isForeground(pid: $0) },
-            screenReader: { InjectionExecutor.screenReader(for: $0) },
+            screenReader: { InjectionExecutor.answerScreenReader(for: $0) },
             sendKey: { host, key in InjectionExecutor.sendOneKey(key, to: host) },
             transcriptText: { s in
                 registry.transcriptURL(forSessionId: s.sessionId, cwdHint: s.cwd)
@@ -218,8 +220,8 @@ extension AnswerDelivery {
 
 extension InjectionExecutor {
     /// One key into the host's terminal, after the caller's own checks.
-    /// nil on success, else the phone-safe reason. Terminal.app and cmux
-    /// refuse navigation keys (see `AnswerDelivery.capabilities`).
+    /// nil on success, else the phone-safe reason. Terminal.app can't press single keys
+    /// (`do script` adds a Return), so it never gets here: `AnswerDelivery.capabilities` refuses it first.
     static func sendOneKey(_ key: Keystroke, to host: TerminalHost) -> String? {
         let result: InjectionResult
         switch host {
@@ -241,7 +243,9 @@ extension InjectionExecutor {
                                        precheck: { _ in HerdrBridge.recheck(target) }) { key in
                 HerdrBridge.send(target, key: key)
             }
-        case .terminalApp, .cmux, .unreachable, .unsupported, .unknown:
+        case .cmux(let target):
+            return sendOneKeyViaCmux(key, to: target)
+        case .terminalApp, .unreachable, .unsupported, .unknown:
             return "Page can't press keys in \(host.label)"
         }
         return result.success ? nil : (result.detail.isEmpty ? "Couldn't type into \(host.label)" : result.detail)

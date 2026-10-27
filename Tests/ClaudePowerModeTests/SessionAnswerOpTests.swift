@@ -145,16 +145,17 @@ final class SessionAnswerOpTests: XCTestCase {
     }
 
     func testNoAskWhenPageCannotPressKeysThere() throws {
-        // cmux, Terminal.app, a blocked host: the phone keeps "Tell it instead" rather than offer a picker
-        // whose Submit would always be refused. A tmux pane (here) still carries it.
-        for id in ["cmux1", "term1", "blocked1", "tmux1"] { backends.files[id] = try pendingQuestionTranscript() }
+        // Terminal.app, a paused Squad instance, an unsupported terminal: the phone keeps "Tell it instead"
+        // rather than offer a picker whose Submit would always be refused. Every measured terminal carries it.
+        for id in ["cmux1", "term1", "blocked1", "ghostty1", "tmux1"] { backends.files[id] = try pendingQuestionTranscript() }
         backends.hostFor["cmux1"] = SessionHostInfo(host: "cmux", canType: true, canInterrupt: true)
         backends.hostFor["term1"] = SessionHostInfo(host: "Terminal", canType: true, canInterrupt: false)
         backends.hostFor["blocked1"] = .blocked(ClaudeSquad.hostName, ClaudeSquad.pausedMessage)
-        remote.update(sessions: ["cmux1", "term1", "blocked1", "tmux1"].map { session($0, .waitingOnUser) }, pending: [])
+        backends.hostFor["ghostty1"] = .blocked("Ghostty", "Page can't type into Ghostty yet")
+        remote.update(sessions: ["cmux1", "term1", "blocked1", "ghostty1", "tmux1"].map { session($0, .waitingOnUser) }, pending: [])
         let all = try rows()
-        for id in ["cmux1", "term1", "blocked1"] { XCTAssertNil(all.first { $0["id"] as? String == id }?["ask"], id) }
-        XCTAssertNotNil(all.first { $0["id"] as? String == "tmux1" }?["ask"])
+        for id in ["term1", "blocked1", "ghostty1"] { XCTAssertNil(all.first { $0["id"] as? String == id }?["ask"], id) }
+        for id in ["cmux1", "tmux1"] { XCTAssertNotNil(all.first { $0["id"] as? String == id }?["ask"], id) }
     }
 
     func testAHookHeldQuestionKeepsItsAskOnAnyTerminal() throws {

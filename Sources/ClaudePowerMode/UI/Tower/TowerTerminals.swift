@@ -27,13 +27,13 @@ struct NWTerminalsPage: View {
                     ForEach(Array(TerminalCatalog.entries.enumerated()), id: \.element.id) { n, entry in
                         if n > 0 { NWDivider() }
                         NWTerminalRow(name: entry.name, symbol: entry.symbol, capabilityLine: entry.capabilities.line,
-                                      note: "Looking at this Mac…", status: nil, action: nil, perform: {})
+                                      answer: entry.capabilities.answer, note: "Looking at this Mac…", status: nil, action: nil, perform: {})
                     }
                 } else {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { n, row in
                         if n > 0 { NWDivider() }
                         NWTerminalRow(name: row.name, symbol: row.symbol, capabilityLine: row.capabilityLine,
-                                      note: row.note, noteIsWarning: row.noteIsWarning, status: row.status, action: row.action) {
+                                      answer: row.answer, note: row.note, noteIsWarning: row.noteIsWarning, status: row.status, action: row.action) {
                             if let action = row.action { store.perform(action, on: row.id) }
                         }
                     }
@@ -42,7 +42,7 @@ struct NWTerminalsPage: View {
             if let notice = store.terminalNotice {
                 NWNote(text: notice.text, tone: notice.tone).padding(.horizontal, 4)
             }
-            NWNote(text: "Run Claude Code inside any of these and it shows up on your phone, ready to answer. Page types only into the exact pane or tab the session runs in, and checks it is still that session first. Anything else (Ghostty, Warp, VS Code’s terminal…) can’t be typed into yet: run the agent inside tmux, or install the agent hooks so approvals work from any terminal. Nothing here is installed for you.")
+            NWNote(text: "Run Claude Code inside any of these and it shows up on your phone, ready to reply. Page types only into the exact pane or tab the session runs in, and checks it is still that session first. Anything else (Ghostty, Warp, VS Code’s terminal…) can’t be typed into yet: run the agent inside tmux, or install the agent hooks so approvals work from any terminal. Questions Claude asks can be answered from your phone wherever the line above says yes. Nothing here is installed for you.")
                 .padding(.horizontal, 4)
             NWCard(title: "ANY OTHER TERMINAL") {
                 NWRow(title: "Agent hooks", detail: "phone approvals for Claude Code and Codex in any terminal, with a diff and a backup first") {
@@ -62,6 +62,7 @@ struct NWTerminalRow: View {
     var name: String
     var symbol: String
     var capabilityLine: String
+    var answer: TerminalCatalog.AnswerSupport
     var note: String
     var noteIsWarning = false
     var status: TerminalCatalog.Status?
@@ -91,6 +92,22 @@ struct NWTerminalRow: View {
         }
     }
 
+    private var answerSymbol: String {
+        switch answer {
+        case .yes: return "checkmark"
+        case .limited: return "exclamationmark.triangle.fill"
+        case .notYet: return "minus"
+        }
+    }
+
+    private var answerColor: NightWatch.RGBA {
+        switch answer {
+        case .yes: return P.green
+        case .limited: return P.amber
+        case .notYet: return P.textTertiary
+        }
+    }
+
     private var noteColor: NightWatch.RGBA {
         if noteIsWarning { return P.amber }
         return P.textTertiary
@@ -116,6 +133,14 @@ struct NWTerminalRow: View {
                     .font(Font.system(size: 11.5))
                     .foregroundColor(P.textTertiary.color)
                     .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Image(systemName: answerSymbol)
+                        .font(Font.system(size: 9.5, weight: .semibold))
+                    Text(answer.line)
+                        .font(Font.system(size: 11.5))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundColor(answerColor.color)
                 Text(note)
                     .font(Font.system(size: 11.5))
                     .foregroundColor(noteColor.color)

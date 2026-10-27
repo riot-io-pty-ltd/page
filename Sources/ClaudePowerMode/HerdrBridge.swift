@@ -231,7 +231,7 @@ enum HerdrBridge {
         case .escape:
             return request(id: id, method: "pane.send_keys", params: ["pane_id": paneId, "keys": ["esc"]])
         case .key(let k):
-            // Herdr's key names are unverified: the answer plan only reaches here after a screen check per key.
+            // Tab and the arrows keep their NavKey names in Herdr (measured on Herdr 0.9.5: `tab`, `down`).
             return request(id: id, method: "pane.send_keys", params: ["pane_id": paneId, "keys": [k.rawValue]])
         case .pause, .awaitPromptClosed:
             return nil

@@ -212,7 +212,9 @@ enum ProcessRunner {
                 pid: pid,
                 ppid: ppid,
                 tty: String(cols[2]),
-                command: cols.count > 3 ? String(cols[3]) : ""
+                // ps pads the tty column ("??" is shorter than "ttys003"), so a split with a limit leaves
+                // spaces in front of the command; trimmed, a GUI app's bundle path starts at its "/".
+                command: cols.count > 3 ? String(cols[3]).trimmingCharacters(in: .whitespaces) : ""
             ))
         }
         return rows

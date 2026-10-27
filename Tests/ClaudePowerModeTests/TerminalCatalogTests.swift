@@ -21,7 +21,7 @@ final class TerminalCatalogTests: XCTestCase {
     }
 
     private func statusRow(_ status: C.Status) -> C.Row {
-        C.Row(id: .tmux, name: "x", symbol: "x", capabilityLine: "", note: "", status: status, action: nil)
+        C.Row(id: .tmux, name: "x", symbol: "x", capabilityLine: "", answer: .yes, note: "", status: status, action: nil)
     }
 
     private func isNotInstalled(_ status: C.Status) -> Bool {
@@ -238,6 +238,7 @@ final class TerminalCatalogTests: XCTestCase {
     func testRowsCarryTheCapabilityLine() {
         let rows = C.rows([:])
         XCTAssertEqual(row(.cmux, rows).capabilityLine, C.entry(.cmux).capabilities.line)
+        for r in rows { XCTAssertEqual(r.answer, C.entry(r.id).capabilities.answer, r.name) }
     }
 
     func testANotInstalledHostGetsItButtonToItsSite() {
@@ -372,5 +373,22 @@ final class TerminalCatalogTests: XCTestCase {
         XCTAssertEqual(C.automationNotice(.appNotRunning, appName: "Terminal").tone, .bad)
         XCTAssertTrue(C.automationNotice(.appNotRunning, appName: "Terminal").text.contains("Open it"))
         XCTAssertEqual(C.automationNotice(.unknown, appName: "Terminal").tone, .bad)
+    }
+
+    // MARK: answering questions
+
+    func testEveryHostStatesWhetherItAnswersQuestions() {
+        let answers = Dictionary(uniqueKeysWithValues: C.entries.map { ($0.id, $0.capabilities.answer) })
+        for id in [C.ID.tmux, .iTerm, .cmux, .wezterm, .kitty, .herdr, .claudeSquad] { XCTAssertEqual(answers[id], .yes, id.rawValue) }
+        guard case .notYet(let why)? = answers[.terminal] else { return XCTFail("Terminal.app must say why it can't") }
+        XCTAssertTrue(why.contains("Return") && why.contains("tmux"), "says what doesn't work and what to use instead: \(why)")
+    }
+
+    func testAnswerSupportWordsAndWhatThePhoneOffers() {
+        XCTAssertEqual(C.AnswerSupport.yes.line, "Answer questions: yes")
+        XCTAssertEqual(C.AnswerSupport.limited("one question at a time").line, "Answer questions: with limits — one question at a time")
+        XCTAssertEqual(C.AnswerSupport.notYet("no Tab key").line, "Answer questions: not yet — no Tab key")
+        XCTAssertEqual([C.AnswerSupport.yes, .limited("x"), .notYet("y")].map(\.label), ["Yes", "With limits", "Not yet"])
+        XCTAssertEqual([C.AnswerSupport.yes, .limited("x"), .notYet("y")].map(\.takesKeys), [true, true, false])
     }
 }

@@ -228,7 +228,7 @@ final class QuestionAnswerTests: XCTestCase {
         ])
     }
 
-    private func drive(_ dialog: FakeQuestionDialog, _ answers: [ResolvedAnswer], caps: AnswerKeyCaps = .tmux) -> AnswerLoop.Result {
+    private func drive(_ dialog: FakeQuestionDialog, _ answers: [ResolvedAnswer], caps: AnswerKeyCaps = .withArrows) -> AnswerLoop.Result {
         var driver = AnswerDriver(asked: dialog.asked, answers: answers, caps: caps)
         return AnswerLoop.run(&driver, readScreen: { dialog.render() }, send: { dialog.send($0); return nil },
                               sleep: { _ in }, now: Date.init).result
@@ -515,7 +515,7 @@ final class QuestionAnswerTests: XCTestCase {
         XCTAssertTrue(p.previewLayout)
         XCTAssertFalse(p.matches(q("Pick a layout", "Layout", ["Grid", "List"])))
         var d = AnswerDriver(asked: AskedQuestionSet(toolUseId: "t", questions: [q("Pick a layout", "Layout", ["Grid", "List"])]),
-                             answers: [ResolvedAnswer(picks: [0], other: nil)], caps: .tmux)
+                             answers: [ResolvedAnswer(picks: [0], other: nil)], caps: .withArrows)
         XCTAssertEqual(d.decide(screen: preview), .abort(AnswerPlan.previewMessage))
     }
 
@@ -532,7 +532,7 @@ final class QuestionAnswerTests: XCTestCase {
         let p = QuestionScreen.parse(cut)
         XCTAssertEqual(p.layout, .none)
         var d = AnswerDriver(asked: three, answers: [ResolvedAnswer(picks: [1], other: nil), ResolvedAnswer(picks: [1], other: nil),
-                                                       ResolvedAnswer(picks: [0], other: nil)], caps: .tmux)
+                                                       ResolvedAnswer(picks: [0], other: nil)], caps: .withArrows)
         guard case .wait = d.decide(screen: cut) else { return XCTFail("must not send into a screen it can't read") }
     }
 
@@ -619,7 +619,7 @@ final class QuestionAnswerTests: XCTestCase {
         dialog.keys.removeAll()
         // Start from the middle: the first question must be showing.
         var d = AnswerDriver(asked: set, answers: [ResolvedAnswer(picks: [0], other: nil), ResolvedAnswer(picks: [3], other: nil),
-                                                    ResolvedAnswer(picks: [0], other: nil)], caps: .tmux)
+                                                    ResolvedAnswer(picks: [0], other: nil)], caps: .withArrows)
         guard case .wait(let why) = d.decide(screen: dialog.render()) else { return XCTFail() }
         XCTAssertEqual(why, AnswerDriver.notFirstMessage)
     }
@@ -642,7 +642,7 @@ final class QuestionAnswerTests: XCTestCase {
         dialog.current = 0; dialog.cursor = 2
         dialog.keys.removeAll()
         let answers = try resolved(set, [AnswerPick(question: 0, picks: [0], other: nil)])
-        var driver = AnswerDriver(asked: set, answers: answers, caps: .tmux)
+        var driver = AnswerDriver(asked: set, answers: answers, caps: .withArrows)
         guard case .abort = driver.decide(screen: dialog.render()) else { return XCTFail("a digit on the Other row would type into it") }
         XCTAssertTrue(dialog.keys.isEmpty)
     }
@@ -663,7 +663,7 @@ final class QuestionAnswerTests: XCTestCase {
         // Something moves between the last question and Review: Review lists other answers than we planned.
         let set = AskedQuestionSet(toolUseId: "t", questions: [q("Pick tags", "Tags", multi: true, ["A", "B"])])
         let dialog = FakeQuestionDialog(set)
-        var driver = AnswerDriver(asked: set, answers: try resolved(set, [AnswerPick(question: 0, picks: [0], other: nil)]), caps: .tmux)
+        var driver = AnswerDriver(asked: set, answers: try resolved(set, [AnswerPick(question: 0, picks: [0], other: nil)]), caps: .withArrows)
         var verdict: AnswerDriver.Decision?
         for _ in 0..<20 {
             let d = driver.decide(screen: dialog.render())
@@ -681,7 +681,7 @@ final class QuestionAnswerTests: XCTestCase {
         let set = AskedQuestionSet(toolUseId: "t", questions: [q("Pick tags", "Tags", multi: true, ["A", "B", "C"])])
         let dialog = FakeQuestionDialog(set)
         let answers = try resolved(set, [AnswerPick(question: 0, picks: [1], other: nil)])
-        var driver = AnswerDriver(asked: set, answers: answers, caps: .tmux)
+        var driver = AnswerDriver(asked: set, answers: answers, caps: .withArrows)
         let before = dialog.render()
         guard case .send(.text("2"), _) = driver.decide(screen: before) else { return XCTFail() }
         dialog.send(.text("2"))
@@ -693,7 +693,7 @@ final class QuestionAnswerTests: XCTestCase {
     func testLoopGivesUpWhenTheScreenNeverMatches() {
         var clock = Date(timeIntervalSince1970: 1_000)
         var driver = AnswerDriver(asked: three, answers: [ResolvedAnswer(picks: [0], other: nil), ResolvedAnswer(picks: [0], other: nil),
-                                                           ResolvedAnswer(picks: [0], other: nil)], caps: .tmux)
+                                                           ResolvedAnswer(picks: [0], other: nil)], caps: .withArrows)
         var sent = 0
         let r = AnswerLoop.run(&driver, readScreen: { "nothing to see here" }, send: { _ in sent += 1; return nil },
                                sleep: { clock = clock.addingTimeInterval($0) }, now: { clock }).result
@@ -706,7 +706,7 @@ final class QuestionAnswerTests: XCTestCase {
         let dialog = FakeQuestionDialog(set)
         let answers = try resolved(set, [AnswerPick(question: 0, picks: [1], other: nil), AnswerPick(question: 1, picks: [1], other: nil),
                                          AnswerPick(question: 2, picks: [0], other: nil)])
-        var driver = AnswerDriver(asked: set, answers: answers, caps: .tmux)
+        var driver = AnswerDriver(asked: set, answers: answers, caps: .withArrows)
         var n = 0
         let r = AnswerLoop.run(&driver, readScreen: { dialog.render() },
                                send: { key in n += 1; if n == 2 { return "The session is no longer waiting" }; dialog.send(key); return nil },
