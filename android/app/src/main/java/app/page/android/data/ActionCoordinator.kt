@@ -94,7 +94,7 @@ object ActionCoordinator {
     }
 
     /** A row sends an action only when it has that action; a row that can only Open on Mac sends nothing. */
-    fun canBegin(row: NowRow, kind: RowAction.Kind): Boolean = row.action(kind) != null
+    fun canBegin(row: NowRow, kind: RowAction.Kind): Boolean = ActionGate.canBegin(row, kind)
 
     /**
      * An Irreversible approve: the hold ring has filled. Ask for the fingerprint / face / screen lock; only if

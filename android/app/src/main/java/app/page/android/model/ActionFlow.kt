@@ -43,6 +43,30 @@ object ActionGate {
 
     /** An action that exists on the row and can be sent from the phone. */
     fun isSendable(kind: RowAction.Kind): Boolean = kind != RowAction.Kind.OPEN_ON_MAC
+
+    /**
+     * The backstop: a row only ever sends what it offers. A row Page can't type into offers only Open on Mac,
+     * so it has no Approve (or Deny) to begin, whatever its chip says or a view asks for. Pure.
+     */
+    fun canBegin(row: NowRow, kind: RowAction.Kind): Boolean = row.action(kind) != null
+
+    /**
+     * The same backstop for a banner action, which never goes through the coordinator: a send the page's row
+     * doesn't offer (a session Page can't type into, an agent it has no adapter for, a hook that takes
+     * decisions only) opens the app on the page instead, where Open on Mac is shown. [row] is null when the
+     * page is not in the inbox: there is nothing to check against, and the decision stands. Pure.
+     * (iOS ActionGate.banner.)
+     */
+    fun banner(decision: NotificationDecision, row: NowRow?): NotificationDecision {
+        if (decision !is NotificationDecision.Send || row == null) return decision
+        val kinds = when (decision.action) {
+            ReplyAction.APPROVE -> listOf(RowAction.Kind.APPROVE)
+            ReplyAction.DENY -> listOf(RowAction.Kind.DENY, RowAction.Kind.STOP)
+            ReplyAction.CARRY_ON -> listOf(RowAction.Kind.CARRY_ON)
+            ReplyAction.CUSTOM -> listOf(RowAction.Kind.TELL_INSTEAD)
+        }
+        return if (kinds.any { canBegin(row, it) }) decision else NotificationDecision.Open
+    }
 }
 
 /** The relay reply for a row action. */

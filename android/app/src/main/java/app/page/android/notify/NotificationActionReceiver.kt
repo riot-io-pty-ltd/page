@@ -10,6 +10,9 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import app.page.android.data.RelayClient
+import app.page.android.data.SessionStore
+import app.page.android.model.ActionGate
+import app.page.android.model.NowRowBuilder
 import app.page.android.model.NotificationActionId
 import app.page.android.model.NotificationActionUri
 import app.page.android.model.NotificationDecision
@@ -60,17 +63,26 @@ class NotificationActionReceiver : BroadcastReceiver() {
         // Approve from a notification is only for what the phone itself classifies as undoable, judged now from
         // the live page (never from the shortened text Page stored): anything else, or a page that is not in the
         // inbox, opens the app on the Decision sheet (iOS NotificationDecision `approveLevel`).
-        val approveLevel = RelayClient.inbox.value.firstOrNull { it.id == info.id }?.let { PhoneReversibility.verdict(it)?.level }
-        val decision = NotificationDecision.decide(NotificationResponseKind.Action(parsed.action), typed, info.kind, info.subtype, approveLevel)
+        val page = RelayClient.inbox.value.firstOrNull { it.id == info.id }
+        val approveLevel = page?.let { PhoneReversibility.verdict(it)?.level }
+        // And only what the page's row offers: a session Page can't type into offers Open on Mac alone, so a
+        // banner's Approve, Deny or reply opens the app instead. The Mac's name only colours previews, which a
+        // banner never shows (iOS ActionGate.banner).
+        val row = page?.let { NowRowBuilder.row(it, SessionStore.state.value.session(it.sessionId), "") }
+        val decision = ActionGate.banner(
+            NotificationDecision.decide(NotificationResponseKind.Action(parsed.action), typed, info.kind, info.subtype, approveLevel),
+            row,
+        )
         when (decision) {
             NotificationDecision.Open, NotificationDecision.Ignore -> {
                 // An empty reply: put the notification back as it was, which
                 // also stops Android's reply spinner.
                 PageNotifications.post(info, silent = true, status = null)
-                if (decision == NotificationDecision.Open && parsed.action == NotificationActionId.APPROVE) {
-                    // Not undoable (or not in the inbox): a notification can't offer the tap or the hold plus
-                    // biometrics it needs, so nothing is sent and the app is where to decide.
-                    PageNotifications.notice("Nothing was sent", "This one needs a closer look. Open Page to approve it.", info.id)
+                if (decision == NotificationDecision.Open) {
+                    // Not undoable, not in the inbox, or a session Page can't type into: a notification can't
+                    // offer the tap or the hold plus biometrics (or the keystrokes), so nothing is sent and the
+                    // app is where to decide.
+                    PageNotifications.notice("Nothing was sent", "This one needs a closer look. Open Page to answer it.", info.id)
                 }
             }
             is NotificationDecision.Refuse -> {
