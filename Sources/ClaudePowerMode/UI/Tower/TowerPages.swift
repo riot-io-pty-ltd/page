@@ -29,6 +29,7 @@ struct NWTowerPageContent: View {
         case .agents: NWAgentsPage(store: store)
         case .phoneApprovals: NWPhoneApprovalsPage(store: store)
         case .terminals: NWTerminalsPage(store: store)
+        case .widgets: NWWidgetsPage(store: store)
         case .shortcuts: NWShortcutsPage()
         case .pairing: NWPairingPage(store: store)
         case .about: NWAboutPage(store: store)

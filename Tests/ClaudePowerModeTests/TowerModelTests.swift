@@ -22,16 +22,16 @@ final class TowerModelTests: XCTestCase {
     // MARK: sections
 
     func testSectionOrderAndTitlesMatchTheBoard() {
-        XCTAssertEqual(TowerSection.allCases, [.power, .budget, .macsPhones, .attention, .agents, .phoneApprovals, .terminals, .shortcuts, .pairing, .about])
+        XCTAssertEqual(TowerSection.allCases, [.power, .budget, .macsPhones, .attention, .agents, .phoneApprovals, .terminals, .widgets, .shortcuts, .pairing, .about])
         XCTAssertEqual(TowerSection.allCases.map(\.title),
-                       ["Power", "Budget", "Macs & phones", "Attention", "Agents", "Phone approvals", "Terminals", "Shortcuts", "Pairing & encryption", "About Page"])
+                       ["Power", "Budget", "Macs & phones", "Attention", "Agents", "Phone approvals", "Terminals", "Widgets", "Shortcuts", "Pairing & encryption", "About Page"])
     }
 
     func testSectionMovesClampAtTheEnds() {
         XCTAssertEqual(TowerSection.moved(from: .power, by: -1), .power)
         XCTAssertEqual(TowerSection.moved(from: .about, by: 1), .about)
         XCTAssertEqual(TowerSection.moved(from: .power, by: 2), .macsPhones)
-        XCTAssertEqual(TowerSection.moved(from: .about, by: -4), .phoneApprovals)
+        XCTAssertEqual(TowerSection.moved(from: .about, by: -4), .terminals)
     }
 
     // MARK: the card
@@ -445,7 +445,7 @@ final class TowerModelTests: XCTestCase {
 
     func testActionsAreAllMapped() {
         let text = TowerControlMap.entries.map { ($0.old + " " + $0.newControl).lowercased() }
-        for keyword in ["usage capture", "power helper", "reset to defaults", "cancel", "apply", "cmux",
+        for keyword in ["usage capture", "power helper", "reset to defaults", "cancel", "apply", "cmux", "widget",
                         "hooks", "diagnostics", "pair phone", "config", "open log", "reload config",
                         "kitty", "automation", "get it"] {
             XCTAssertTrue(text.contains { $0.contains(keyword) }, "no action for \(keyword)")
@@ -456,6 +456,20 @@ final class TowerModelTests: XCTestCase {
         for section in TowerSection.allCases {
             XCTAssertTrue(TowerControlMap.entries.contains { $0.section == section }, "no control home in \(section.title)")
         }
+    }
+
+    func testWidgetsPageHasItsThreeControlsAndNamesThemAsAPage() {
+        let widgetEntries = TowerControlMap.entries.filter { $0.section == .widgets }
+        XCTAssertEqual(widgetEntries.count, 3)
+        for entry in widgetEntries {
+            XCTAssertTrue(entry.old.hasPrefix("action: "), "\(entry.old) is not an action")
+            XCTAssertTrue(entry.newControl.hasPrefix("Widgets page:"), "\(entry.newControl) does not say where it lives")
+        }
+    }
+
+    func testEveryTowerSectionHasAUniqueSymbol() {
+        let symbols = TowerSection.allCases.map(\.symbol)
+        XCTAssertEqual(Set(symbols).count, symbols.count, "two sidebar rows share a symbol")
     }
 
     func testSectionSubtitlesAreShort() {

@@ -1,4 +1,5 @@
 import AppKit
+import PageWidgetSupport
 import LocalAuthentication
 import SystemConfiguration
 import UserNotifications
@@ -90,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "this Mac"
     }()
     private let coordinator = Coordinator()
+    /// Keeps the desktop widgets' snapshot current (nothing without a signed app group).
+    private let widgets = WidgetPublisher.live()
     private var lastSnapshot: Coordinator.Snapshot?
     private var prefsController: PreferencesWindowController?
     /// True while the power-helper admin prompt is up (menu item disabled).
@@ -147,12 +150,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         ) { [weak self] _ in
             Logger.shared.log("System woke — reconnecting the relay")
             self?.coordinator.nudgeRelay()
+            self?.widgets.refreshNow()
         }
+        widgets.start()
+        // Widgets: tell macOS about the extension if it has not heard of it (off main; one pluginkit call).
+        DispatchQueue.global(qos: .utility).async { WidgetSetup.registerIfMissing() }
         DispatchQueue.global(qos: .background).async { Logger.pruneAuxiliaryLogs() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        widgets.publishQuit()
         coordinator.shutdown()
+    }
+
+    /// `page-mac://now`, `page-mac://item/<id>`, `page-mac://widgets`: a click on a widget.
+    /// A route only shows the popover (selecting a row at most) or the Tower; it never answers anything.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            guard let route = WidgetRoute.parse(url) else {
+                Logger.shared.log("Ignored a URL Page doesn’t handle: \(url.scheme ?? "?")://")
+                continue
+            }
+            open(route)
+            return
+        }
+    }
+
+    private func open(_ route: WidgetRoute) {
+        switch route {
+        case .now:
+            nowPanel.show()
+        case .item(let id):
+            nowPanel.show()
+            nowStore.select(id)
+        case .widgets:
+            showTower(section: .widgets)
+        }
     }
 
     /// `launchctl bootout`, logout and Ctrl-C send SIGTERM/SIGINT, whose
@@ -398,6 +431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         inputs.blocker = { routes[$0.sessionId]?.blocker }
         let model = NowModel.build(inputs)
         nowStore.update(model)
+        widgets.offer(WidgetSnapshotBuilder.build(model: model, snapshot: snap, cardGlow: cfg.cardGlow, now: now))
         // The Tower's sidebar card, badge and Power page follow the same model while it is open.
         if prefsController?.window?.isVisible == true { prefsController?.store.update(snapshot: snap, model: model) }
         glyph.longestWait = PulseModel.longestWait(rows: model.rows, now: now)

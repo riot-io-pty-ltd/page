@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- A WidgetKit extension must be sandboxed. -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- The one thing it may read: the snapshot Page writes into this group's
+         container. No network, no files, no Keychain. build.sh puts the
+         signing team where $(PAGE_TEAM_ID) is. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$(PAGE_TEAM_ID).app.page.shared</string>
+    </array>
+</dict>
+</plist>

@@ -8,7 +8,7 @@ import Foundation
 
 /// The sidebar sections, in board order (board 41).
 enum TowerSection: String, CaseIterable, Identifiable, Equatable {
-    case power, budget, macsPhones, attention, agents, phoneApprovals, terminals, shortcuts, pairing, about
+    case power, budget, macsPhones, attention, agents, phoneApprovals, terminals, widgets, shortcuts, pairing, about
 
     var id: String { rawValue }
 
@@ -21,6 +21,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .agents: return "Agents"
         case .phoneApprovals: return "Phone approvals"
         case .terminals: return "Terminals"
+        case .widgets: return "Widgets"
         case .shortcuts: return "Shortcuts"
         case .pairing: return "Pairing & encryption"
         case .about: return "About Page"
@@ -37,6 +38,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .agents: return "Which agents Page watches, and the tools it works with."
         case .phoneApprovals: return "Approve, deny or reply from your phone in any app, when you’re away."
         case .terminals: return "Where Page can reply, approve and stop agents for you, and what each terminal needs."
+        case .widgets: return "Page and your Claude usage on the desktop and in Notification Center."
         case .shortcuts: return "Every key Page answers to. Page only ever approves, denies or sends your own words."
         case .pairing: return "How your phone and this Mac find each other, and who can read what."
         case .about: return "This copy of Page, its files and its defaults."
@@ -53,6 +55,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .agents: return "terminal"
         case .phoneApprovals: return "iphone"
         case .terminals: return "macwindow"
+        case .widgets: return "square.grid.2x2"
         case .shortcuts: return "keyboard"
         case .pairing: return "key"
         case .about: return "info.circle"
@@ -558,6 +561,9 @@ enum TowerControlMap {
         .init(old: "action: Set up kitty remote control", oldTab: "(new)", section: .terminals, newControl: "kitty row: Set up… adds two lines to kitty.conf (backed up), Undo"),
         .init(old: "action: Allow Terminal / iTerm2 automation", oldTab: "(new)", section: .terminals, newControl: "Terminal and iTerm2 rows: Allow… asks macOS for Automation permission"),
         .init(old: "action: Get a terminal", oldTab: "(new)", section: .terminals, newControl: "Not-installed rows: Get it ↗ opens the official site"),
+        .init(old: "action: Open widget settings", oldTab: "(new)", section: .widgets, newControl: "Widgets page: Widget settings (macOS 14 and later) opens System Settings at Desktop & Dock, for showing widgets on the desktop and using iPhone widgets; adding a widget is Show me how"),
+        .init(old: "action: Widgets how-to", oldTab: "(new)", section: .widgets, newControl: "Widgets page: Show me how draws the steps (right-click the desktop, Edit Widgets, search Page, drag)"),
+        .init(old: "action: Register widgets", oldTab: "(new)", section: .widgets, newControl: "Widgets page: the status line, and Ask macOS to find them when it hasn’t"),
         .init(old: "action: Install agent hooks…", oldTab: "menu", section: .phoneApprovals, newControl: "Phone approvals page: Claude Code and Codex rows with Install… / Uninstall…, the reply-to-continue toggle and the diff preview (the Agents and Terminals pages' Install agent hooks… buttons and the menu open it)"),
         .init(old: "action: Copy local-model diagnostics", oldTab: "menu", section: .agents, newControl: "Copy local-model diagnostics button"),
         .init(old: "action: Pair phone…", oldTab: "menu", section: .pairing, newControl: "Pairing page: the QR, relay health, Copy pairing JSON and Regenerate token… (the menu's Pair phone… opens it)"),

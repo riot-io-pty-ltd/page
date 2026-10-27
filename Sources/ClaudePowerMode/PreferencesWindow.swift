@@ -265,6 +265,21 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             guard let self else { return done(false) }
             self.runDialog(.confirm(title, text, ok: okTitle, tone: .info)) { done($0 == 0) }
         }
+        // Widgets page: pluginkit and LaunchServices run off the main queue, and the
+        // registration only on a click ("Ask macOS to find them").
+        let widgetQueue = DispatchQueue(label: "ClaudePowerMode.WidgetSetup", qos: .userInitiated)
+        env.probeWidgets = { done in
+            widgetQueue.async {
+                let status = WidgetSetup.status()
+                DispatchQueue.main.async { done(status) }
+            }
+        }
+        env.registerWidgets = { done in
+            widgetQueue.async {
+                let status = WidgetSetup.register()
+                DispatchQueue.main.async { done(status) }
+            }
+        }
         env.openURL = { NSWorkspace.shared.open($0) }
         env.windowVisible = { [weak self] in self?.window?.isVisible == true }
         return env

@@ -7,5 +7,14 @@
          won't even prompt for permission, it just denies. -->
     <key>com.apple.security.automation.apple-events</key>
     <true/>
+    <!-- The group Page shares with its widget extension (the snapshot file the
+         widgets read). build.sh puts the signing team where $(PAGE_TEAM_ID) is
+         (RQRMN9LT93.app.page.shared for the maintainer's identity); macOS
+         accepts a team-prefixed group for a signed app without a profile. A
+         build with no team has this key removed. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$(PAGE_TEAM_ID).app.page.shared</string>
+    </array>
 </dict>
 </plist>

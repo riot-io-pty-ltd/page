@@ -1,4 +1,5 @@
 import Foundation
+import PageWidgetSupport
 import Combine
 
 /// Everything the Tower needs from the outside world, as closures. The live
@@ -66,6 +67,14 @@ struct TowerEnvironment {
     var openURL: (URL) -> Void = { _ in }
     /// The window is on screen (the Terminals page only refreshes then).
     var windowVisible: () -> Bool = { true }
+
+    // The Widgets page. Defaults touch nothing (no pluginkit, no LaunchServices):
+    // the harness and tests never ask macOS, and the page stays on "Checking…".
+    /// Asks macOS whether it has Page's widget extension. Off the main queue; calls back on main.
+    var probeWidgets: (_ done: @escaping (WidgetRegistration.Status) -> Void) -> Void = { _ in }
+    /// Registers this copy's extension with macOS, then looks again. Calls back on main.
+    var registerWidgets: (_ done: @escaping (WidgetRegistration.Status) -> Void) -> Void = { _ in }
+    var osMajor: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
 }
 
 /// The state of the Tower window: the form being edited, what was on screen
@@ -119,6 +128,12 @@ final class TowerStore: ObservableObject {
     /// line under the card.
     @Published private(set) var terminals: TerminalProbe.Snapshot?
     @Published private(set) var terminalNotice: TowerStatusLine?
+    /// The Widgets page: whether macOS sees the extension, the "Show me how"
+    /// guide, and whether the previews show made-up data instead of this Mac's.
+    @Published private(set) var widgetStatus: WidgetRegistration.Status = .checking
+    @Published var widgetGuideOpen = false
+    @Published var widgetPreviewsExample = false
+    @Published private(set) var widgetRegistering = false
 
     var env: TowerEnvironment
     var macName: String
@@ -172,7 +187,8 @@ final class TowerStore: ObservableObject {
     /// real window gets them from `load()` and the environment).
     func preview(helper: SleepGuard.HelperStatus? = nil, installing: Bool = false, localLines: [String]? = nil,
                  usageCapture: UsageCaptureStatus? = nil, relayTest: RelayTest? = nil, problem: String? = nil,
-                 terminals: TerminalProbe.Snapshot? = nil, terminalsUnprobed: Bool = false, terminalNotice: TowerStatusLine? = nil) {
+                 terminals: TerminalProbe.Snapshot? = nil, terminalsUnprobed: Bool = false, terminalNotice: TowerStatusLine? = nil,
+                 widgetStatus: WidgetRegistration.Status? = nil, widgetGuideOpen: Bool? = nil, widgetPreviewsExample: Bool? = nil) {
         if let helper { helperStatus = helper }
         helperInstalling = installing
         if let localLines { self.localLines = localLines }
@@ -182,6 +198,9 @@ final class TowerStore: ObservableObject {
         if terminalsUnprobed { self.terminals = nil }
         if let terminals { self.terminals = terminals }
         if let terminalNotice { self.terminalNotice = terminalNotice }
+        if let widgetStatus { self.widgetStatus = widgetStatus }
+        if let widgetGuideOpen { self.widgetGuideOpen = widgetGuideOpen }
+        if let widgetPreviewsExample { self.widgetPreviewsExample = widgetPreviewsExample }
     }
 
     // MARK: opening
@@ -219,6 +238,7 @@ final class TowerStore: ObservableObject {
         case .phoneApprovals: hooks.refresh()
         case .pairing: break // the QR waits for "Show pairing QR"
         case .terminals: if cmuxSetupOpen { cmux.open() }
+        case .widgets: refreshWidgets()
         default: break
         }
     }
@@ -253,6 +273,51 @@ final class TowerStore: ObservableObject {
     func openPairingRevealed() {
         selection = .pairing
         pairing.reveal()
+    }
+
+    // MARK: widgets
+
+    /// Asks macOS whether it has Page's widgets (when the page opens, and after a fix).
+    func refreshWidgets() {
+        env.probeWidgets { [weak self] status in self?.widgetStatusArrived(status) }
+    }
+
+    /// The first time macOS says it sees the widgets, the steps open by themselves: that is the moment
+    /// the last step (placing one) is possible. Closing them keeps them closed.
+    private var widgetGuideOpenedByItself = false
+
+    private func widgetStatusArrived(_ status: WidgetRegistration.Status) {
+        widgetStatus = status
+        if case .registered = status, !widgetGuideOpenedByItself {
+            widgetGuideOpenedByItself = true
+            widgetGuideOpen = true
+        }
+    }
+
+    /// "Ask macOS to find them": registers this copy's extension, then shows what macOS says.
+    func registerWidgets() {
+        guard !widgetRegistering else { return }
+        widgetRegistering = true
+        env.registerWidgets { [weak self] status in
+            self?.widgetRegistering = false
+            self?.widgetStatusArrived(status)
+        }
+    }
+
+    /// Opens System Settings at Desktop & Dock (macOS 14 and later), where the widget switches are. Widgets are
+    /// not added there, and Page cannot place one itself.
+    func openWidgetSettings() { env.openURL(WidgetRegistration.settingsURL(osMajor: env.osMajor)) }
+
+    func toggleWidgetGuide() { widgetGuideOpen.toggle() }
+
+    /// What the previews draw: this Mac's own numbers (with the Card glow the
+    /// Tower is previewing), or the example set.
+    var widgetPreviewSnapshot: WidgetSnapshot {
+        let at = now()
+        if !widgetPreviewsExample, let snapshot, let model {
+            return WidgetSnapshotBuilder.build(model: model, snapshot: snapshot, cardGlow: form.cardGlow, now: at)
+        }
+        return WidgetFixtures.needsYou(now: at, glow: form.cardGlow.rawValue)
     }
 
     /// Runs a dialog through the environment (the live window shows it over the Tower)
