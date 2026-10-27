@@ -195,6 +195,19 @@ private struct NWFixedNowKey: EnvironmentKey {
     static let defaultValue: Date? = nil
 }
 
+/// A signature motion pinned at one moment, for the render harness: the
+/// views that play `kind` draw the frame `time` seconds after it began
+/// instead of following the clock.
+struct NWMotionPin: Equatable {
+    enum Kind: String, Equatable { case exhale, approach, receipt, hold, dusk, dawn, brief }
+    var kind: Kind
+    var time: Double
+}
+
+private struct NWMotionPinKey: EnvironmentKey {
+    static let defaultValue: NWMotionPin? = nil
+}
+
 extension EnvironmentValues {
     /// A status-bar height for renderers with no safe area (the macOS proxy).
     var nwTopInset: CGFloat? {
@@ -229,6 +242,16 @@ extension EnvironmentValues {
         get { self[NWFixedPhaseKey.self] }
         set { self[NWFixedPhaseKey.self] = newValue }
     }
+
+    /// When set, the signature motion of that kind draws the pinned moment
+    /// (`NWMotionPin`); the render harness's `-NWTime`.
+    var nwMotion: NWMotionPin? {
+        get { self[NWMotionPinKey.self] }
+        set { self[NWMotionPinKey.self] = newValue }
+    }
+
+    /// The pinned seconds into `kind`, or nil when that motion is live.
+    func nwPinned(_ kind: NWMotionPin.Kind) -> Double? { nwMotion?.kind == kind ? nwMotion?.time : nil }
 }
 
 extension Text {

@@ -120,7 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             DispatchQueue.main.async { self?.postResumeResultNotification(result) }
         }
         coordinator.onBatteryNotice = { [weak self] notice in
-            DispatchQueue.main.async { self?.postSimpleNotification(title: notice.title, body: notice.body) }
+            DispatchQueue.main.async {
+                self?.postSimpleNotification(title: notice.title, body: notice.body)
+                // Dawn: each confirmed resume relights its star in the open panel.
+                self?.nowStore?.confirmResumed(sessionIds: notice.resumedSessionIds)
+            }
         }
         installSignalHandlers()
         setupNotifications()
@@ -384,7 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         nowStore.update(model)
         // The Tower's sidebar card, badge and Power page follow the same model while it is open.
         if prefsController?.window?.isVisible == true { prefsController?.store.update(snapshot: snap, model: model) }
-        glyph.longestWait = model.rows.map { now.timeIntervalSince($0.waitingSince) }.max() ?? 0
+        glyph.longestWait = PulseModel.longestWait(rows: model.rows, now: now)
         glyph.state = model.glyph
         if let button = statusItem.button {
             glyph.appearance = button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
@@ -393,7 +397,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             button.title = p.hasBattery && !p.onAC ? " \(p.percent)%" : ""
             // The glyph's arc and the count say what matters at a glance; on AC the
             // charge is in the tooltip rather than beside the glyph.
-            button.toolTip = "Page — \(snap.statusLine)" + (p.hasBattery && p.onAC ? " · battery \(p.percent)%" : "")
+            button.toolTip = model.glyph.mode == .paused
+                ? "Page — Paused for battery · resumes on power"   // the glyph's low glow, in words
+                : "Page — \(snap.statusLine)" + (p.hasBattery && p.onAC ? " · battery \(p.percent)%" : "")
             button.setAccessibilityLabel(model.accessibilityLabel)
         }
     }
@@ -536,17 +542,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let late: (ReplyFinished) -> Void = { [weak self] finished in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.receipts.append(ReceiptFactory.receipt(action: action, row: row, route: route, finished: finished, at: Date()))
+                let receipt = ReceiptFactory.receipt(action: action, row: row, route: route, finished: finished, at: Date())
+                self.receipts.append(receipt)
+                // A thread still showing "Didn't confirm in time" resolves again with the real result.
+                self.nowStore.finishSending(rowId: rowId, outcome: receipt.outcome)
                 self.rebuildModel()
             }
         }
+        // The receipt thread leaves the row only now: handed to the reply path.
+        nowStore.markSent(rowId: rowId)
         coordinator.replyFromMac(event: event, action: action, text: text, lateResult: late) { [weak self] finished in
             DispatchQueue.main.async {
                 guard let self else { return }
                 let receipt = ReceiptFactory.receipt(action: action, row: row, route: route, finished: finished, at: Date())
                 self.receipts.append(receipt)
                 if self.receipts.count > 20 { self.receipts.removeFirst(self.receipts.count - 20) }
-                self.nowStore.finishSending(rowId: rowId)
+                // Resolves the thread: verified only for a confirmed delivery.
+                self.nowStore.finishSending(rowId: rowId, outcome: receipt.outcome)
                 self.nowStore.notice = nil
                 self.rebuildModel()
             }

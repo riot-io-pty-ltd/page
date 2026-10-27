@@ -8,6 +8,10 @@ struct NWShell<NowContent: View, SkyContent: View>: View {
     @Binding var destination: NWDestination
     var decideCount: Int
     var workingCount: Int
+    /// The capsule pulse's count (`NowModel.pulseWaiting`); the Decide count when nil.
+    var pulseWaiting: Int? = nil
+    /// The oldest wait among them (the ripple's pace).
+    var pulseLongestWait: TimeInterval = 0
     var stop: StopFlowPhase = .idle
     var stopPlan: StopPlan
     var biometry = "Face ID"
@@ -31,7 +35,8 @@ struct NWShell<NowContent: View, SkyContent: View>: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: destination)
             NWNavCapsule(selection: Binding(get: { destination == .now ? .now : .sky },
                                             set: { destination = $0 == .now ? .now : .sky }),
-                         decideCount: decideCount, workingCount: workingCount, held: $held,
+                         decideCount: decideCount, workingCount: workingCount, pulseWaiting: pulseWaiting,
+                         pulseLongestWait: pulseLongestWait, held: $held,
                          onPulseTap: onPulseTap, onPulseHold: onPulseHold)
                 .padding(.horizontal, NightWatch.Space.gutter)
                 .padding(.bottom, 8)

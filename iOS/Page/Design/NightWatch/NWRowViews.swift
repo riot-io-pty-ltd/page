@@ -73,15 +73,25 @@ private struct NWCardTopLine: View {
 
 /// What the card's action area says once an action is under way: the 1.2 s
 /// cancel ring (nothing has been sent; tapping cancels), then the wait for
-/// the Mac, then the Mac's word. Only a confirmed delivery is teal.
+/// the Mac, then the Mac's word. Only a confirmed delivery is teal. Given
+/// the delivery state (`receipt`), it is drawn as the Receipt thread.
 struct NWOutcomeStrip: View {
     var outcome: CardOutcome
     var pending: PendingAction?
+    var receipt: ReceiptThreadInput? = nil
     var onCancel: () -> Void = {}
     @Environment(\.nwFixedNow) private var fixedNow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        if let receipt, !receipt.isEmpty, outcome != .none {
+            NWReceiptThreadView(input: receipt, onTap: onCancel)
+        } else {
+            plain
+        }
+    }
+
+    @ViewBuilder private var plain: some View {
         switch outcome {
         case .none: EmptyView()
         case .arming:
@@ -91,7 +101,7 @@ struct NWOutcomeStrip: View {
                 } else if reduceMotion {
                     TimelineView(.periodic(from: .now, by: 0.1)) { tl in arming(pending, now: tl.date) }
                 } else {
-                    TimelineView(.animation) { tl in arming(pending, now: tl.date) }
+                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in arming(pending, now: tl.date) }
                 }
             }
         case .sending:
@@ -150,6 +160,7 @@ struct NWDecideCard: View {
     var now: Date
     var outcome: CardOutcome = .none
     var pending: PendingAction? = nil
+    var receipt: ReceiptThreadInput? = nil
     var fixedHold: Double? = nil
     var onApprove: () -> Void = {}
     var onHoldComplete: () -> Void = {}
@@ -183,7 +194,7 @@ struct NWDecideCard: View {
 
     @ViewBuilder private func actions(irreversible: Bool) -> some View {
         if outcome != .none {
-            NWOutcomeStrip(outcome: outcome, pending: pending, onCancel: onCancel)
+            NWOutcomeStrip(outcome: outcome, pending: pending, receipt: receipt, onCancel: onCancel)
         } else if let deny = row.action(.deny) {
             HStack(spacing: 10) {
                 Button(deny.label, action: onDeny).buttonStyle(NWButtonStyle(kind: .quiet))
@@ -225,6 +236,8 @@ struct NWDecideCard: View {
 struct NWQuestionCard: View {
     var row: NowRow
     var now: Date
+    /// The Mac sent the question itself, so the sheet offers tap-to-tick answers.
+    var answerable = false
     var onOpen: () -> Void = {}
 
     var body: some View {
@@ -242,7 +255,7 @@ struct NWQuestionCard: View {
                 }
                 HStack {
                     Spacer()
-                    Text(row.action(.tellInstead)?.label ?? "Open")
+                    Text(answerable ? "Answer" : (row.action(.tellInstead)?.label ?? "Open"))
                         .font(NightWatch.Typo.button).foregroundColor(NightWatch.Palette.onBright.color)
                         .padding(.horizontal, 22).frame(minHeight: 44)
                         .background(Capsule().fill(LinearGradient(colors: [NightWatch.Palette.yellow.color, NightWatch.Palette.amber.color],
@@ -268,6 +281,7 @@ struct NWUndoableRow: View {
     var now: Date
     var outcome: CardOutcome = .none
     var pending: PendingAction? = nil
+    var receipt: ReceiptThreadInput? = nil
     /// Draws the row part-way through a swipe (the render harness).
     var fixedDrag: CGFloat? = nil
     var onApprove: () -> Void = {}
@@ -282,7 +296,7 @@ struct NWUndoableRow: View {
         if outcome != .none {
             VStack(alignment: .leading, spacing: 10) {
                 rowBody.background(NWGlassBackground(radius: NightWatch.Radius.row, fill: NightWatch.Palette.surface))
-                NWOutcomeStrip(outcome: outcome, pending: pending, onCancel: onCancel)
+                NWOutcomeStrip(outcome: outcome, pending: pending, receipt: receipt, onCancel: onCancel)
             }
         } else {
             swipeable
@@ -354,6 +368,7 @@ struct NWLookCard: View {
     var now: Date
     var outcome: CardOutcome = .none
     var pending: PendingAction? = nil
+    var receipt: ReceiptThreadInput? = nil
     var onSteer: () -> Void = {}
     var onOpen: () -> Void = {}
     var onCancel: () -> Void = {}
@@ -383,7 +398,7 @@ struct NWLookCard: View {
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: onOpen)
-            if outcome != .none { NWOutcomeStrip(outcome: outcome, pending: pending, onCancel: onCancel) }
+            if outcome != .none { NWOutcomeStrip(outcome: outcome, pending: pending, receipt: receipt, onCancel: onCancel) }
         }
         .padding(NightWatch.Space.md)
         .background(NWGlassBackground(radius: NightWatch.Radius.card, tint: NightWatch.Palette.amber))
@@ -401,6 +416,7 @@ struct NWReviewCard: View {
     var now: Date
     var outcome: CardOutcome = .none
     var pending: PendingAction? = nil
+    var receipt: ReceiptThreadInput? = nil
     var onLooksGood: () -> Void = {}
     var onSteer: () -> Void = {}
     var onOpen: () -> Void = {}
@@ -430,7 +446,7 @@ struct NWReviewCard: View {
             }
             .buttonStyle(.plain)
             if outcome != .none {
-                NWOutcomeStrip(outcome: outcome, pending: pending, onCancel: onCancel)
+                NWOutcomeStrip(outcome: outcome, pending: pending, receipt: receipt, onCancel: onCancel)
             } else {
                 HStack(spacing: 10) {
                     if let steer = row.action(.tellInstead) { Button(steer.label, action: onSteer).buttonStyle(NWButtonStyle(kind: .quiet)) }

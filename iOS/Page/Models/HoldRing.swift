@@ -4,9 +4,13 @@ import Foundation
 /// Irreversible approve and Stop-all (the pulse's long press). Pure timing and
 /// copy, so the views only draw it and the tests drive it with elapsed times.
 ///
-/// Trust model: the ring fills clockwise, amber warming to red only in its
-/// final third, with haptic ticks at 33%, 66% and 100%, then biometrics.
-/// Letting go early unwinds the ring and nothing is sent.
+/// Trust model (board 07, "The hold ring"): nothing is drawn for 300 ms, then
+/// the ring fills clockwise over 1.2 s, amber warming to red only in its
+/// final third, with haptic ticks at 25%, 50% and 75% and a firmer one when
+/// full; then biometrics, and a burst once they pass. Letting go early
+/// unwinds the ring backwards and nothing is sent. (The spec's prose says
+/// ticks at 33/66/100%; the board's 25/50/75% wins, with 100% kept as the
+/// completion haptic.)
 struct HoldRingSpec: Equatable {
     /// Nothing happens (and nothing is drawn) for this long, so a slow tap
     /// never starts a ring.
@@ -14,13 +18,13 @@ struct HoldRingSpec: Equatable {
     /// Time to fill from empty to full once the dead zone has passed.
     let fill: TimeInterval
 
-    /// Hold the pulse: appears after 300 ms, fills over 1.5 s.
-    static let stopAll = HoldRingSpec(deadZone: 0.3, fill: 1.5)
-    /// Hold to approve an Irreversible action: fills over 1.2 s.
-    static let irreversible = HoldRingSpec(deadZone: 0, fill: 1.2)
+    /// Hold the pulse (Stop-all): appears after 300 ms, fills over 1.2 s, full at 1.5 s.
+    static let stopAll = HoldRingSpec(deadZone: 0.3, fill: 1.2)
+    /// Hold to approve an Irreversible action: the same ring, the same timing.
+    static let irreversible = HoldRingSpec(deadZone: 0.3, fill: 1.2)
 
-    /// Where the haptic ticks fall.
-    static let ticks: [Double] = [1.0 / 3.0, 2.0 / 3.0, 1.0]
+    /// Where the haptic ticks fall: 25%, 50%, 75%, and the full one at 100%.
+    static let ticks: [Double] = [0.25, 0.5, 0.75, 1.0]
 
     /// Progress 0...1 after holding for `elapsed`. Pure.
     func progress(elapsed: TimeInterval) -> Double {
@@ -48,6 +52,22 @@ struct HoldRingSpec: Equatable {
     /// at the speed it filled. `released` is the progress at release. Pure.
     func unwound(from released: Double, since: TimeInterval) -> Double {
         max(0, released - since / fill)
+    }
+
+    // MARK: the burst
+
+    /// How long the burst lasts once biometrics pass.
+    static let burstDuration: TimeInterval = 0.6
+
+    /// The burst after biometrics pass, `elapsed` seconds in: a ring of light
+    /// leaves the full ring and opens out (scale 1 ... 1.45) as it fades, and
+    /// the core flashes once. It means "committed, sending", never
+    /// "delivered": the receipt thread says that. Pure.
+    static func burst(elapsed t: TimeInterval) -> (scale: Double, opacity: Double, flash: Double) {
+        guard t >= 0, t < burstDuration else { return (1, 0, 0) }
+        let x = t / burstDuration
+        let flash = x < 0.25 ? MotionCurve.smooth(x / 0.25) : 1 - MotionCurve.smooth((x - 0.25) / 0.75)
+        return (1 + 0.45 * MotionCurve.easeOut(x), 0.9 * (1 - MotionCurve.easeIn(x)), flash)
     }
 
     // MARK: copy

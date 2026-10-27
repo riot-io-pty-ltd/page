@@ -2,8 +2,8 @@ import Foundation
 
 // The pulse: one verb. A tap starts Dispatch; a long press is the Stop ring.
 // These are the pure decisions behind it. The hold ring itself is
-// `HoldRingSpec.stopAll` (300 ms dead zone, 1.5 s fill, ticks at a third and
-// two thirds, biometrics at full); this adds what a press means and what
+// `HoldRingSpec.stopAll` (300 ms dead zone, 1.2 s fill, ticks at 25/50/75% and
+// a firm one at full, then biometrics); this adds what a press means and what
 // Stop-all will do.
 
 /// What a press on the pulse means, judged by how long it was held.
@@ -77,7 +77,7 @@ enum StopOutcome: Equatable {
 }
 
 /// What the Stop overlay is showing. The ring appears after 300 ms, fills over
-/// 1.5 s, then Face ID / Touch ID / passcode asks, naming the scope.
+/// 1.2 s, then Face ID / Touch ID / passcode asks, naming the scope.
 enum StopFlowPhase: Equatable {
     case idle
     /// The ring is drawn, 0...1.

@@ -54,6 +54,7 @@ struct NWTowerScreen: View {
                     section(.budget) { budget }
                     section(.macs) { macs }
                     section(.attention) { attention }
+                    section(.terminals) { terminals }
                     section(.pairing) { pairing }
                     section(.appearance) { appearance }
                     section(.about) { about }
@@ -251,6 +252,23 @@ struct NWTowerScreen: View {
             divider
             towerRow(icon: "moon", tint: NightWatch.Palette.textTertiary, title: "Quiet hours and when to page", detail: "set in Page on your Mac, where they apply",
                      trailing: nil, chevron: false, action: nil)
+        }
+    }
+
+    // MARK: Works with
+
+    private var terminals: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            card {
+                ForEach(Array(TowerHosts.hosts.enumerated()), id: \.element.id) { i, h in
+                    if i > 0 { divider }
+                    towerRow(icon: h.symbol, tint: NightWatch.Palette.teal, title: h.name, detail: h.line, trailing: nil, chevron: false, action: nil)
+                }
+            }
+            Text(TowerHosts.setUpLine).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textSecondary.color)
+                .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
+            Text(TowerHosts.othersLine).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
+                .fixedSize(horizontal: false, vertical: true).padding(.horizontal, 4)
         }
     }
 

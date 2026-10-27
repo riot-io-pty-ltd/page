@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Tracks a press-and-hold against a `HoldRingSpec` and hands the progress to
-/// its content. Fills as the finger stays down, ticks the haptics at a third,
-/// two thirds and full, calls `onComplete` once when full (the caller then asks
+/// its content. Fills as the finger stays down, ticks the haptics at 25%,
+/// 50% and 75% and firmly when full, calls `onComplete` once (the caller then asks
 /// for Face ID / Touch ID / passcode), and unwinds backwards on an early
 /// release with nothing sent. Under Reduce Motion the unwind is instant.
 /// `held` (optional) reports the seconds held while pressed, nil otherwise,
@@ -98,52 +98,94 @@ struct NWHoldSurface<Content: View>: View {
     }
 }
 
-/// The big press-and-hold ring (`HoldRingSpec` for the timing). Fills
-/// clockwise, amber warming to red only in its final third, with haptic ticks
-/// at 33%, 66% and 100%. VoiceOver users get a "Confirm" action instead of a
-/// hold (the biometric check still follows).
+/// The big press-and-hold ring (`HoldRingSpec` for the timing), board 07's
+/// "hold ring": the red button alone at first; after 300 ms a ring appears
+/// and fills clockwise over 1.2 s, amber warming to red only in its final
+/// third, with haptic ticks at 25%, 50% and 75% (firm at 100%); full, the
+/// core turns to Face ID; once biometrics pass (`burstStart`), a burst of
+/// light leaves the ring. The burst means committed, never delivered: the
+/// Receipt thread below says that. Letting go early unwinds the ring
+/// backwards. VoiceOver users get a "Confirm" action instead of a hold (the
+/// biometric check still follows).
 struct NWHoldRing: View {
     var spec: HoldRingSpec
+    /// Shown in the core when the ring is full (the biometric next).
     var symbol = "faceid"
+    /// Shown in the core while holding.
+    var holdSymbol = "hand.raised"
     var size: CGFloat = 132
     /// Draws this progress instead of tracking a press (the render harness).
     var fixedProgress: Double? = nil
+    /// Biometrics passed at this moment: the burst plays and the ring stays full.
+    var burstStart: Date? = nil
     var onComplete: () -> Void
 
+    @Environment(\.nwMotion) private var pin
+
     var body: some View {
-        NWHoldSurface(spec: spec, fixedProgress: fixedProgress, onComplete: onComplete) { shown in
-            ringBody(shown)
+        NWHoldSurface(spec: spec, fixedProgress: burstStart != nil ? 1 : fixedProgress, onComplete: onComplete) { shown in
+            ZStack {
+                ringBody(shown)
+                if burstStart != nil || pin?.kind == .hold {
+                    NWOneShot(start: burstStart?.timeIntervalSinceReferenceDate, duration: HoldRingSpec.burstDuration,
+                              pinned: pin.flatMap { $0.kind == .hold ? $0.time : nil }) { e in
+                        burst(e.map { HoldRingSpec.burst(elapsed: $0) } ?? (1, 0, 0))
+                    }
+                }
+            }
         }
         .frame(width: size + 20, height: size + 20)
+        .allowsHitTesting(burstStart == nil)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Hold to confirm"))
-        .accessibilityHint(Text("Then confirm with your device"))
+        .accessibilityLabel(Text(burstStart == nil ? "Hold to confirm" : "Confirmed"))
+        .accessibilityHint(Text(burstStart == nil ? "Then confirm with your device" : ""))
         .accessibilityAddTraits(.isButton)
-        .accessibilityAction(named: Text("Confirm")) { onComplete() }
+        .accessibilityAction(named: Text("Confirm")) { if burstStart == nil { onComplete() } }
     }
 
     private func ringBody(_ shown: Double) -> some View {
         let warmth = HoldRingSpec.warmth(progress: shown)
         let tone = NightWatch.Palette.amber.mixed(with: NightWatch.Palette.red, warmth)
+        let full = shown >= 1
+        // Red is the class colour of the button; green-teal once it is full and biometrics are next.
+        let core = full ? NightWatch.Palette.green.mixed(with: NightWatch.Palette.teal, 0.25) : NightWatch.Palette.red
         return ZStack {
-            Circle().stroke(Color.white.opacity(0.08), lineWidth: 14)
+            // The track appears only once the ring does (after the dead zone).
+            Circle().stroke(Color.white.opacity(shown > 0 ? 0.08 : 0), lineWidth: 14)
                 .frame(width: size, height: size)
             Circle()
                 .trim(from: 0, to: CGFloat(shown))
                 .stroke(tone.color, style: StrokeStyle(lineWidth: 14, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .frame(width: size, height: size)
-                .shadow(color: tone.opacity(0.5 * shown).color, radius: 10)
+                .shadow(color: tone.opacity((full ? 0.75 : 0.5) * shown).color, radius: full ? 16 : 10)
             Circle()
-                .fill(RadialGradient(colors: [tone.opacity(0.95).color, tone.opacity(0.78).color],
+                .fill(RadialGradient(colors: [core.opacity(0.98).color, core.opacity(0.82).color],
                                      center: .center, startRadius: 0, endRadius: size * 0.36))
                 .frame(width: size * 0.62, height: size * 0.62)
                 .scaleEffect(1 + 0.04 * shown)
-            Image(systemName: symbol)
-                .font(.system(size: size * 0.26, weight: .regular))
+                .shadow(color: core.opacity(full ? 0.5 : 0.25).color, radius: full ? 14 : 8)
+            Image(systemName: full ? symbol : holdSymbol)
+                .font(.system(size: size * 0.24, weight: .regular))
                 .foregroundColor(NightWatch.Palette.onBright.color)
+                .contentTransition(.symbolEffect(.replace))
         }
         .frame(width: size + 20, height: size + 20)
+    }
+
+    /// The burst: a ring of light leaves the full ring and opens as it fades;
+    /// the core flashes once.
+    private func burst(_ b: (scale: Double, opacity: Double, flash: Double)) -> some View {
+        ZStack {
+            Circle().stroke(NightWatch.Palette.red.mixed(with: .init(1, 1, 1), 0.3).opacity(b.opacity).color, lineWidth: 6)
+                .frame(width: size, height: size)
+                .scaleEffect(b.scale)
+                .blur(radius: 1.5)
+            Circle().fill(Color.white.opacity(0.35 * b.flash))
+                .frame(width: size * 0.62, height: size * 0.62)
+                .blur(radius: 6)
+        }
+        .allowsHitTesting(false)
     }
 }
 

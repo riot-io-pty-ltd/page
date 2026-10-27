@@ -7,7 +7,7 @@ import Foundation
 // switch that does nothing.
 
 enum TowerSection: String, CaseIterable, Identifiable, Equatable {
-    case power, budget, macs, attention, pairing, appearance, about
+    case power, budget, macs, attention, terminals, pairing, appearance, about
 
     var id: String { rawValue }
 
@@ -18,11 +18,44 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .budget: return "Budget"
         case .macs: return "Macs"
         case .attention: return "Attention"
+        case .terminals: return "Works with"
         case .pairing: return "Pairing & encryption"
         case .appearance: return "Appearance"
         case .about: return "About"
         }
     }
+}
+
+// MARK: - Works with
+
+/// The terminals the Mac can type into for you, as a read-only list. Static:
+/// the Mac's Terminals page (Page ▸ Tower ▸ Terminals) is where each one is
+/// set up and where its live status shows, so nothing here is a switch.
+enum TowerHosts {
+    struct Host: Equatable, Identifiable {
+        let name: String
+        /// SF Symbol that exists on iOS 16.
+        let symbol: String
+        /// What the phone can do there, in a line.
+        let line: String
+        var id: String { name }
+    }
+
+    static let hosts: [Host] = [
+        Host(name: "Terminal", symbol: "macwindow", line: "reply and approve; the Mac asks macOS for permission once"),
+        Host(name: "iTerm2", symbol: "terminal", line: "reply, approve and stop; the Mac asks macOS for permission once"),
+        Host(name: "tmux", symbol: "rectangle.split.3x1", line: "reply, approve, stop and see the screen, in any terminal app"),
+        Host(name: "cmux", symbol: "square.grid.2x2", line: "everything, and start new sessions from here"),
+        Host(name: "WezTerm", symbol: "terminal.fill", line: "reply, approve, stop and see the screen; nothing to set up"),
+        Host(name: "kitty", symbol: "pawprint", line: "reply, approve, stop and see the screen; one click turns on remote control"),
+        Host(name: "Herdr", symbol: "rectangle.3.group", line: "reply, approve, stop and see the screen; nothing to set up"),
+        Host(name: "Claude Squad", symbol: "person.3", line: "each agent is a tmux pane, so it works like tmux"),
+    ]
+
+    /// Where to set them up.
+    static let setUpLine = "Set them up on your Mac in Page ▸ Tower ▸ Terminals. Each one shows there whether it is installed, in use or needs a step."
+    /// For anything else.
+    static let othersLine = "Ghostty, Warp and VS Code’s terminal can’t be typed into yet: run Claude inside tmux, or use Page’s hooks for approvals."
 }
 
 // MARK: - The Mac chip

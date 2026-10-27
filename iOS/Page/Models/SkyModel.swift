@@ -382,6 +382,35 @@ extension SkyModel {
         return out
     }
 
+    /// The most a star's tap target reaches (the drawn glyph is at most 38 pt).
+    static let maxHitRadius: Double = 28
+
+    /// The radius of each star's tap target, by id: at most `maxHitRadius`, and at most half the
+    /// distance to the nearest other star, so no two targets can overlap and a tap always belongs
+    /// to exactly the star drawn under the finger. Pure.
+    static func hitRadii(_ constellations: [Constellation], in size: SkySize) -> [String: Double] {
+        let points = starPoints(constellations, in: size)
+        let ids = constellations.flatMap(\.stars).map(\.id)
+        var out: [String: Double] = [:]
+        for id in ids where out[id] == nil {
+            guard let p = points[id] else { continue }
+            var nearest = Double.infinity
+            for other in ids where other != id {
+                if let q = points[other] { nearest = min(nearest, hypot(p.x - q.x, p.y - q.y)) }
+            }
+            out[id] = min(maxHitRadius, nearest / 2)
+        }
+        return out
+    }
+
+    /// The star under a point, or nil. Never ambiguous: the targets do not overlap. Pure.
+    static func hitTest(_ point: SkyPoint, constellations: [Constellation], in size: SkySize) -> String? {
+        let points = starPoints(constellations, in: size)
+        let radii = hitRadii(constellations, in: size)
+        return points.filter { id, p in hypot(point.x - p.x, point.y - p.y) <= (radii[id] ?? 0) }
+            .min { hypot(point.x - $0.value.x, point.y - $0.value.y) < hypot(point.x - $1.value.x, point.y - $1.value.y) }?.key
+    }
+
     /// How far a star's drawing reaches: the orbit of a stuck star, the larger glyph of one that needs you.
     static func nodeRadius(_ state: StarState) -> Double {
         switch state {

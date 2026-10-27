@@ -106,4 +106,16 @@ final class ClaudeTmuxTransportTests: XCTestCase {
         XCTAssertTrue(r.success, r.output)
         XCTAssertEqual(screen(p.id), "ok^M")
     }
+
+    /// The answer driver sends one key per call with the host's stale `inMode`; keys after the first
+    /// find the pane already out of copy mode and must still go through.
+    func testStaleInModeOnLaterKeysStillSends() throws {
+        let p = try pane()
+        XCTAssertTrue(ProcessRunner.run(wrapper, ["copy-mode", "-t", p.id], timeout: 3).succeeded)
+        for ch in ["a", "b", "c"] {
+            let r = InjectionExecutor.sendViaTmux([.text(ch)], tmuxPath: wrapper, paneId: p.id, inMode: true, awaitClosed: { true })
+            XCTAssertTrue(r.success, r.output)
+        }
+        XCTAssertEqual(screen(p.id), "abc")
+    }
 }

@@ -22,16 +22,16 @@ final class TowerModelTests: XCTestCase {
     // MARK: sections
 
     func testSectionOrderAndTitlesMatchTheBoard() {
-        XCTAssertEqual(TowerSection.allCases, [.power, .budget, .macsPhones, .attention, .agents, .shortcuts, .pairing, .about])
+        XCTAssertEqual(TowerSection.allCases, [.power, .budget, .macsPhones, .attention, .agents, .terminals, .shortcuts, .pairing, .about])
         XCTAssertEqual(TowerSection.allCases.map(\.title),
-                       ["Power", "Budget", "Macs & phones", "Attention", "Agents", "Shortcuts", "Pairing & encryption", "About Page"])
+                       ["Power", "Budget", "Macs & phones", "Attention", "Agents", "Terminals", "Shortcuts", "Pairing & encryption", "About Page"])
     }
 
     func testSectionMovesClampAtTheEnds() {
         XCTAssertEqual(TowerSection.moved(from: .power, by: -1), .power)
         XCTAssertEqual(TowerSection.moved(from: .about, by: 1), .about)
         XCTAssertEqual(TowerSection.moved(from: .power, by: 2), .macsPhones)
-        XCTAssertEqual(TowerSection.moved(from: .about, by: -3), .agents)
+        XCTAssertEqual(TowerSection.moved(from: .about, by: -4), .agents)
     }
 
     // MARK: the card
@@ -446,7 +446,8 @@ final class TowerModelTests: XCTestCase {
     func testActionsAreAllMapped() {
         let text = TowerControlMap.entries.map { ($0.old + " " + $0.newControl).lowercased() }
         for keyword in ["usage capture", "power helper", "reset to defaults", "cancel", "apply", "cmux",
-                        "hooks", "diagnostics", "pair phone", "config", "open log", "reload config"] {
+                        "hooks", "diagnostics", "pair phone", "config", "open log", "reload config",
+                        "kitty", "automation", "get it"] {
             XCTAssertTrue(text.contains { $0.contains(keyword) }, "no action for \(keyword)")
         }
     }

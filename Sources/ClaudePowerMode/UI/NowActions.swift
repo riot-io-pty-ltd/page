@@ -93,9 +93,10 @@ enum ReceiptFactory {
 
 // MARK: - Press and hold
 
-/// A press-and-hold with a visible ring: the approve of an Irreversible item
-/// (1.2 s), or Stop all (a 0.3 s dead zone, then a fill, 1.5 s in all). Red
-/// appears only in the last third of the ring.
+/// A press-and-hold with a visible ring: the approve of an Irreversible item,
+/// or Stop all. Both match the signature-motion board (HoldRingModel): nothing
+/// for 300 ms (a slow click never starts a ring), then a 1.2 s fill, 1.5 s in
+/// all. Red appears only in the last third of the ring.
 struct HoldGesture: Equatable {
     enum Kind: Equatable {
         case approve(rowId: String)
@@ -105,11 +106,12 @@ struct HoldGesture: Equatable {
     let kind: Kind
     let startedAt: Date
 
-    static let approveDuration: TimeInterval = 1.2
-    static let stopDeadZone: TimeInterval = 0.3
-    static let stopDuration: TimeInterval = 1.5
+    static let approveDeadZone: TimeInterval = HoldRingModel.deadZone
+    static let approveDuration: TimeInterval = HoldRingModel.deadZone + HoldRingModel.fill
+    static let stopDeadZone: TimeInterval = HoldRingModel.deadZone
+    static let stopDuration: TimeInterval = HoldRingModel.deadZone + HoldRingModel.fill
 
-    var deadZone: TimeInterval { kind == .stopAll ? Self.stopDeadZone : 0 }
+    var deadZone: TimeInterval { kind == .stopAll ? Self.stopDeadZone : Self.approveDeadZone }
     var duration: TimeInterval { kind == .stopAll ? Self.stopDuration : Self.approveDuration }
 
     /// Pure. 0 through the dead zone, then 0...1 up to the end of the hold.

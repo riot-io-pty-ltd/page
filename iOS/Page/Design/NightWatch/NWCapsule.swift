@@ -10,6 +10,12 @@ struct NWNavCapsule: View {
     @Binding var selection: Destination
     var decideCount: Int
     var workingCount: Int
+    /// What the pulse here counts, one ring each: the same count as every
+    /// other pulse (`NowModel.pulseWaiting`: decisions, else looks). The
+    /// Decide count when nil.
+    var pulseWaiting: Int? = nil
+    /// The oldest wait among those, which sets the ripple's pace.
+    var pulseLongestWait: TimeInterval = 0
     /// Seconds the pulse has been held, nil when it is not pressed.
     var held: Binding<TimeInterval?>? = nil
     var onPulseTap: () -> Void = {}
@@ -40,6 +46,9 @@ struct NWNavCapsule: View {
     private var pulse: some View {
         NWHoldSurface(spec: .stopAll, held: held, onComplete: onPulseHold, onTap: onPulseTap) { p in
             ZStack {
+                // The pulse, here too: an amber ring per waiting item, or the teal breath.
+                if p == 0 { NWCapsulePulse(model: PulseModel(working: workingCount, waiting: pulseWaiting ?? decideCount,
+                                                          longestWait: pulseLongestWait)) }
                 // The ring around the button fills as the hold goes on.
                 Circle().stroke(Color.white.opacity(p > 0 ? 0.12 : 0), lineWidth: 4).frame(width: 64, height: 64)
                 Circle().trim(from: 0, to: CGFloat(p))
@@ -91,8 +100,35 @@ struct NWNavCapsule: View {
     }
 }
 
+/// The pulse on the capsule's button: an amber ripple opening from the
+/// button, one ring per waiting item, or a teal ring breathing while agents
+/// work; nothing when quiet. A slow 20 fps; Reduce Motion holds a still ring.
+struct NWCapsulePulse: View {
+    var model: PulseModel
+
+    var body: some View {
+        NWAnimated(fps: 20, active: model.isAnimated) { t in
+            ZStack {
+                ForEach(Array(model.ripples(at: t).enumerated()), id: \.offset) { _, r in
+                    Circle().stroke(NightWatch.Palette.amber.opacity(0.7 * r.opacity).color, lineWidth: 1.5)
+                        .frame(width: 58 + 30 * CGFloat(r.progress), height: 58 + 30 * CGFloat(r.progress))
+                }
+                if model.mode == .working {
+                    let b = model.breath(at: t)
+                    Circle().stroke(NightWatch.Palette.teal.opacity(0.18 + 0.22 * b).color, lineWidth: 1.5)
+                        .frame(width: 62 + 6 * CGFloat(b), height: 62 + 6 * CGFloat(b))
+                } else if model.mode == .waiting {
+                    Circle().stroke(NightWatch.Palette.amber.opacity(0.55).color, lineWidth: 1.5).frame(width: 62, height: 62)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 /// The Stop ring, big, over the screen: it appears after 300 ms of holding the
-/// pulse, names the scope, fills over 1.5 s (amber, red only in the last
+/// pulse, names the scope, fills over 1.2 s (amber, red only in the last
 /// third), then Face ID / Touch ID / passcode asks. Letting go early unwinds
 /// it and nothing is sent. Dim background; the screen under it is untouched.
 struct NWStopOverlay: View {

@@ -299,6 +299,31 @@ struct NowModel: Equatable {
 
     var attentionCount: Int { needYouCount + lookCount }
 
+    /// What the pulse counts, one ring per item, on every surface (the
+    /// Horizon, the capsule, the Mac's popover and menu-bar glyph): the
+    /// decisions, else the looks, which is the count the headline names.
+    var pulseWaiting: Int { Self.pulseWaiting(need: needYouCount, look: lookCount) }
+
+    /// The pulse's count from the two section counts. Pure.
+    static func pulseWaiting(need: Int, look: Int) -> Int { need > 0 ? max(0, need) : max(0, look) }
+
+    /// The rows the pulse counts (the decisions, else the looks; never the
+    /// finished turns): their oldest wait sets the ripple's pace, as on the
+    /// Mac (`PulseModel.longestWait(rows:now:)`).
+    var pulseRows: [NowRow] {
+        let decide = rows.filter { $0.section == .decide }
+        return decide.isEmpty ? rows.filter { $0.section == .look } : decide
+    }
+
+    /// The pulse straight from the open pages, for the capsule, which has no
+    /// model of its own: how many it counts and the oldest wait among them.
+    /// The same rule as `pulseWaiting` and `pulseRows`. Pure.
+    static func pulse(inbox: [Intervention], now: Date) -> (waiting: Int, longestWait: TimeInterval) {
+        let decide = inbox.filter { NowRowBuilder.section(of: $0) == .decide }
+        let counted = decide.isEmpty ? inbox.filter { NowRowBuilder.section(of: $0) == .look } : decide
+        return (counted.count, PulseModel.longestWait(since: counted.map(\.openedAt), now: now))
+    }
+
     /// Receipts older than this are not shown.
     static let receiptWindow: TimeInterval = 15 * 60
 

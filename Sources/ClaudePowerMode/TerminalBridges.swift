@@ -94,6 +94,8 @@ enum WezTermBridge {
         case .text(let s): return (base + ["--no-paste"], Data(s.utf8))
         case .enter: return (base + ["--no-paste"], Data("\r".utf8))
         case .escape: return (base + ["--no-paste"], Data("\u{1B}".utf8))
+        // One write: ESC [ C arrives together, so it is the arrow key and not a bare Esc.
+        case .key(let k): return (base + ["--no-paste"], Data(k.bytes.utf8))
         case .pause, .awaitPromptClosed: return nil
         }
     }
@@ -199,6 +201,7 @@ enum KittyBridge {
             return (base + ["send-text"] + match + ["--bracketed-paste", "disable", "--stdin"], Data(s.utf8))
         case .enter: return (base + ["send-key"] + match + ["enter"], nil)
         case .escape: return (base + ["send-key"] + match + ["escape"], nil)
+        case .key(let k): return (base + ["send-key"] + match + [k.rawValue], nil)
         case .pause, .awaitPromptClosed: return nil
         }
     }

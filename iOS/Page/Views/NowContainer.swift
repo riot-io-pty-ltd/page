@@ -17,6 +17,11 @@ struct NowContainer: View {
     @State private var touching = false
     @EnvironmentObject var away: AwayStore
     @State private var briefExpanded = false
+    /// The rows as last drawn (ghosts included), so a card whose reply was
+    /// just confirmed can stay while its Receipt thread resolves.
+    @State private var lastRows: [NowRow] = []
+    /// Bumped when a ghost's time is up, to draw the stream without it.
+    @State private var ghostTick = 0
 
     var body: some View {
         // Ages, presence and the arm ring re-evaluate every few seconds even when no data changes.
@@ -48,17 +53,35 @@ struct NowContainer: View {
     }
 
     private func content(now: Date) -> some View {
+        _ = ghostTick
         let model = NowModel.build(inputs(now: now))
         let merged = StableOrder.merge(shown: shown, ranked: model.rows, frozen: touching)
+        // A card confirmed a moment ago stays, as a ghost, while its thread resolves.
+        let departing = DepartingRows.merge(previous: lastRows, current: merged.rows, deliveries: api.deliveries,
+                                            changedAt: api.deliveryTimes, now: Date())
         var shownModel = model
-        shownModel.rows = merged.rows
+        shownModel.rows = departing.rows
         let ids = model.rows.map(\.id)
-        return NWNowScreen(data: data(model: shownModel, queued: merged.queuedNew, now: now), actions: actions(model: model))
+        let drawn = departing.rows.map(\.id)
+        var screen = data(model: shownModel, queued: merged.queuedNew, now: now)
+        screen.ghosts = departing.ghosts
+        screen.inboxLoaded = api.inboxLoad == .loaded
+        return NWNowScreen(data: screen, actions: actions(model: model))
+            // Another Mac is another sky: nothing that changed here was news (no arrivals, exhale or dawn).
+            .id(pairing.activeMacId)
             .onChange(of: ids) { _, new in if !touching { shown = new } }
             .onChange(of: touching) { _, t in if !t { shown = ids } }
-            .onAppear { shown = ids }
+            .onChange(of: drawn) { _, _ in lastRows = departing.rows }
+            .onAppear { shown = ids; lastRows = departing.rows; activity.observePower(paused: model.paused, sessions: sessions.sessions) }
             .onChange(of: sessions.sessions) { _, list in
                 activity.observe(sessions: list, interventions: api.inbox, paused: model.paused)
+                activity.observePower(paused: model.paused, sessions: list)
+            }
+            .onChange(of: model.paused) { _, p in activity.observePower(paused: p, sessions: sessions.sessions) }
+            .task(id: departing.ghosts) {
+                guard let at = DepartingRows.nextExpiry(ghosts: departing.ghosts, changedAt: api.deliveryTimes) else { return }
+                try? await Task.sleep(nanoseconds: UInt64(max(0, at.timeIntervalSinceNow + 0.05) * 1_000_000_000))
+                if !Task.isCancelled { ghostTick += 1 }
             }
     }
 
@@ -69,12 +92,22 @@ struct NowContainer: View {
         d.strands = InFlightStrand.build(sessions: sessions.sessions, workflows: sessions.workflows, now: now)
         d.pending = coordinator.pending
         var outcomes: [String: CardOutcome] = [:]
+        var receipts: [String: ReceiptThreadInput] = [:]
         for row in model.rows {
+            let receipt = ReceiptThreadInput(pending: coordinator.pending[row.id], delivery: api.deliveries[row.id],
+                                             localProblem: coordinator.localProblems[row.id], changedAt: api.deliveryTimes[row.id])
+            if !receipt.isEmpty { receipts[row.id] = receipt }
             if let why = coordinator.localProblems[row.id] { outcomes[row.id] = .problem(why); continue }
             let o = CardOutcome.from(pending: coordinator.pending[row.id], delivery: api.deliveries[row.id], now: now)
             if o != .none { outcomes[row.id] = o }
         }
         d.outcomes = outcomes
+        d.receipts = receipts
+        d.answerable = Set(model.rows.filter { row in
+            let page = api.inbox.first { $0.id == row.id }
+            return row.chip == .question && AnswerPicker.ask(for: sessions.session(row.sessionId), pageIsQuestion: true,
+                                                             hook: page?.isBlockingHook ?? false, pageContext: page?.context) != nil
+        }.map(\.id))
         d.problem = problem(now: now)
         d.banners = banners(now: now) + NowBanner.otherMacs(TowerMacRow.build(saved: pairing.savedMacs, activeId: pairing.activeMacId,
                                                                              activeStatus: api.macStatus, others: pairing.otherStatus, now: now))

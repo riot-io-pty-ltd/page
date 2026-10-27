@@ -58,6 +58,12 @@ struct SessionRoomData {
     var pageRow: NowRow? = nil
     var pageOutcome: CardOutcome = .none
     var pagePending: PendingAction? = nil
+    /// The question this session is blocked on, when it can be answered from the phone (picker).
+    var ask: SessionAsk? = nil
+    /// Where the newest answers for that question stand.
+    var askDelivery: SentSessionCommand? = nil
+    /// The page is one Claude's question hook holds: the answers go as text through it.
+    var askViaHook = false
 
     // Screen
     var screen: SessionScreen? = nil
@@ -75,6 +81,10 @@ struct SessionRoomData {
     var composerCopy: RoomComposerMode.Copy
     var preview: String? = nil
     var composerProblem: String? = nil
+    /// Who this room types into, as it showed the user (the header and the receipt read it).
+    var target: SessionTarget? = nil
+    /// Where the last message went, or why it did not.
+    var receipt: SendReceipt? = nil
     /// A line above the composer: the Stop receipt, for instance.
     var stopNote: (text: String, tone: StopNoteTone)? = nil
 
@@ -87,6 +97,9 @@ struct SessionRoomData {
     var fixedHold: Double? = nil
 
     enum StopNoteTone { case working, good, problem }
+
+    /// The header's folder line (`SessionTarget.whereLine`).
+    var whereLine: String? { target?.whereLine }
 }
 
 struct SessionRoomActions {
@@ -104,6 +117,9 @@ struct SessionRoomActions {
     var cancel: (String) -> Void = { _ in }
     var refreshChanges: () -> Void = {}
     var copy: (String) -> Void = { _ in }
+    var dismissReceipt: (String) -> Void = { _ in }
+    /// "Submit all": the draft's answers, for the container to send.
+    var submitAnswers: (AnswerSheet) -> Void = { _ in }
 }
 
 // MARK: - The room
@@ -185,6 +201,13 @@ struct NWSessionRoom: View {
                     .font(NightWatch.Typo.subline)
                     .foregroundColor(NightWatch.Palette.textTertiary.color)
                     .lineLimit(1).minimumScaleFactor(0.8)
+                // Where this session lives, so two rooms can never read alike: the folder, and the id's first four.
+                if let line = data.whereLine {
+                    Text(line)
+                        .font(NightWatch.Typo.monoMicro)
+                        .foregroundColor(NightWatch.Palette.textQuiet.color)
+                        .lineLimit(1).truncationMode(.head)
+                }
             }
             Spacer(minLength: 4)
             NWRoomStopButton(plan: data.stop, stopping: data.stopping, agent: data.character.name,
@@ -399,6 +422,7 @@ struct NWRoomComposer: View {
     var body: some View {
         VStack(spacing: 8) {
             if let n = data.stopNote { stopNote(n) }
+            if let r = data.receipt { receiptView(r) }
             if let p = data.composerProblem {
                 Text(p).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.amber.color)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
@@ -439,6 +463,12 @@ struct NWRoomComposer: View {
                     .foregroundColor(NightWatch.Palette.textPrimary.color)
                     .focused($focused)
                     .submitLabel(.send)
+                    // The keyboard's Send key is the same Send as the button. A vertical field may
+                    // insert the Return instead of submitting: one Return typed at the end counts too.
+                    .onSubmit { submit(draft) }
+                    .onChange(of: draft) { old, new in
+                        if DraftSubmit.isReturnKey(old: old, new: new) { draft = old; submit(old) }
+                    }
                 Text(data.preview ?? data.composerCopy.hint)
                     .font(NightWatch.Typo.monoMicro)
                     .foregroundColor(NightWatch.Palette.textQuiet.color)
@@ -451,9 +481,7 @@ struct NWRoomComposer: View {
             }
             .padding(.leading, 6)
             Button {
-                let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { return }
-                actions.send(text)
+                submit(draft)
             } label: {
                 Image(systemName: "arrow.up").font(.system(.body, weight: .bold))
                     .foregroundColor(NightWatch.Palette.onBright.color)
@@ -470,6 +498,39 @@ struct NWRoomComposer: View {
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(NWGlassBackground(radius: 30, fill: NightWatch.Palette.surface.opacity(0.95)))
+    }
+
+    /// Send, from the button or the keyboard. An empty draft sends nothing: the button is greyed for the same reason.
+    private func submit(_ raw: String) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        actions.send(text)
+    }
+
+    private func receiptView(_ r: SendReceipt) -> some View {
+        let tone: NightWatch.RGBA = r.tone == .good ? NightWatch.Palette.teal : (r.tone == .problem ? NightWatch.Palette.amber : NightWatch.Palette.textSecondary)
+        return HStack(alignment: .top, spacing: 8) {
+            if r.tone == .working { ProgressView().controlSize(.small).tint(tone.color) }
+            else { Image(systemName: r.tone == .good ? "checkmark.circle" : "exclamationmark.triangle").foregroundColor(tone.color) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(r.headline).font(NightWatch.Typo.captionStrong).foregroundColor(tone.color).fixedSize(horizontal: false, vertical: true)
+                if let d = r.detail {
+                    Text(d).font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.textTertiary.color).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+            if r.tone == .problem {
+                Button { actions.dismissReceipt(r.id) } label: {
+                    Image(systemName: "xmark").font(.system(.caption, weight: .bold)).foregroundColor(NightWatch.Palette.textTertiary.color)
+                        .frame(width: 32, height: 32).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("Dismiss"))
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(tone.opacity(0.09).color))
+        .accessibilityElement(children: .combine)
     }
 
     private var quickReplies: some View {

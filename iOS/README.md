@@ -19,6 +19,11 @@ xcodegen generate
 open Page.xcodeproj
 ```
 
+The app compiles Metal shaders (the aurora, the pulse's light and the glass
+rim in `Page/Design/NightWatch/Shaders`), so Xcode needs its Metal Toolchain
+component: `xcodebuild -downloadComponent MetalToolchain` once per Mac or CI
+image. The widget and the macOS proxy renderer don't use it.
+
 Simulator builds need no Apple account. The same command CI runs:
 
 ```sh

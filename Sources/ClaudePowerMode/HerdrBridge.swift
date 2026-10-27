@@ -230,6 +230,9 @@ enum HerdrBridge {
             return request(id: id, method: "pane.send_keys", params: ["pane_id": paneId, "keys": ["enter"]])
         case .escape:
             return request(id: id, method: "pane.send_keys", params: ["pane_id": paneId, "keys": ["esc"]])
+        case .key(let k):
+            // Herdr's key names are unverified: the answer plan only reaches here after a screen check per key.
+            return request(id: id, method: "pane.send_keys", params: ["pane_id": paneId, "keys": [k.rawValue]])
         case .pause, .awaitPromptClosed:
             return nil
         }

@@ -140,7 +140,8 @@ final class NowActionsTests: XCTestCase {
         let held = handle(key(.char("1")), state(selected: "i-1")).state
         XCTAssertEqual(NowKeys.tick(state: held, now: now.addingTimeInterval(0.6)).effect, .none, "not yet")
         XCTAssertNotNil(NowKeys.tick(state: held, now: now.addingTimeInterval(0.6)).state.hold)
-        let done = NowKeys.tick(state: held, now: now.addingTimeInterval(1.2))
+        XCTAssertEqual(NowKeys.tick(state: held, now: now.addingTimeInterval(1.2)).effect, .none, "300 ms dead zone + 1.2 s fill")
+        let done = NowKeys.tick(state: held, now: now.addingTimeInterval(1.5))
         XCTAssertEqual(done.effect, .approveAfterAuth(rowId: "i-1"))
         XCTAssertNil(done.state.hold)
         XCTAssertNil(done.state.selectedId)
@@ -327,12 +328,14 @@ final class NowActionsTests: XCTestCase {
     // MARK: hold gestures
 
     func testApproveHoldTimings() {
+        // The board: the ring appears after 300 ms and fills over 1.2 s.
         let h = HoldGesture(kind: .approve(rowId: "i-1"), startedAt: now)
-        XCTAssertEqual(h.duration, 1.2, accuracy: 1e-9)
-        XCTAssertEqual(h.deadZone, 0)
-        XCTAssertEqual(h.progress(now: now.addingTimeInterval(0.6)), 0.5, accuracy: 1e-5)
-        XCTAssertFalse(h.isComplete(now: now.addingTimeInterval(1.19)))
-        XCTAssertTrue(h.isComplete(now: now.addingTimeInterval(1.2)))
+        XCTAssertEqual(h.duration, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(h.deadZone, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(h.progress(now: now.addingTimeInterval(0.25)), 0)
+        XCTAssertEqual(h.progress(now: now.addingTimeInterval(0.9)), 0.5, accuracy: 1e-5)
+        XCTAssertFalse(h.isComplete(now: now.addingTimeInterval(1.49)))
+        XCTAssertTrue(h.isComplete(now: now.addingTimeInterval(1.5)))
     }
 
     func testStopHoldHasADeadZone() {

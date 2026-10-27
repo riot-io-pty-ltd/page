@@ -40,7 +40,11 @@ struct NWGlassBackground: View {
                 if let tint {
                     shape.strokeBorder(tint.opacity(0.32).color, lineWidth: 1)
                 }
-                if glow.isOn { NWCardGlowRim(radius: radius, glow: glow) }
+                if glow.isOn {
+                    NWCardGlowRim(radius: radius, glow: glow)
+                    // glass.glsl's edge light along the top-left rim (Metal; still, no clock).
+                    NWGlassEdgeLight(radius: radius)
+                }
             }
         }
     }

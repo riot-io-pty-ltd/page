@@ -166,6 +166,14 @@ enum RenderFixtures3 {
             i.session = session("room-claude", "mac-on-claude-code", state: .idle, host: "Ghostty", canType: false,
                                 blocker: "Page can't type into Ghostty yet", ago: 300)
             i.screen = nil; i.runs = []
+        case "room-receipt", "room-receipt-refused":
+            // The receipt after a send: where it went, or why nothing did.
+            let state: SessionDeliveryState = screen == "room-receipt"
+                ? .queued(nil)
+                : .refused(reason: "target_mismatch", message: "Nothing was typed. The room showed riot-io-teltonika, but that session is now in mac-on-claude-code. Close the room and open it again.")
+            i.latestInput = SentSessionCommand(clientId: "c-2", sessionId: "room-claude", kind: .input, text: "Run the tests, then stop",
+                                               sentAt: now.addingTimeInterval(-3), state: state,
+                                               target: SessionTarget(session: i.session, macName: mac))
         case "room-changes", "room-review":
             i.session = session("room-claude", "mac-on-claude-code", state: .idle, ago: 120)
             let review = RenderFixtures.open[3]

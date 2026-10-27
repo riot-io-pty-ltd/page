@@ -470,6 +470,57 @@ final class SessionRemoteTests: XCTestCase {
         XCTAssertEqual(backends.interrupts, ["s3"])
     }
 
+    // MARK: typing into the wrong session
+
+    func testInputAndInterruptAreRefusedWhenTheRoomShowedAnotherFolder() throws {
+        let home = NSHomeDirectory()
+        backends.hosts = ["s1": SessionHostInfo(host: "tmux", canType: true, canInterrupt: true)]
+        remote.update(sessions: [session("s1", .active, cwd: home + "/projects/page")], pending: [])
+        lookingPhone()
+        // The room showed a different project: refused, nothing typed, a reason the phone can name.
+        send(command(["op": "input", "sessionId": "s1", "text": "hello", "clientId": "m1",
+                      "expectCwd": "~/projects/riot-io-teltonika", "expectTitle": "s1"]))
+        var result = try XCTUnwrap(frames("result").last)
+        XCTAssertEqual(result["reason"] as? String, "target_mismatch")
+        XCTAssertEqual(result["ok"] as? Bool, false)
+        XCTAssertTrue((result["detail"] as? String ?? "").contains("riot-io-teltonika"), "the refusal names the folder the room showed")
+        XCTAssertTrue(backends.inputs.isEmpty)
+        send(command(["op": "interrupt", "sessionId": "s1", "clientId": "m2", "expectCwd": "~/projects/riot-io-teltonika"]))
+        XCTAssertEqual(frames("result").last?["reason"] as? String, "target_mismatch")
+        XCTAssertTrue(backends.interrupts.isEmpty)
+
+        // The same folder (as the Mac lists it, with or without a trailing slash) goes through.
+        send(command(["op": "input", "sessionId": "s1", "text": "hello", "clientId": "m3", "expectCwd": "~/projects/page/"]))
+        XCTAssertEqual(frames("result").last?["code"] as? String, "delivered")
+        XCTAssertEqual(backends.inputs.map(\.text), ["hello"])
+        send(command(["op": "interrupt", "sessionId": "s1", "clientId": "m4", "expectCwd": "~/projects/page"]))
+        XCTAssertEqual(backends.interrupts, ["s1"])
+    }
+
+    func testTargetCheckIsOptionalAndLeansOnTheFolderNotTheTitle() {
+        // No expectation (an older phone): never checked.
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: nil, expectTitle: nil, cwd: "/a/b", title: "b"))
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: "", expectTitle: "", cwd: "/a/b", title: "b"))
+        // A renamed title with the same folder is fine; a different folder is not.
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: "/a/b", expectTitle: "old name", cwd: "/a/b", title: "new name"))
+        XCTAssertEqual(SessionTargetCheck.verify(expectCwd: "/a/c", expectTitle: "b", cwd: "/a/b", title: "b")?.reason, .targetMismatch)
+        // The folder vanished from the session: the phone's picture is stale.
+        XCTAssertEqual(SessionTargetCheck.verify(expectCwd: "/a/b", expectTitle: nil, cwd: nil, title: "x")?.reason, .targetMismatch)
+        // Without a folder, the title decides (case and padding ignored).
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: nil, expectTitle: "  Codex Thread ", cwd: nil, title: "codex thread"))
+        XCTAssertEqual(SessionTargetCheck.verify(expectCwd: nil, expectTitle: "other", cwd: nil, title: "codex thread")?.reason, .targetMismatch)
+        // The home folder is compared the way the Mac lists it.
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: "~/p/x", expectTitle: nil, cwd: "/Users/me/p/x", title: "x", home: "/Users/me"))
+        // A cwd longer than the phone keeps is compared on what the phone keeps.
+        let long = "/" + String(repeating: "a", count: 400)
+        XCTAssertNil(SessionTargetCheck.verify(expectCwd: String(long.prefix(300)), expectTitle: nil, cwd: long, title: "x", home: "/Users/me"))
+        // A plain command parses the new fields only from the wire.
+        let cmd = SessionCommand.parse(Data(#"{"op":"input","clientId":"c","ts":1,"sessionId":"s","text":"t","expectCwd":"~/x","expectTitle":"x"}"#.utf8))
+        XCTAssertEqual(cmd?.expectCwd, "~/x")
+        XCTAssertEqual(cmd?.expectTitle, "x")
+        XCTAssertNil(SessionCommand.parse(Data(#"{"op":"input","clientId":"c","ts":1,"sessionId":"s"}"#.utf8))?.expectCwd)
+    }
+
     // MARK: starting sessions, diffs
 
     func testStartIsRefusedUntilTurnedOn() {

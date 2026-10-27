@@ -109,6 +109,9 @@ struct LiveSession: Identifiable, Hashable {
     /// The open page for this session, if any.
     let interventionId: String?
     let preview: String
+    /// The AskUserQuestion this session is blocked on, when the Mac sent it
+    /// (a Mac that sends it also accepts `answer`).
+    var ask: SessionAsk? = nil
 
     static let defaultBlocker = "Page can't type into this session."
 
@@ -129,7 +132,7 @@ struct LiveSession: Identifiable, Hashable {
 extension LiveSession: Decodable {
     private enum CodingKeys: String, CodingKey {
         case id, backend, title, cwd, state, host, canType, typeBlocker, canInterrupt
-        case provider, lastActivityAt, interventionId, preview
+        case provider, lastActivityAt, interventionId, preview, ask
     }
 
     /// Lenient like `Intervention`: only `id` is required. A malformed
@@ -163,6 +166,7 @@ extension LiveSession: Decodable {
         let iv = (c.lenientString(.interventionId) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         interventionId = iv.isEmpty || iv.count > 200 ? nil : iv
         preview = String((c.lenientString(.preview) ?? "").prefix(300))
+        ask = (try? c.decodeIfPresent(SessionAsk.self, forKey: .ask)) ?? nil
     }
 }
 
@@ -751,8 +755,12 @@ enum SessionGrouping {
 enum SessionCommand: Equatable {
     case watch(sessionId: String?)
     case refresh
-    case input(sessionId: String, text: String)
-    case interrupt(sessionId: String)
+    /// `target` is what the room showed; the Mac refuses if the session no longer matches.
+    case input(sessionId: String, text: String, target: SessionTarget? = nil)
+    case interrupt(sessionId: String, target: SessionTarget? = nil)
+    /// The answers to the question dialog the session is blocked on (`promptKey`
+    /// is the ask's id). The Mac refuses if that is no longer the question showing.
+    case answer(sessionId: String, promptKey: String, answers: [AnswerWire], target: SessionTarget? = nil)
     /// Watch a workflow agent inside the session (its transcript).
     case watchAgent(sessionId: String, runId: String, agentId: String)
     /// The session's changes (answered by a `diff`).
@@ -770,6 +778,7 @@ enum SessionCommand: Equatable {
         case .refresh:   return "refresh"
         case .input:     return "input"
         case .interrupt: return "interrupt"
+        case .answer:    return "answer"
         case .diff:      return "diff"
         case .folders:   return "folders"
         case .start:     return "start"
@@ -785,8 +794,15 @@ enum SessionCommand: Equatable {
         switch self {
         case .watch(let sid):          body["sessionId"] = sid.map { $0 as Any } ?? NSNull()
         case .refresh:                 break
-        case .input(let sid, let text): body["sessionId"] = sid; body["text"] = text
-        case .interrupt(let sid):      body["sessionId"] = sid
+        case .input(let sid, let text, let target):
+            body["sessionId"] = sid; body["text"] = text
+            Self.addExpectation(target, to: &body)
+        case .interrupt(let sid, let target):
+            body["sessionId"] = sid
+            Self.addExpectation(target, to: &body)
+        case .answer(let sid, let promptKey, let answers, let target):
+            body["sessionId"] = sid; body["promptKey"] = promptKey; body["answers"] = answers.map(\.json)
+            Self.addExpectation(target, to: &body)
         case .watchAgent(let sid, let run, let agent):
             body["sessionId"] = sid; body["runId"] = run; body["agentId"] = agent
         case .diff(let sid):           body["sessionId"] = sid
@@ -795,6 +811,14 @@ enum SessionCommand: Equatable {
         case .interruptAll:            break
         }
         return (try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
+    }
+
+    /// The optional "what the room showed" fields. Absent (not null) when unknown, so an old
+    /// Mac sees the same bytes as before and a new one has nothing to check.
+    private static func addExpectation(_ target: SessionTarget?, to body: inout [String: Any]) {
+        guard let target else { return }
+        if let cwd = target.expectCwd { body["expectCwd"] = cwd }
+        if let title = target.expectTitle { body["expectTitle"] = title }
     }
 
     /// `{"e": <envelope>}`, the body of POST /sessions/command.
@@ -899,7 +923,7 @@ enum SessionCommandOutcome: Equatable {
 // MARK: - Delivery of one command
 
 enum SessionCommandKind: String {
-    case input, interrupt, start
+    case input, interrupt, start, answer
 }
 
 /// Where a message (or Stop) sent from the phone stands, keyed by its
@@ -953,9 +977,11 @@ enum SessionDeliveryState: Equatable {
         case (.sending, .input):     return "Sending…"
         case (.sending, .interrupt): return "Stopping…"
         case (.sending, .start):     return "Starting…"
+        case (.sending, .answer):    return "Sending your answers…"
         case (.typed, .input):       return "Typed"
         case (.typed, .interrupt):   return "Stopped"
         case (.typed, .start):       return "Started"
+        case (.typed, .answer):      return "Answered"
         case (.queued, _):           return "Queued"
         case (.refused, _):          return "Refused"
         case (.failed, _):           return "Not sent"
@@ -1006,6 +1032,10 @@ struct SentSessionCommand: Identifiable, Equatable {
     /// transcript had loaded). None of them can be its echo, which keeps an
     /// earlier identical "yes" from claiming this message's status.
     var priorEntryIds: Set<String>? = nil
+    /// What the room showed when this was sent: names the receipt.
+    var target: SessionTarget? = nil
+    /// `answer` only: the question (the ask's id) these answers were for.
+    var promptKey: String? = nil
 
     var id: String { clientId }
 }
@@ -1042,6 +1072,12 @@ enum SessionResultCopy {
             return "This session is no longer on your Mac's list."
         case "interrupt_unsupported":
             return "Page can't stop this session from here: it isn't mid-turn, or its terminal doesn't support it."
+        case "question_changed":
+            return detail ?? "That question changed on your Mac, so nothing was pressed. Open it again to see the new one."
+        case "answer_unsupported":
+            return detail ?? "Page can't answer this question from here. Answer it on your Mac."
+        case "target_mismatch":
+            return detail ?? "This room doesn't match the session on your Mac any more, so nothing was typed. Close it and open the session again."
         case "error":
             return detail ?? "Something went wrong on your Mac. Try again."
         default:

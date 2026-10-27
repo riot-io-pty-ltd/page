@@ -255,6 +255,9 @@ struct WelcomeBack: Equatable {
     let rings: [RingStat]
     /// Something needs you (the headline says so; the panel stays teal, as on the board).
     var needsYou = false
+    /// 0...1 how high and warm the sunrise that opens it rises: how much of
+    /// the absence finished well (DuskDawnModel.sunriseScale).
+    var sunrise = 0.25
 
     /// Short absences are not worth a panel.
     static let minimumAway: TimeInterval = 10 * 60
@@ -278,7 +281,8 @@ struct WelcomeBack: Equatable {
             let need = needYou > 0 ? (needYou == 1 ? "1 needs you" : "\(needYou) need you") : nil
             headline = [fin, need].compactMap { $0 }.joined(separator: ", ") + "."
         }
-        return WelcomeBack(eyebrow: eyebrow, headline: headline, rings: rings, needsYou: needYou > 0)
+        return WelcomeBack(eyebrow: eyebrow, headline: headline, rings: rings, needsYou: needYou > 0,
+                           sunrise: DuskDawnModel.sunriseScale(finished: finished, needYou: needYou, handledOnPhone: handledOnPhone))
     }
 }
 

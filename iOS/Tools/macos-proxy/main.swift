@@ -6,7 +6,8 @@ import SwiftUI
 // built from the real Page/Design and Page/Models sources) into PNGs with
 // AppKit, at an iPhone 15 Pro's point size. It is a stand-in, not the app:
 // no UIKit behaviour, system fonts resolve to the macOS SF, and safe areas
-// are not applied. Usage: render-proxy-macos.sh <out-dir> [screen...].
+// are not applied. Usage: render-proxy-macos.sh <out-dir> [screen[@seconds][:glow]...]
+// (`@seconds` is the harness's -NWTime: a signature motion that far in).
 
 @MainActor
 func render(_ args: RenderArguments, size: CGSize, to url: URL) {
@@ -39,13 +40,16 @@ MainActor.assumeIsolated {
     _ = NSApplication.shared
     for entry in screens {
         let parts = entry.split(separator: ":").map(String.init)
-        let name = parts[0]
+        let timed = parts[0].split(separator: "@").map(String.init)
+        let name = timed[0]
+        let time = timed.count > 1 ? Double(timed[1]) : nil
         let glows: [CardGlow] = parts.count > 1 ? [CardGlow(argument: parts[1]) ?? .off] : [.off, .subtle, .full]
         // Tall screens get the whole scroll content in one frame.
         let h: CGFloat = name.hasPrefix("now") ? 2200 : (name.hasPrefix("tower") ? 2300 : (name == "settled" || name == "gallery" ? 1400 : 852))
         for g in glows {
-            let a = RenderArguments(screen: name, glow: g)
-            render(a, size: CGSize(width: 393, height: h), to: out.appendingPathComponent("\(name)-glow-\(g.rawValue).png"))
+            let a = RenderArguments(screen: name, glow: g, time: time)
+            let stem = time.map { "\(name)@\(String(format: "%.2f", $0))" } ?? name
+            render(a, size: CGSize(width: 393, height: name.hasPrefix("motion-") ? 852 : h), to: out.appendingPathComponent("\(stem)-glow-\(g.rawValue).png"))
             print("rendered \(name) glow=\(g.rawValue)")
         }
     }

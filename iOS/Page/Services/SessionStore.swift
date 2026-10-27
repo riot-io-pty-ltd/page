@@ -94,6 +94,11 @@ final class SessionStore: ObservableObject {
         commands.values.filter { $0.sessionId == sessionId && $0.kind == .input }.sorted { $0.sentAt < $1.sentAt }
     }
 
+    /// The newest message typed from this phone into this session (its receipt).
+    func latestInput(for sessionId: String) -> SentSessionCommand? {
+        commands.values.filter { $0.sessionId == sessionId && $0.kind == .input }.max { $0.sentAt < $1.sentAt }
+    }
+
     /// The most recent Stop for this session, while it's worth showing.
     func latestInterrupt(for sessionId: String, now: Date) -> SentSessionCommand? {
         commands.values
@@ -152,6 +157,7 @@ final class SessionStore: ObservableObject {
         startedSessionId = nil
         pendingStart = nil
         commands = [:]
+        AnswerDraftStore.shared.clear()
         relayFeatures = nil
         macOfflineHint = false
         waitStartedAt = nil
@@ -373,7 +379,7 @@ final class SessionStore: ObservableObject {
     /// Types `text` into the session. Returns the problem to show instead
     /// when the text can't be sent; otherwise the message's delivery state
     /// appears in `commands` under a fresh `clientId`.
-    func sendInput(sessionId: String, text: String) -> SessionComposer.Problem? {
+    func sendInput(sessionId: String, text: String, target: SessionTarget? = nil) -> SessionComposer.Problem? {
         let clean: String
         switch SessionComposer.validate(text) {
         case .failure(let problem): return problem
@@ -381,37 +387,66 @@ final class SessionStore: ObservableObject {
         }
         #if DEBUG
         if isDevMode {
-            simulateDevCommand(.input, sessionId: sessionId, text: clean)
+            simulateDevCommand(.input, sessionId: sessionId, text: clean, target: target)
             return nil
         }
         #endif
         let clientId = UUID().uuidString.lowercased()
-        guard let body = encrypt(.input(sessionId: sessionId, text: clean), clientId: clientId) else {
+        guard let body = encrypt(.input(sessionId: sessionId, text: clean, target: target), clientId: clientId) else {
             record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean,
-                   state: .failed("This iPhone has no session key. Re-pair with your Mac."))
+                   state: .failed("This iPhone has no session key. Re-pair with your Mac."), target: target)
             return nil
         }
         guard SessionComposer.fitsRelay(body) else { return .tooLarge }
-        record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean, state: .sending)
+        record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean, state: .sending, target: target)
         deliver(body, clientId: clientId, op: "input")
         return nil
     }
 
-    /// Stop: the Mac presses Esc in the session.
-    func interrupt(sessionId: String) {
+    /// The newest answers sent for this very question (the ask's id), for the card's receipt.
+    func latestAnswer(for sessionId: String, promptKey: String) -> SentSessionCommand? {
+        AnswerPicker.delivery(Array(commands.values), sessionId: sessionId, promptKey: promptKey)
+    }
+
+    /// Answers the question dialog the session is blocked on. `sheet` holds
+    /// the draft; only a complete one is sent (the Mac replays it key by key
+    /// and refuses if the question on screen is no longer this one). The
+    /// delivery state appears in `commands` like a message's.
+    func sendAnswer(sessionId: String, sheet: AnswerSheet, target: SessionTarget? = nil) {
+        guard let answers = sheet.wire() else { return }
+        let summary = sheet.summaryLine
         #if DEBUG
         if isDevMode {
-            simulateDevCommand(.interrupt, sessionId: sessionId, text: "")
+            simulateDevCommand(.answer, sessionId: sessionId, text: summary, target: target, promptKey: sheet.ask.id)
             return
         }
         #endif
         let clientId = UUID().uuidString.lowercased()
-        guard let body = encrypt(.interrupt(sessionId: sessionId), clientId: clientId) else {
-            record(clientId: clientId, sessionId: sessionId, kind: .interrupt, text: "",
-                   state: .failed("This iPhone has no session key. Re-pair with your Mac."))
+        let command = SessionCommand.answer(sessionId: sessionId, promptKey: sheet.ask.id, answers: answers, target: target)
+        guard let body = encrypt(command, clientId: clientId) else {
+            record(clientId: clientId, sessionId: sessionId, kind: .answer, text: summary,
+                   state: .failed("This iPhone has no session key. Re-pair with your Mac."), target: target, promptKey: sheet.ask.id)
             return
         }
-        record(clientId: clientId, sessionId: sessionId, kind: .interrupt, text: "", state: .sending)
+        record(clientId: clientId, sessionId: sessionId, kind: .answer, text: summary, state: .sending, target: target, promptKey: sheet.ask.id)
+        deliver(body, clientId: clientId, op: "answer")
+    }
+
+    /// Stop: the Mac presses Esc in the session.
+    func interrupt(sessionId: String, target: SessionTarget? = nil) {
+        #if DEBUG
+        if isDevMode {
+            simulateDevCommand(.interrupt, sessionId: sessionId, text: "", target: target)
+            return
+        }
+        #endif
+        let clientId = UUID().uuidString.lowercased()
+        guard let body = encrypt(.interrupt(sessionId: sessionId, target: target), clientId: clientId) else {
+            record(clientId: clientId, sessionId: sessionId, kind: .interrupt, text: "",
+                   state: .failed("This iPhone has no session key. Re-pair with your Mac."), target: target)
+            return
+        }
+        record(clientId: clientId, sessionId: sessionId, kind: .interrupt, text: "", state: .sending, target: target)
         deliver(body, clientId: clientId, op: "interrupt")
     }
 
@@ -499,11 +534,12 @@ final class SessionStore: ObservableObject {
     }
 
     private func record(clientId: String, sessionId: String, kind: SessionCommandKind, text: String,
-                        state: SessionDeliveryState) {
+                        state: SessionDeliveryState, target: SessionTarget? = nil, promptKey: String? = nil) {
         let sentAt = Date()
         commands[clientId] = SentSessionCommand(clientId: clientId, sessionId: sessionId, kind: kind,
                                                 text: text, sentAt: sentAt, state: state,
-                                                priorEntryIds: transcripts[sessionId].map { Set($0.entries.map(\.id)) })
+                                                priorEntryIds: transcripts[sessionId].map { Set($0.entries.map(\.id)) },
+                                                target: target, promptKey: promptKey)
         pruneCommands()
         guard state.isPending else { return }
         timeoutTasks[clientId] = Task { [weak self] in
@@ -596,9 +632,10 @@ final class SessionStore: ObservableObject {
     /// Walks a DEV command through the states a real one goes through,
     /// using the same refusal rules as the Mac's input gate where they're
     /// visible from here.
-    private func simulateDevCommand(_ kind: SessionCommandKind, sessionId: String, text: String) {
+    private func simulateDevCommand(_ kind: SessionCommandKind, sessionId: String, text: String, target shown: SessionTarget? = nil,
+                                    promptKey: String? = nil) {
         let clientId = UUID().uuidString.lowercased()
-        record(clientId: clientId, sessionId: sessionId, kind: kind, text: text, state: .sending)
+        record(clientId: clientId, sessionId: sessionId, kind: kind, text: text, state: .sending, target: shown, promptKey: promptKey)
         let target = session(sessionId)
         Task {
             try? await Task.sleep(nanoseconds: 700_000_000)
@@ -608,6 +645,9 @@ final class SessionStore: ObservableObject {
             case .start:
                 result = CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil,
                                        detail: "Started Claude (simulated)", interventionId: nil)
+            case .answer:
+                result = CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil,
+                                       detail: "Answered in \(target.host) (simulated)", interventionId: nil)
             case .interrupt:
                 result = target.isStoppable
                     ? CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil, detail: "Pressed Esc in \(target.host) (simulated)", interventionId: nil)

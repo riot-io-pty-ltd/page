@@ -20,15 +20,15 @@ enum RenderHarness {
         "decision-failed",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
         "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
-        "tower", "tower-budget", "tower-glow",
+        "tower", "tower-budget", "tower-glow", "tower-terminals",
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
-        "room-ended", "room-blocked", "room-stop", "room-draft",
+        "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
         "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
         "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
         "widgets",
-    ]
+    ] + RenderHarnessAnswers.screens + RenderHarnessMotion.screens
 
     /// The clock the fixtures pretend it is: Tue 27 Oct 2026, 01:12 UTC.
     static let now = Date(timeIntervalSince1970: 1_793_063_520)
@@ -321,7 +321,8 @@ struct RenderHarnessRoot: View {
             screen
         }
         .environment(\.nwCardGlow, glowStore.glow)
-        .environment(\.nwFixedPhase, 3.0)
+        .environment(\.nwFixedPhase, RenderHarnessMotion.phase(args))
+        .environment(\.nwMotion, RenderHarnessMotion.pin(args))
         .environment(\.nwFixedNow, RenderHarness.now)
         .environmentObject(glowStore)
         .preferredColorScheme(.dark)
@@ -330,6 +331,8 @@ struct RenderHarnessRoot: View {
     @ViewBuilder private var screen: some View {
         let s = args.screen
         switch s {
+        case _ where s.hasPrefix("ask-"):
+            HarnessAnswers(screen: s)
         case _ where s.hasPrefix("room-"):
             HarnessRoom(screen: s)
         case _ where s.hasPrefix("welcome") || s.hasPrefix("scan") || s.hasPrefix("pair"):
@@ -338,6 +341,8 @@ struct RenderHarnessRoot: View {
             HarnessProblem(screen: s)
         case "widgets":
             HarnessWidgets()
+        case _ where s.hasPrefix("motion-"):
+            HarnessMotion(screen: s, time: RenderHarnessMotion.time(args))
         case _ where s.hasPrefix("now"):
             HarnessShell(screen: s, destination: .now)
         case _ where s.hasPrefix("sky") || s.hasPrefix("lanes"):
@@ -401,7 +406,8 @@ struct HarnessShell: View {
 
     var body: some View {
         let model = RenderFixtures.model(screen.hasPrefix("now") ? screen : "now")
-        NWShell(destination: $destination, decideCount: model.needYouCount, workingCount: model.workingCount, stop: stop, stopPlan: plan,
+        NWShell(destination: $destination, decideCount: model.needYouCount, workingCount: model.workingCount, pulseWaiting: model.pulseWaiting,
+                pulseLongestWait: PulseModel.longestWait(since: model.pulseRows.map(\.waitingSince), now: RenderFixtures.now), stop: stop, stopPlan: plan,
                 biometry: "Face ID", held: $held) {
             NWNowScreen(data: RenderFixtures.nowData(screen.hasPrefix("now") ? screen : "now"))
         } sky: {
@@ -450,7 +456,7 @@ struct HarnessTower: View {
     let screen: String
     let glow: CardGlow
     var body: some View {
-        NWTowerScreen(data: RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : nil), glow: glow))
+        NWTowerScreen(data: RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : (screen == "tower-terminals" ? .terminals : nil)), glow: glow))
             .padding(.top, 50)
     }
 }

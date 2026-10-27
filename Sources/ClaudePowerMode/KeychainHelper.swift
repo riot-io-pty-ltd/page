@@ -84,6 +84,18 @@ final class KeychainSecretStore: SecretStore {
         }
     }
 
+    /// Whether an item is saved, without reading the secret: an attributes-only
+    /// query never returns the password and never shows a prompt.
+    func exists() -> Bool {
+        var query = baseQuery
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        Self.disallowUI(&query)
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        return status == errSecSuccess || status == errSecInteractionNotAllowed
+    }
+
     func write(_ secret: String) -> String? {
         guard !secret.isEmpty else { return "The password is empty" }
         // Delete + add (not update) so the item's access list is rebuilt for

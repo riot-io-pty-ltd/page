@@ -7,6 +7,8 @@ import Foundation
 @MainActor
 final class ActivityStore: ObservableObject {
     @Published private(set) var log: ActivityLog
+    /// The last battery pause as the phone saw it: the dusk and the dawn.
+    @Published private(set) var duskDawn = DuskDawnLog()
     private var lastSaved = Date.distantPast
     private var lastStates: [String: StarState] = [:]
     private var lastBucket = 0
@@ -34,12 +36,21 @@ final class ActivityStore: ObservableObject {
         }
     }
 
+    /// Records the power story: the pause, the dawn, and each session seen
+    /// working again after it (a star relights only on that).
+    func observePower(paused: Bool, sessions: [LiveSession], now: Date = Date()) {
+        var next = duskDawn
+        next.observe(paused: paused, working: Set(sessions.filter { $0.state == .active }.map(\.id)), at: now)
+        if next != duskDawn { duskDawn = next }
+    }
+
     /// Writes what is held (the app is going to the background).
     func flush() { log.save(to: defaults); lastSaved = Date() }
 
     /// Forgets everything (another Mac's sessions are different sessions).
     func reset() {
         log = ActivityLog()
+        duskDawn = DuskDawnLog()
         lastStates = [:]
         log.save(to: defaults)
     }

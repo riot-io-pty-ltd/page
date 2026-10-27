@@ -119,14 +119,14 @@ final class GlyphModelTests: XCTestCase {
     func testBreathPeriod() {
         XCTAssertEqual(GlyphDrawing.breathPeriod(agents: 1), 4.0, accuracy: 1e-9)
         XCTAssertLessThan(GlyphDrawing.breathPeriod(agents: 10), 4.0)
-        XCTAssertGreaterThanOrEqual(GlyphDrawing.breathPeriod(agents: 10), 2.5)
-        XCTAssertEqual(GlyphDrawing.breathPeriod(agents: 1000), 2.5, accuracy: 1e-9, "never below 2.5 s")
+        XCTAssertGreaterThanOrEqual(GlyphDrawing.breathPeriod(agents: 10), 3)
+        XCTAssertEqual(GlyphDrawing.breathPeriod(agents: 1000), 3, accuracy: 1e-9, "never below 3 s, the phone's floor too")
         XCTAssertEqual(GlyphDrawing.breathPeriod(agents: 0), 4.0, accuracy: 1e-9)
     }
 
     func testRippleIntervalShortensWithTheWaitButNeverBelowOneAndAHalf() {
-        XCTAssertEqual(GlyphDrawing.rippleInterval(longestWait: 0), 4.0, accuracy: 1e-9)
-        XCTAssertEqual(GlyphDrawing.rippleInterval(longestWait: 120), 3.0, accuracy: 1e-9)
+        XCTAssertEqual(GlyphDrawing.rippleInterval(longestWait: 0), 3.0, accuracy: 1e-9)
+        XCTAssertEqual(GlyphDrawing.rippleInterval(longestWait: 120), 2.7, accuracy: 1e-9)
         XCTAssertEqual(GlyphDrawing.rippleInterval(longestWait: 3600), 1.5, accuracy: 1e-9)
     }
 

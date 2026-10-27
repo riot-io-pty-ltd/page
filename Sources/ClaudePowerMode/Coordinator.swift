@@ -36,6 +36,9 @@ final class Coordinator {
     struct BatteryNotice: Equatable {
         let title: String
         let body: String
+        /// Sessions whose resume was confirmed (power back): the panel's dawn
+        /// relights their stars. Empty for every other notice.
+        var resumedSessionIds: [String] = []
     }
 
     struct Snapshot {
@@ -1276,7 +1279,8 @@ final class Coordinator {
                 let body = done == total
                     ? "Told \(Self.projectList(sessions)) to carry on."
                     : "\(total - done) couldn’t be resumed (not idle, or you’d already typed in it)."
-                self.onBatteryNotice?(BatteryNotice(title: title, body: body))
+                let resumed = sessions.filter { resumedKeys.contains(BatteryPolicy.key($0)) }.map(\.sessionId)
+                self.onBatteryNotice?(BatteryNotice(title: title, body: body, resumedSessionIds: resumed))
                 self.publishSnapshot()
             }
         }

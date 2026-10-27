@@ -245,6 +245,35 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         env.openConfigFile = { NSWorkspace.shared.open(Config.configURL) }
         env.openLog = { NSWorkspace.shared.open(Logger.logURL) }
         env.reloadFromMenu = { coordinator.reloadConfig() }
+        // Terminals page: every probe runs off the main queue; every write is a click.
+        let terminalQueue = DispatchQueue(label: "ClaudePowerMode.TerminalProbe", qos: .userInitiated)
+        env.probeTerminals = { sessions, done in
+            terminalQueue.async {
+                let snapshot = TerminalProbe.gather(sessions: sessions, probeHosts: { coordinator.probeHosts($0) })
+                DispatchQueue.main.async { done(snapshot) }
+            }
+        }
+        env.previewKitty = { KittyConfigFile.preview() }
+        env.enableKitty = { KittyConfigFile.enable() }
+        env.undoKitty = { KittyConfigFile.undo() }
+        env.requestAutomation = { id, done in
+            terminalQueue.async {
+                let access = TerminalProbe.requestAutomation(id)
+                DispatchQueue.main.async { done(access) }
+            }
+        }
+        env.confirm = { title, text, okTitle in
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = text
+            alert.addButton(withTitle: okTitle)
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .informational
+            NSApp.activate(ignoringOtherApps: true)
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+        env.openURL = { NSWorkspace.shared.open($0) }
+        env.windowVisible = { [weak self] in self?.window?.isVisible == true }
         return env
     }
 

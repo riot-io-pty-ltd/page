@@ -116,6 +116,8 @@ struct PendingToolUse: Equatable {
     /// .classifierFields`): the full, unredacted command or path, kept apart
     /// from `summary`, which is redacted and clipped. nil when not known.
     var fields: [String: String]? = nil
+    /// An AskUserQuestion's structured questions (raw, for answering from the phone).
+    var asked: AskedQuestionSet? = nil
 }
 
 /// What the end of a transcript says about the conversation.
@@ -612,7 +614,8 @@ final class InterventionDetector {
                         if pendingById[id] == nil { pendingOrder.append(id) }
                         pendingById[id] = PendingToolUse(id: id, name: name,
                                                          summary: describeToolUse(name: name, input: input),
-                                                         fields: Reversibility.classifierFields(toolName: name, input: input))
+                                                         fields: Reversibility.classifierFields(toolName: name, input: input),
+                                                         asked: name == "AskUserQuestion" ? AskedQuestionSet.parse(toolUseId: id, input: input) : nil)
                         // Text before a tool call is narration, not the answer.
                         textsSinceLastTool.removeAll()
                     default:

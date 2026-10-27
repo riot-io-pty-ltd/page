@@ -8,7 +8,7 @@ import Foundation
 
 /// The sidebar sections, in board order (board 41).
 enum TowerSection: String, CaseIterable, Identifiable, Equatable {
-    case power, budget, macsPhones, attention, agents, shortcuts, pairing, about
+    case power, budget, macsPhones, attention, agents, terminals, shortcuts, pairing, about
 
     var id: String { rawValue }
 
@@ -19,6 +19,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "Macs & phones"
         case .attention: return "Attention"
         case .agents: return "Agents"
+        case .terminals: return "Terminals"
         case .shortcuts: return "Shortcuts"
         case .pairing: return "Pairing & encryption"
         case .about: return "About Page"
@@ -33,6 +34,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "Where Page sends pages, and what your phone may do on this Mac."
         case .attention: return "What is worth interrupting you for, and when."
         case .agents: return "Which agents Page watches, and the tools it works with."
+        case .terminals: return "Where Page can reply, approve and stop agents for you, and what each terminal needs."
         case .shortcuts: return "Every key Page answers to. Page only ever approves, denies or sends your own words."
         case .pairing: return "How your phone and this Mac find each other, and who can read what."
         case .about: return "This copy of Page, its files and its defaults."
@@ -47,6 +49,7 @@ enum TowerSection: String, CaseIterable, Identifiable, Equatable {
         case .macsPhones: return "laptopcomputer"
         case .attention: return "bell.badge"
         case .agents: return "terminal"
+        case .terminals: return "macwindow"
         case .shortcuts: return "keyboard"
         case .pairing: return "key"
         case .about: return "info.circle"
@@ -545,7 +548,11 @@ enum TowerControlMap {
         .init(old: "action: power helper Install / Check again", oldTab: "Power", section: .power, newControl: "Power helper row"),
         .init(old: "action: Reset to defaults", oldTab: "window", section: .about, newControl: "Reset to defaults (footer)"),
         .init(old: "action: Cancel / Apply", oldTab: "window", section: .about, newControl: "Cancel and Apply (footer)"),
-        .init(old: "action: Set up cmux…", oldTab: "menu", section: .agents, newControl: "Set up cmux… button"),
+        .init(old: "action: Set up cmux…", oldTab: "menu", section: .agents, newControl: "Set up cmux… button (also on the Terminals page)"),
+        .init(old: "action: Terminals list", oldTab: "(new)", section: .terminals, newControl: "Terminals page: every supported terminal, its status chip and one action"),
+        .init(old: "action: Set up kitty remote control", oldTab: "(new)", section: .terminals, newControl: "kitty row: Set up… adds two lines to kitty.conf (backed up), Undo"),
+        .init(old: "action: Allow Terminal / iTerm2 automation", oldTab: "(new)", section: .terminals, newControl: "Terminal and iTerm2 rows: Allow… asks macOS for Automation permission"),
+        .init(old: "action: Get a terminal", oldTab: "(new)", section: .terminals, newControl: "Not-installed rows: Get it ↗ opens the official site"),
         .init(old: "action: Install agent hooks…", oldTab: "menu", section: .agents, newControl: "Install agent hooks… button"),
         .init(old: "action: Copy local-model diagnostics", oldTab: "menu", section: .agents, newControl: "Copy local-model diagnostics button"),
         .init(old: "action: Pair phone…", oldTab: "menu", section: .pairing, newControl: "Pair phone… button"),

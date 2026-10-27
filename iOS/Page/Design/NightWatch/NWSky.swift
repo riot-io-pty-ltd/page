@@ -12,6 +12,8 @@ struct SkyScreenData {
     var standby: [TowerMacRow] = []
     /// The star whose tooltip is open.
     var selectedStar: String? = nil
+    /// The last battery pause: the dusk and the dawn (`NWDuskDawn.swift`).
+    var duskDawn = DuskDawnLog()
 }
 
 struct SkyScreenActions {
@@ -34,6 +36,7 @@ struct NWSkyScreen: View {
     var data: SkyScreenData
     var actions = SkyScreenActions()
     @Environment(\.nwTopInset) private var topInsetOverride
+    @Environment(\.nwMotion) private var motionPin
 
     var body: some View {
         GeometryReader { geo in
@@ -93,8 +96,10 @@ struct NWSkyScreen: View {
 
     private var skyBackdrop: some View {
         ZStack {
-            NWAnimated { t in
-                NWAuroraCanvas(palette: data.sky.paused ? .dusk : .working, seconds: t)
+            // A battery pause that has settled is a still night: no clock while agents are paused for power.
+            NWAnimated(active: !data.sky.paused || data.powerStoryMoving(pin: motionPin)) { t in
+                let light = data.skyLight(at: t, pin: motionPin)
+                NWLivingAurora(palette: light.palette, seconds: t, stars: light.stars)
                     .mask(LinearGradient(stops: [.init(color: .white, location: 0), .init(color: .white.opacity(0.7), location: 0.5), .init(color: .clear, location: 1)],
                                          startPoint: .top, endPoint: .bottom))
             }
@@ -120,7 +125,9 @@ struct NWSkyScreen: View {
                     let skySize = SkySize(width: Double(geo.size.width), height: Double(geo.size.height))
                     let points = SkyModel.starPoints(data.sky.constellations, in: skySize)
                     let labels = SkyModel.labelLayout(data.sky.constellations, in: skySize)
-                    ForEach(data.sky.constellations) { c in constellation(c, in: geo.size, points: points, labels: labels) }
+                    let hit = SkyModel.hitRadii(data.sky.constellations, in: skySize)
+                    powerStory(height: geo.size.height)
+                    ForEach(data.sky.constellations) { c in constellation(c, in: geo.size, points: points, labels: labels, hit: hit) }
                     moon.position(x: geo.size.width - 64, y: 34)
                     if let id = data.selectedStar, let star = star(id) { tooltip(star).position(x: geo.size.width / 2, y: geo.size.height - 150) }
                 }
@@ -141,7 +148,8 @@ struct NWSkyScreen: View {
 
     private func star(_ id: String) -> SkyStar? { data.sky.constellations.flatMap(\.stars).first { $0.id == id } }
 
-    private func constellation(_ c: Constellation, in size: CGSize, points: [String: SkyPoint], labels: [SkyLabelPlacement]) -> some View {
+    private func constellation(_ c: Constellation, in size: CGSize, points: [String: SkyPoint], labels: [SkyLabelPlacement],
+                               hit: [String: Double]) -> some View {
         func pt(_ s: SkyStar) -> CGPoint {
             let p = points[s.id] ?? SkyModel.starPoint(s, in: SkySize(width: Double(size.width), height: Double(size.height)))
             return CGPoint(x: p.x, y: p.y)
@@ -167,7 +175,14 @@ struct NWSkyScreen: View {
                     .accessibilityAddTraits(.isHeader)
             }
             ForEach(Array(c.stars.enumerated()), id: \.element.id) { i, s in
-                Button { actions.select(data.selectedStar == s.id ? nil : s.id) } label: { starView(s) }
+                // The tap target is a circle that never reaches another star's (SkyModel.hitRadii): what
+                // is drawn under the finger is exactly the star that opens.
+                Button { actions.select(data.selectedStar == s.id ? nil : s.id) } label: {
+                    starView(s)
+                        .allowsHitTesting(false)
+                        .overlay(Color.clear.frame(width: CGFloat(hit[s.id] ?? SkyModel.maxHitRadius) * 2, height: CGFloat(hit[s.id] ?? SkyModel.maxHitRadius) * 2)
+                            .contentShape(Circle()))
+                }
                     .buttonStyle(.plain)
                     .position(pt(s))
                     .accessibilityLabel(Text("\(s.title), \(c.name), \(s.state.label.lowercased())"))
@@ -194,12 +209,12 @@ struct NWSkyScreen: View {
         ZStack {
             switch s.state {
             case .needsYou:
+                // The pulse's amber ripple: one waiting item, one ring.
                 NWAnimated { t in
-                    let ph = (t / 2.4).truncatingRemainder(dividingBy: 1)
                     ZStack {
-                        ForEach(0..<2, id: \.self) { i in
-                            let p = (ph + Double(i) * 0.5).truncatingRemainder(dividingBy: 1)
-                            Circle().stroke(color.opacity(0.4 * (1 - p)).color, lineWidth: 1).frame(width: size * (1.4 + 1.2 * p), height: size * (1.4 + 1.2 * p))
+                        ForEach(Array(PulseModel(working: 0, waiting: 1).ripples(at: t + Double(s.seed % 13) * 0.21).enumerated()), id: \.offset) { _, r in
+                            Circle().stroke(color.opacity(0.5 * r.opacity).color, lineWidth: 1)
+                                .frame(width: size * (1.2 + 1.4 * r.progress), height: size * (1.2 + 1.4 * r.progress))
                         }
                     }
                 }
@@ -210,14 +225,36 @@ struct NWSkyScreen: View {
             case .rateLimited:
                 NWStarShape(seed: s.seed).stroke(color.opacity(0.9).color, lineWidth: 1.4).frame(width: size * 0.7, height: size * 0.7)
             default:
-                NWAnimated { t in
-                    let twinkle = s.state == .working ? 0.85 + 0.15 * sin(t * 1.6 + Double(s.seed % 7)) : 1
-                    NWStarGlyph(seed: s.seed, color: color, size: size, brightness: s.brightness * twinkle * (s.state == .paused ? 0.6 : 1))
+                // Working stars breathe with the pulse's teal breath, each a little out of step; in the
+                // power story they exhale and dim together at dusk and relight one by one at dawn.
+                let working = s.state == .working
+                NWAnimated(fps: 20, active: working || data.powerStoryMoving(pin: motionPin)) { t in
+                    let relights = data.duskDawn.dawnAt != nil || motionPin?.kind == .dawn ? data.relights : [:]
+                    let light = data.starLight(s, at: t, pin: motionPin, relights: relights)
+                    let breath = working ? 0.85 + 0.15 * PulseModel(working: 1, waiting: 0).breath(at: t + Double(s.seed % 7) * 0.57) : 1
+                    NWStarGlyph(seed: s.seed, color: color, size: size, brightness: s.brightness * breath * light.brightness)
+                        .scaleEffect(light.scale)
                 }
             }
         }
         .frame(width: 56, height: 56)
-        .contentShape(Rectangle())
+    }
+
+    /// The power story over the sky: the grey horizon band under the stars
+    /// while paused, and the dawn's gold rising from it. No clock otherwise.
+    private func powerStory(height: CGFloat) -> some View {
+        let bandY = max(120, height - CGFloat(SkyModel.labelBottomReserve) - 4)
+        return NWAnimated(active: data.powerStoryMoving(pin: motionPin)) { t in
+            let light = data.skyLight(at: t, pin: motionPin)
+            ZStack(alignment: .top) {
+                // The dawn rises from the band to the very top of the screen (over the header too).
+                if let d = light.dawn { NWDawnLight(sweep: d.sweep, warmth: d.warmth).frame(height: bandY + 160).offset(y: -160) }
+                NWHorizonBand(opacity: light.band).offset(y: bandY - 6)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     private var moon: some View {
@@ -251,7 +288,7 @@ struct NWSkyScreen: View {
             NWStarGlyph(seed: s.seed, color: s.state.color, size: 30)
             VStack(alignment: .leading, spacing: 2) {
                 Text(s.title).font(NightWatch.Typo.monoSmall).foregroundColor(NightWatch.Palette.textPrimary.color).lineLimit(1)
-                Text("\(s.state.label.capitalized) · \(s.agent)" + (s.lastAction.isEmpty ? "" : " · \(s.lastAction)"))
+                Text("\(s.state.label.capitalized) · \(s.agent) · #\(s.id.prefix(4))" + (s.lastAction.isEmpty ? "" : " · \(s.lastAction)"))
                     .font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.textTertiary.color).lineLimit(1)
             }
             Spacer(minLength: 0)

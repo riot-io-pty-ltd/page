@@ -33,18 +33,28 @@ struct NWRoomScreenLens: View {
     private static let font = Font.system(size: 12, design: .monospaced)
 
     var body: some View {
-        if let screen = data.screen {
-            VStack(spacing: 10) {
-                statusRow
-                terminal(screen)
-                Text(data.runs.isEmpty ? "Redacted before it leaves the Mac" : "Tap a workflow row to open it · redacted before it leaves the Mac")
-                    .font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+        Group {
+            if let screen = data.screen {
+                VStack(spacing: 10) {
+                    statusRow
+                    terminal(screen)
+                    Text(data.runs.isEmpty ? "Redacted before it leaves the Mac" : "Tap a workflow row to open it · redacted before it leaves the Mac")
+                        .font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 4)
+                }
+                .padding(.horizontal, NightWatch.Space.lg).padding(.top, 8).padding(.bottom, 8)
+            } else {
+                VStack { Spacer(); Text("The screen appears once your Mac sends it.").font(NightWatch.Typo.body)
+                    .foregroundColor(NightWatch.Palette.textTertiary.color); Spacer() }.frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, NightWatch.Space.lg).padding(.top, 8).padding(.bottom, 8)
-        } else {
-            VStack { Spacer(); Text("The screen appears once your Mac sends it.").font(NightWatch.Typo.body)
-                .foregroundColor(NightWatch.Palette.textTertiary.color); Spacer() }.frame(maxWidth: .infinity)
+        }
+        // The question the terminal is asking, answerable over its own screen.
+        .overlay(alignment: .bottom) {
+            if let ask = data.ask {
+                NWAnswerHost(ask: ask, delivery: data.askDelivery, route: data.answerRoute, mac: data.macName,
+                             agent: data.character.name, compact: true, viaHook: data.askViaHook, onSubmit: actions.submitAnswers)
+                .padding(.horizontal, NightWatch.Space.md).padding(.bottom, 8)
+            }
         }
     }
 

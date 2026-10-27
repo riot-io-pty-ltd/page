@@ -71,6 +71,47 @@ enum Keystroke: Equatable {
     /// out a menu that opens after the last check, because the sessions
     /// file lags the screen slightly.
     case awaitPromptClosed
+    /// A navigation key. Only the question-answering plan sends these
+    /// (`AnswerDriver`); approvals and replies never do.
+    case key(NavKey)
+}
+
+/// The keys Page presses to move around a question dialog.
+enum NavKey: String, Equatable {
+    case right, left, up, down, tab
+
+    /// tmux `send-keys` name.
+    var tmuxName: String {
+        switch self {
+        case .right: return "Right"
+        case .left: return "Left"
+        case .up: return "Up"
+        case .down: return "Down"
+        case .tab: return "Tab"
+        }
+    }
+
+    /// Bytes a terminal sends for the key (cursor keys in normal mode).
+    var bytes: String {
+        switch self {
+        case .right: return "\u{1B}[C"
+        case .left: return "\u{1B}[D"
+        case .up: return "\u{1B}[A"
+        case .down: return "\u{1B}[B"
+        case .tab: return "\t"
+        }
+    }
+
+    /// The final character after ESC [ for the arrows; nil for Tab.
+    var csiFinal: String? {
+        switch self {
+        case .right: return "C"
+        case .left: return "D"
+        case .up: return "A"
+        case .down: return "B"
+        case .tab: return nil
+        }
+    }
 }
 
 enum KeystrokePlan: Equatable {
@@ -1101,12 +1142,13 @@ enum InjectionExecutor {
         // A pane in copy-mode would swallow the keys as mode commands.
         if inMode {
             let r = ProcessRunner.run(tmuxPath, ["send-keys", "-t", paneId, "-X", "cancel"], timeout: 3)
-            if !r.succeeded { return fail("copy-mode cancel failed: \(r.stderr)", "Couldn't take tmux pane \(paneId) out of copy mode") }
+            // "not in a mode": an earlier key of the same run (or the person) already left it; the pane is what we wanted.
+            if !r.succeeded, !r.stderr.contains("not in a mode") { return fail("copy-mode cancel failed: \(r.stderr)", "Couldn't take tmux pane \(paneId) out of copy mode") }
         }
         var sentSomething = false
         for step in steps {
             switch step {
-            case .text, .enter, .escape:
+            case .text, .enter, .escape, .key:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
                 break
@@ -1132,6 +1174,8 @@ enum InjectionExecutor {
                 r = ProcessRunner.run(tmuxPath, ["send-keys", "-t", paneId, "Enter"], timeout: 3)
             case .escape:
                 r = ProcessRunner.run(tmuxPath, ["send-keys", "-t", paneId, "Escape"], timeout: 3)
+            case .key(let k):
+                r = ProcessRunner.run(tmuxPath, ["send-keys", "-t", paneId, k.tmuxName], timeout: 3)
             case .pause(let t):
                 usleep(useconds_t(t * 1_000_000))
                 continue
@@ -1170,7 +1214,7 @@ enum InjectionExecutor {
                     return fail("prompt still open after Esc", "Denied, but the prompt didn't close — your message wasn't sent")
                 }
                 continue
-            case .text, .enter, .escape:
+            case .text, .enter, .escape, .key:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             }
             guard let r = send(step), r.succeeded else {
@@ -1213,12 +1257,16 @@ enum InjectionExecutor {
         while i < steps.count {
             let step = steps[i]
             switch step {
-            case .text, .enter, .escape:
+            case .text, .enter, .escape, .key:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
                 break
             }
             switch step {
+            case .key:
+                // `do script` always appends Return, which would select the next row.
+                return fail("terminal_app cannot press navigation keys",
+                            "Terminal.app can't press the arrow or Tab keys — answer at your Mac, or use tmux or iTerm2")
             case .text(let s):
                 let r = runTerminalCommand(tty: tty, body: "do script \(ProcessRunner.appleScriptQuote(flattenLines(s))) in t\nreturn \"ok\"")
                 guard r.ok else { return fail(r.output, partialDetail(sentSomething, r.detail)) }
@@ -1308,7 +1356,7 @@ enum InjectionExecutor {
         var sentSomething = false
         for step in steps {
             switch step {
-            case .text, .enter, .escape:
+            case .text, .enter, .escape, .key:
                 // After the text's pause, so the Return is checked last.
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
@@ -1319,6 +1367,9 @@ enum InjectionExecutor {
             case .text(let s): payload = ProcessRunner.appleScriptQuote(flattenLines(s))
             case .enter: payload = "(character id 13)"
             case .escape: payload = "(character id 27)"
+            case .key(let k):
+                // One write, so the TUI reads ESC [ C as the arrow key and not as a bare Esc.
+                payload = k.csiFinal.map { "((character id 27) & \(ProcessRunner.appleScriptQuote("[" + $0)))" } ?? "(character id 9)"
             case .pause(let t):
                 usleep(useconds_t(t * 1_000_000))
                 continue
@@ -1481,7 +1532,7 @@ enum InjectionExecutor {
         var dismissedMenu = false
         while i < steps.count {
             switch steps[i] {
-            case .text, .enter, .escape:
+            case .text, .enter, .escape, .key:
                 if let why = precheck(steps[i]) {
                     return fail("precheck: \(why)", dismissedMenu ? "Denied, but your message wasn't sent — \(why)" : partialDetail(sentSomething, why))
                 }
@@ -1543,6 +1594,8 @@ enum InjectionExecutor {
                 sentSomething = true
             case .enter:
                 return fail("refused bare Enter", partialDetail(sentSomething, "Couldn't type into that cmux pane"))
+            case .key:
+                return fail("refused navigation key", "Page can't press the arrow or Tab keys in cmux — answer at your Mac")
             case .pause(let t):
                 usleep(useconds_t(t * 1_000_000))
             case .awaitPromptClosed:

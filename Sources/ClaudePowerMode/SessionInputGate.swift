@@ -19,6 +19,12 @@ struct SessionCommandResult: Equatable, Error {
         case disabled, stale, replay
         case notFound = "not_found"
         case interruptUnsupported = "interrupt_unsupported"
+        /// The phone's room shows a different folder or title than this session has.
+        case targetMismatch = "target_mismatch"
+        /// An `answer` for a question that is no longer the one showing.
+        case questionChanged = "question_changed"
+        /// An `answer` Page won't press (previews, a host it can't read, a hook holds it).
+        case answerUnsupported = "answer_unsupported"
         case error
     }
 

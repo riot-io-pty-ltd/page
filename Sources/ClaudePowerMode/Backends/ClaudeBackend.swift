@@ -878,6 +878,16 @@ final class ClaudeBackend: AgentBackend {
         }
     }
 
+    /// The phone's answers to a pending AskUserQuestion dialog (or the Mac
+    /// panel's): the keys come from `AnswerDriver`, one at a time, each after
+    /// a screen check. `completion` runs on the injection queue.
+    func remoteAnswer(sessionId: String, request: AnswerRequest, completion: @escaping (SessionCommandResult) -> Void) {
+        let io = AnswerDelivery.liveIO(registry: registry)
+        injectionQueue.async {
+            completion(AnswerDelivery.run(sessionId: sessionId, request: request, io: io))
+        }
+    }
+
     /// The phone's Stop button: Esc in a busy session.
     func remoteInterrupt(sessionId: String, interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
         let io = remoteIO()

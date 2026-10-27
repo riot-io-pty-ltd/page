@@ -1,23 +1,31 @@
 import SwiftUI
 
 /// Drives an animation from the clock, or holds one still frame when Reduce
-/// Motion is on (or the render harness pins a time). `content` gets seconds.
+/// Motion is on, the render harness pins a time, or `active` is false (a
+/// still pulse runs no clock at all). `content` gets seconds. `fps` caps the
+/// redraw rate: 30 for the aurora's slow ribbons (the blurred layers are
+/// costly at 120 Hz), lower for a slow breath; nothing redraws while the app
+/// is backgrounded or the screen is covered.
 struct NWAnimated<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.nwFixedPhase) private var fixed
     @Environment(\.nwAnimationsPaused) private var covered
     @Environment(\.scenePhase) private var scenePhase
+    var fps: Double
+    var active: Bool
     var content: (Double) -> Content
 
-    init(@ViewBuilder content: @escaping (Double) -> Content) { self.content = content }
+    init(fps: Double = 30, active: Bool = true, @ViewBuilder content: @escaping (Double) -> Content) {
+        self.fps = fps
+        self.active = active
+        self.content = content
+    }
 
     var body: some View {
-        if reduceMotion || fixed != nil {
+        if reduceMotion || fixed != nil || !active {
             content(fixed ?? 2.0)
         } else {
-            // 30 fps is plenty for slow ribbons (the blurred layers are costly at
-            // 120 Hz), and nothing redraws while the app is backgrounded or covered.
-            TimelineView(.animation(minimumInterval: 1.0 / 30, paused: covered || scenePhase != .active)) { tl in
+            TimelineView(.animation(minimumInterval: 1.0 / max(1, min(fps, 30)), paused: covered || scenePhase != .active)) { tl in
                 content(tl.date.timeIntervalSinceReferenceDate)
             }
         }
@@ -30,6 +38,8 @@ struct NWAnimated<Content: View>: View {
 struct NWAuroraCanvas: View {
     var palette: NightWatch.AuroraPalette
     var seconds: Double
+    /// How much of the star field is left: it fades with the dusk, as the shader's does.
+    var starField: Double = 1
 
     var body: some View {
         Canvas { ctx, size in
@@ -37,7 +47,7 @@ struct NWAuroraCanvas: View {
             ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
                 Gradient(colors: [palette.skyTop.color, palette.skyBottom.color]),
                 startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
-            guard palette.intensity > 0 else { stars(ctx, w, h, 0.3); return }
+            guard palette.intensity > 0 else { stars(ctx, w, h, 0.3 * starField); return }
 
             let t = seconds * 0.4 * palette.speed
             let k = palette.intensity
@@ -86,11 +96,12 @@ struct NWAuroraCanvas: View {
                     Gradient(colors: [c.opacity(0).color, c.opacity((0.30 + 0.40 * seed2) * k).color]),
                     startPoint: CGPoint(x: x, y: rect.minY), endPoint: CGPoint(x: x, y: rect.maxY)))
             }
-            stars(ctx, w, h, 0.4 + 0.6 * k)
+            stars(ctx, w, h, (0.4 + 0.6 * k) * starField)
         }
     }
 
     private func stars(_ ctx: GraphicsContext, _ w: CGFloat, _ h: CGFloat, _ strength: Double) {
+        guard strength > 0.005 else { return }
         for i in 0..<40 {
             let sx = abs(sin(Double(i) * 78.233) * 43758.5453).truncatingRemainder(dividingBy: 1)
             let sy = abs(sin(Double(i) * 12.9898 + 4.1) * 24634.6345).truncatingRemainder(dividingBy: 1)
@@ -100,67 +111,6 @@ struct NWAuroraCanvas: View {
             ctx.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)),
                      with: .color(Color.white.opacity((0.25 + 0.4 * twinkle) * strength)))
         }
-    }
-}
-
-/// The Horizon: the top of the Now screen. Aurora behind, the pulse in the
-/// middle, the one honest sentence below it. It fades into the page, so it
-/// has no edge of its own to look cut off.
-struct NWHorizon: View {
-    var palette: NightWatch.AuroraPalette
-    var pulse: NWPulseOrb.Style
-    var headline: String
-    var subline: String
-    /// A third, quieter line ("Page is keeping watch. Go to sleep.").
-    var footnote: String? = nil
-    var height: CGFloat = 330
-    /// Space kept clear at the top for the status bar and the Mac chip.
-    var topInset: CGFloat = 0
-
-    private var orbSize: CGFloat { min(150, max(96, height - 112)) }
-
-    var body: some View {
-        ZStack(alignment: .top) {
-            NWAnimated { t in NWAuroraCanvas(palette: palette, seconds: t) }
-            // Fade into the page.
-            LinearGradient(stops: [.init(color: .clear, location: 0),
-                                   .init(color: NightWatch.Palette.backgroundDeep.opacity(0.0).color, location: 0.35),
-                                   .init(color: NightWatch.Palette.backgroundDeep.opacity(0.85).color, location: 0.88),
-                                   .init(color: NightWatch.Palette.backgroundDeep.color, location: 1)],
-                           startPoint: .top, endPoint: .bottom)
-            VStack(spacing: 6) {
-                // The orb shrinks with a short Horizon so the headline never rides over it.
-                NWPulseOrb(style: pulse)
-                    .frame(width: orbSize, height: orbSize)
-                    .padding(.top, topInset + 38)
-                Spacer(minLength: 0)
-                Text(headline)
-                    .font(NightWatch.Typo.hero)
-                    .kerning(NightWatch.Typo.heroTracking)
-                    .foregroundColor(NightWatch.Palette.textPrimary.color)
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.7)
-                    .lineLimit(2)
-                Text(subline)
-                    .font(NightWatch.Typo.subline)
-                    .foregroundColor(NightWatch.Palette.textSecondary.color)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .padding(.bottom, footnote == nil ? 14 : 0)
-                if let footnote {
-                    Text(footnote).font(NightWatch.Typo.subline)
-                        .foregroundColor(NightWatch.Palette.textTertiary.color)
-                        .multilineTextAlignment(.center)
-                        .padding(.top, 2).padding(.bottom, 14)
-                }
-            }
-            .padding(.horizontal, NightWatch.Space.xl)
-        }
-        .frame(height: height + topInset)
-        .clipped()
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(headline). \(subline)"))
-        .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -182,10 +132,74 @@ struct NWPulseGlyph: Shape {
     }
 }
 
-/// The pulse: one glyph for everything. Amber with a ripple per waiting item
-/// when something needs you, teal breathing while agents work, still
-/// star-white when quiet, a dim low glow at dusk. Reduce Motion: a static
-/// ring with no ripple.
+
+extension NightWatch.AuroraPalette {
+    /// Part-way from this palette to `other` (0 = self, 1 = other): how the
+    /// aurora settles after the last item clears, fades to dusk and comes
+    /// back at dawn, as one sky rather than a cut.
+    func mixed(with other: NightWatch.AuroraPalette, _ t: Double) -> NightWatch.AuroraPalette {
+        let k = max(0, min(1, t))
+        if k == 0 { return self }
+        if k == 1 { return other }
+        return NightWatch.AuroraPalette(c1: c1.mixed(with: other.c1, k), c2: c2.mixed(with: other.c2, k), c3: c3.mixed(with: other.c3, k),
+                                        skyTop: skyTop.mixed(with: other.skyTop, k), skyBottom: skyBottom.mixed(with: other.skyBottom, k),
+                                        intensity: intensity + (other.intensity - intensity) * k, speed: speed + (other.speed - speed) * k)
+    }
+
+    /// The same mix, perceptually (`PerceptualMix`): how the needs-you aurora
+    /// settles in the exhale. The curtains keep their chroma (half way they
+    /// are an aurora green and rose, not khaki and mauve), the sky behind them
+    /// meets at a neutral night, and the light lifts a little through the
+    /// middle, the one long breath out. Dusk and dawn keep the plain blend.
+    /// The Mac's is the same.
+    func mixedPerceptual(with other: NightWatch.AuroraPalette, _ t: Double) -> NightWatch.AuroraPalette {
+        let k = max(0, min(1, t))
+        if k == 0 { return self }
+        if k == 1 { return other }
+        let lift = 0.2 * sin(Double.pi * k)
+        return NightWatch.AuroraPalette(c1: c1.mixedPerceptual(with: other.c1, k), c2: c2.mixedPerceptual(with: other.c2, k),
+                                        c3: c3.mixedPerceptual(with: other.c3, k),
+                                        skyTop: skyTop.mixedPerceptual(with: other.skyTop, k, keepChroma: false),
+                                        skyBottom: skyBottom.mixedPerceptual(with: other.skyBottom, k, keepChroma: false),
+                                        intensity: intensity + (other.intensity - intensity) * k + lift, speed: speed + (other.speed - speed) * k)
+    }
+}
+
+extension NightWatch.RGBA {
+    /// Part-way to `other` through OKLCH (`PerceptualMix`), for the exhale:
+    /// amber reaches teal by way of a bright green, never khaki.
+    func mixedPerceptual(with other: NightWatch.RGBA, _ t: Double, keepChroma: Bool = true) -> NightWatch.RGBA {
+        let k = max(0, min(1, t))
+        if k == 0 { return self }
+        if k == 1 { return other }
+        let c = PerceptualMix.mix((r, g, b), (other.r, other.g, other.b), k, keepChroma: keepChroma)
+        return NightWatch.RGBA(c.r, c.g, c.b, a + (other.a - a) * k)
+    }
+}
+
+extension PulseModel.Mode {
+    /// Star-white quiet, teal working, amber waiting, a violet dusk.
+    var tone: NightWatch.RGBA {
+        switch self {
+        case .quiet: return NightWatch.Palette.star
+        case .working: return NightWatch.Palette.teal
+        case .waiting: return NightWatch.Palette.amber
+        case .dusk: return NightWatch.Palette.violet
+        }
+    }
+}
+
+/// THE PULSE: one glyph for everything (`PulseModel` for the timing). Still
+/// star-white when quiet; a teal breath every 4 s while agents work, a little
+/// quicker with more of them; an amber ripple when something needs you, one
+/// ring per waiting item, faster the longer the oldest has waited (never more
+/// than one ring every 1.5 s); a dim low glow at dusk. After the last item
+/// clears, `exhale` (seconds since) turns it amber to teal over 800 ms with
+/// one long breath out. Reduce Motion: a static ring with the count.
+///
+/// A still pulse runs no clock; a breath redraws at 20 fps, a ripple at 30.
+/// `halo` false leaves the glow and rings to a layer drawn behind it (the
+/// Horizon's Metal pulse), so the two never double up.
 struct NWPulseOrb: View {
     enum Style: Equatable {
         case needsYou, working, quiet, dusk
@@ -201,60 +215,114 @@ struct NWPulseOrb: View {
             case .dusk: self = .dusk
             }
         }
+
+        /// The pulse a style stands for when no counts are given (widgets,
+        /// the gallery): two waiting, one working.
+        var defaultModel: PulseModel {
+            switch self {
+            case .needsYou: return PulseModel(working: 0, waiting: 2)
+            case .working: return PulseModel(working: 1, waiting: 0)
+            case .quiet, .hollowSlate, .hollowAmber: return PulseModel(working: 0, waiting: 0)
+            case .dusk: return PulseModel(working: 0, waiting: 0, paused: true)
+            }
+        }
     }
     var style: Style
+    /// The counts behind the pulse; `style.defaultModel` when nil.
+    var model: PulseModel? = nil
+    /// Seconds since the last waiting item cleared, while the exhale plays.
+    var exhale: Double? = nil
+    var halo = true
+    /// Draws this moment (seconds) with no clock of its own: the caller's
+    /// timeline drives it (the Horizon runs one clock for sky and pulse).
+    var time: Double? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private var color: NightWatch.RGBA {
+    private var pulse: PulseModel { model ?? style.defaultModel }
+    private var hollow: Bool { style == .hollowSlate || style == .hollowAmber }
+    private var exhaling: Bool { exhale.map { !PulseModel.exhale(elapsed: $0).finished } ?? false }
+
+    /// The colour now: the mode's, or part-way from amber during the exhale.
+    private var color: NightWatch.RGBA { Self.color(style: style, pulse: pulse, exhale: exhale) }
+
+    static func color(style: Style, pulse: PulseModel, exhale: Double?) -> NightWatch.RGBA {
         switch style {
-        case .needsYou: return NightWatch.Palette.amber
-        case .working: return NightWatch.Palette.teal
-        case .quiet: return NightWatch.Palette.star
-        case .dusk: return NightWatch.Palette.violet
         case .hollowSlate: return NightWatch.RGBA(hex: 0x8A93A8)
         case .hollowAmber: return NightWatch.Palette.amber
+        default:
+            let base = pulse.mode.tone
+            guard let e = exhale else { return base }
+            return NightWatch.Palette.amber.mixedPerceptual(with: base, PulseModel.exhale(elapsed: e).colour)
         }
     }
 
-    private var hollow: Bool { style == .hollowSlate || style == .hollowAmber }
-
     var body: some View {
-        NWAnimated { t in
-            let dusk = style == .dusk
-            let breath = style == .working ? 0.5 + 0.5 * sin(t * 2 * .pi / 4) : 0.5
-            let period = style == .needsYou ? 2.4 : 4.0
-            let ph = (t / period).truncatingRemainder(dividingBy: 1)
-            GeometryReader { geo in
-                let s = min(geo.size.width, geo.size.height)
-                ZStack {
-                    // Ripples: wide, thin rings that open outwards.
-                    ForEach(0..<2, id: \.self) { i in
-                        let p = style == .needsYou ? (ph + Double(i) * 0.5).truncatingRemainder(dividingBy: 1) : 0.0
+        Group {
+            if let time {
+                frame(time)
+            } else {
+                NWAnimated(fps: exhaling ? 30 : pulse.framesPerSecond, active: !hollow && (pulse.isAnimated || exhaling)) { t in
+                    frame(t)
+                }
+            }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private func frame(_ t: Double) -> some View {
+        let mode = hollow ? PulseModel.Mode.quiet : pulse.mode
+        let dusk = mode == .dusk
+        let quiet = mode == .quiet && !hollow
+        let breath = pulse.breath(at: t)
+        let swell = exhale.map { PulseModel.exhale(elapsed: $0).swell } ?? 0
+        let count = reduceMotion ? pulse.staticCount : nil
+        // Reduce Motion keeps the ring and drops the ripples.
+        let ripples = reduceMotion || hollow ? [] : pulse.ripples(at: t)
+        return GeometryReader { geo in
+            let s = min(geo.size.width, geo.size.height)
+            ZStack {
+                if halo {
+                    // Ripples: thin rings that open from the core ring outwards and fade.
+                    ForEach(Array(ripples.enumerated()), id: \.offset) { _, r in
                         Circle()
-                            .stroke(color.opacity(style == .needsYou ? 0.40 * (1 - p) : 0.14).color, lineWidth: 1)
+                            .stroke(color.opacity(0.62 * r.opacity).color, lineWidth: 1.2)
                             .frame(width: s, height: s)
-                            .scaleEffect(style == .needsYou ? 0.55 + 0.45 * p : (i == 0 ? 0.98 : 0.74))
+                            .scaleEffect(0.5 + 0.5 * r.progress)
+                    }
+                    // The exhale lets one last ring go as it turns.
+                    if let e = exhale, swell > 0 {
+                        let p = MotionCurve.clamp01(e / PulseModel.exhaleDuration)
+                        Circle().stroke(color.opacity(0.45 * (1 - p)).color, lineWidth: 1.2)
+                            .frame(width: s, height: s).scaleEffect(0.5 + 0.5 * MotionCurve.easeOut(p))
                     }
                     // Glow.
                     Circle()
-                        .fill(RadialGradient(colors: [color.opacity(hollow ? 0.07 : (dusk ? 0.16 : 0.45)).color, color.opacity(0).color],
+                        .fill(RadialGradient(colors: [color.opacity(hollow ? 0.07 : (dusk ? 0.16 : (quiet ? 0.30 : 0.45))).color, color.opacity(0).color],
                                              center: .center, startRadius: 1, endRadius: s * 0.42))
                         .frame(width: s, height: s)
-                        .scaleEffect(1 + 0.10 * breath)
-                    // The ring and its bright core.
-                    Circle()
-                        .stroke(color.opacity(dusk ? 0.35 : 0.85).color, lineWidth: 1.6)
-                        .frame(width: s * 0.5, height: s * 0.5)
-                        .scaleEffect(1 + 0.04 * breath)
+                        .scaleEffect(1 + 0.10 * (breath - 0.5) * 2 * (mode == .working ? 1 : 0) + 0.30 * swell)
+                }
+                // The ring (none when quiet: still white is just the light).
+                Circle()
+                    .stroke(color.opacity(dusk ? 0.35 : (quiet ? 0.0 : 0.85)).color, lineWidth: 1.6)
+                    .frame(width: s * 0.5, height: s * 0.5)
+                    .scaleEffect(1 + (mode == .working ? 0.04 * (breath - 0.5) * 2 : 0) + 0.06 * swell)
+                if let count {
+                    Text("\(count)")
+                        .font(.system(size: s * 0.2, weight: .bold, design: .rounded))
+                        .foregroundColor(color.color)
+                        .minimumScaleFactor(0.5)
+                } else {
                     NWPulseGlyph()
                         .fill(hollow ? AnyShapeStyle(Color.clear)
                               : AnyShapeStyle(RadialGradient(colors: [Color.white.opacity(dusk ? 0.4 : 1), color.opacity(dusk ? 0.3 : 0.92).color],
                                                              center: .center, startRadius: 0, endRadius: s * 0.15)))
                         .overlay(NWPulseGlyph().stroke(color.opacity(dusk ? 0.3 : (hollow ? 0.8 : 0.9)).color, lineWidth: hollow ? 2 : 1.4))
                         .frame(width: s * 0.26, height: s * 0.26)
+                        .scaleEffect(1 + (mode == .working ? 0.03 * (breath - 0.5) * 2 : 0))
                 }
-                .frame(width: geo.size.width, height: geo.size.height)
             }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
-        .accessibilityHidden(true)
     }
 }

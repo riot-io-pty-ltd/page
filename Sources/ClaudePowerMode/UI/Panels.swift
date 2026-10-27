@@ -82,6 +82,77 @@ enum NowKeyTranslator {
     }
 }
 
+// MARK: - Motion gate
+
+/// Whether a panel's motion may run: the panel is on screen and not covered,
+/// the display is awake and this is the active user session. Every timeline in
+/// the panel pauses when it is false (Page's first promise is battery life).
+final class NWMotionGate: ObservableObject {
+    @Published private(set) var active = false
+    private weak var window: NSWindow?
+    private var shown = false
+    private var screensAsleep = false
+    private var sessionInactive = false
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    init() {
+        let ws = NSWorkspace.shared.notificationCenter
+        watch(ws, NSWorkspace.screensDidSleepNotification) { $0.screensAsleep = true }
+        watch(ws, NSWorkspace.screensDidWakeNotification) { $0.screensAsleep = false }
+        watch(ws, NSWorkspace.sessionDidResignActiveNotification) { $0.sessionInactive = true }
+        watch(ws, NSWorkspace.sessionDidBecomeActiveNotification) { $0.sessionInactive = false }
+    }
+
+    deinit { observers.forEach { $0.0.removeObserver($0.1) } }
+
+    /// The panel whose visibility and occlusion count.
+    func attach(_ window: NSWindow) {
+        self.window = window
+        watch(NotificationCenter.default, NSWindow.didChangeOcclusionStateNotification, object: window) { _ in }
+        recompute()
+    }
+
+    private func watch(_ center: NotificationCenter, _ name: Notification.Name, object: AnyObject? = nil,
+                       _ body: @escaping (NWMotionGate) -> Void) {
+        observers.append((center, center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+            if let self { body(self); self.recompute() }
+        }))
+    }
+
+    func setShown(_ on: Bool) {
+        shown = on
+        if !on { seenVisible = false }
+        recompute()
+        // A panel just ordered in may report its occlusion a moment later.
+        if on { DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.recompute() } }
+    }
+
+    /// The window server has said this showing is visible at least once.
+    private var seenVisible = false
+
+    private func recompute() {
+        let ordered = window?.isVisible ?? false
+        let unoccluded = window?.occlusionState.contains(.visible) ?? false
+        if ordered && unoccluded { seenVisible = true }
+        // Occlusion only ever pauses a panel it has first reported visible: a
+        // non-activating panel can be reported occluded while on screen (seen
+        // with the live check), and a frozen panel is worse than a few frames.
+        let covered = seenVisible && !unoccluded
+        let on = shown && ordered && !covered && !screensAsleep && !sessionInactive
+        if on != active { active = on }
+    }
+}
+
+/// Feeds a gate's state to the motion in a panel's SwiftUI tree.
+struct NWMotionRoot<Content: View>: View {
+    @ObservedObject var gate: NWMotionGate
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content().environment(\.nwMotionActive, gate.active)
+    }
+}
+
 // MARK: - The Now panel
 
 final class NowPanelController: NSObject {
@@ -105,13 +176,21 @@ final class NowPanelController: NSObject {
     var contentView: NSView { host }
     var frame: NSRect { panel.frame }
 
+    private let gate: NWMotionGate
+
     init(store: NowStore) {
         self.store = store
-        host = NSHostingView(rootView: AnyView(NWAppearanceRoot { NWNowPopover(store: store) }.environment(\.colorScheme, .dark)))
+        let gate = NWMotionGate()
+        self.gate = gate
+        host = NSHostingView(rootView: AnyView(NWAppearanceRoot { NWMotionRoot(gate: gate) { NWNowPopover(store: store) } }
+            .environment(\.colorScheme, .dark)))
         super.init()
+        gate.attach(panel)
         panel.contentView = host
         // Resize when the content changes height; never replace the root view.
         storeObserver = store.objectWillChange.sink { [weak self] _ in self?.scheduleRefit() }
+        // The hold ring's ticks, felt on a Force Touch trackpad.
+        store.haptic = { _ in NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now) }
     }
 
     deinit { removeMonitors() }
@@ -132,6 +211,8 @@ final class NowPanelController: NSObject {
         let top = (anchor?.minY ?? vf.maxY) - 6
         panel.place(content: host, width: NightWatch.Space.popoverWidth, centerX: centerX, top: top, screen: screen)
         panel.makeKeyAndOrderFront(nil)
+        store.animates = true
+        gate.setShown(true)
         installMonitors()
         onVisibilityChange?(true)
     }
@@ -142,6 +223,8 @@ final class NowPanelController: NSObject {
         guard isShown else { return }
         removeMonitors()
         panel.orderOut(nil)
+        gate.setShown(false)
+        store.animates = false
         store.reset()
         if restoreFocus, let app = previousApp { TerminalFocus.bringForward(app) }
         previousApp = nil
@@ -358,11 +441,20 @@ final class DispatchPanelController: NSObject {
 final class WelcomeBackController: NSObject {
     private let panel = NWPanel(allowsKey: false)
     private var dismissTimer: Timer?
+    private lazy var gate: NWMotionGate = {
+        let g = NWMotionGate()
+        g.attach(panel)
+        return g
+    }()
 
     func show(_ model: WelcomeBack, near anchor: NSRect?, duration: TimeInterval = WelcomeBack.displayDuration) {
         dismissTimer?.invalidate()
+        let gate = self.gate
+        // The sunrise plays from the moment it drops in.
+        let shownAt = Date()
         let host = NSHostingView(rootView: AnyView(
-            NWAppearanceRoot { NWWelcomeBackView(model: model) }.environment(\.colorScheme, .dark)
+            NWAppearanceRoot { NWMotionRoot(gate: gate) { NWWelcomeBackView(model: model, shownAt: shownAt) } }
+                .environment(\.colorScheme, .dark)
                 .onTapGesture { [weak self] in self?.dismiss() }))
         panel.contentView = host
         let screen = NSScreen.screens.first { $0.frame.intersects(anchor ?? .zero) } ?? NSScreen.main
@@ -386,12 +478,14 @@ final class WelcomeBackController: NSObject {
                 panel.animator().setFrame(final, display: true)
             }
         }
+        gate.setShown(true)
         dismissTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in self?.dismiss() }
     }
 
     func dismiss() {
         dismissTimer?.invalidate()
         dismissTimer = nil
+        gate.setShown(false)
         guard panel.isVisible else { return }
         if NightWatch.systemReduceMotion {
             panel.orderOut(nil)

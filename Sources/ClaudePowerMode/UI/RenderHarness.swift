@@ -53,6 +53,31 @@ enum RenderHarness {
         return url
     }
 
+    /// Renders through SwiftUI's own renderer, which (unlike `cacheDisplay`)
+    /// captures Metal shader effects. It cannot draw AppKit-backed views (text
+    /// fields, scroll views), so only surfaces without them use it.
+    @discardableResult
+    @MainActor
+    static func renderImage<V: View>(_ view: V, width: CGFloat, height: CGFloat?, name: String, to dir: URL,
+                                     scale: CGFloat = 2) -> URL? {
+        guard #available(macOS 13, *) else { return nil }
+        let renderer = ImageRenderer(content: view.environment(\.colorScheme, .dark).frame(width: width, height: height))
+        renderer.scale = scale
+        renderer.proposedSize = ProposedViewSize(width: width, height: height)
+        guard let cg = renderer.cgImage else { return nil }
+        let rep = NSBitmapImageRep(cgImage: cg)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return nil }
+        let url = dir.appendingPathComponent(name + ".png")
+        do { try png.write(to: url) } catch { return nil }
+        return url
+    }
+
+    /// The argument after `flag`, if any. Pure.
+    static func value(after flag: String, in arguments: [String]) -> String? {
+        guard let i = arguments.firstIndex(of: flag), arguments.indices.contains(i + 1) else { return nil }
+        return arguments[i + 1]
+    }
+
     /// Renders at the view's natural height for `width`.
     @discardableResult
     @MainActor
@@ -72,20 +97,37 @@ enum RenderHarness {
         let dir = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var failures = 0
-        let glow = cardGlow(arguments: CommandLine.arguments)
+        let args = CommandLine.arguments
+        let glow = cardGlow(arguments: args)
         TowerFixtures.cardGlow = glow
-        for surface in RenderSurfaces.all() {
+        // `--canvas`: every surface draws its Canvas fallback (what macOS 12/13 shows).
+        NWShaders.forceCanvas = args.contains("--canvas")
+        // `--live-check`: the panel on screen for a few seconds, gate and CPU printed.
+        if args.contains("--live-check") { RenderLiveCheck.run() }
+        // `--motion`: the signature-motion contact sheets instead of the still surfaces.
+        let surfaces = args.contains("--motion") ? RenderSurfaces.motion() : RenderSurfaces.all()
+        let only = value(after: "--only", in: args)
+        for surface in surfaces where only.map({ surface.name.hasPrefix($0) }) ?? true {
             // One still frame per surface: pinned phase, so renders are deterministic
-            // and double as the Reduce Motion fallback.
-            let view = surface.view
-                .environment(\.nwFixedPhase, surface.phase)
-                .environment(\.nwReduceMotion, true)
-                .environment(\.nwCardGlow, glow)
+            // and double as the Reduce Motion fallback. Motion sheets pin each
+            // frame's own clock instead.
+            var view = AnyView(surface.view.environment(\.nwCardGlow, glow))
+            if !surface.motion {
+                view = AnyView(view.environment(\.nwFixedPhase, surface.phase).environment(\.nwReduceMotion, true))
+            }
             let url: URL?
-            if let height = surface.height {
-                url = render(view, size: CGSize(width: surface.width, height: height), name: surface.name, to: dir)
-            } else {
-                url = renderFitting(view, width: surface.width, name: surface.name, to: dir)
+            switch surface.renderer {
+            case .image:
+                url = renderImage(view.environment(\.nwShaders, true), width: surface.width, height: surface.height,
+                                  name: surface.name, to: dir)
+            case .cache:
+                // cacheDisplay can't capture shaders: these renders use the Canvas drawing.
+                let still = view.environment(\.nwShaders, false)
+                if let height = surface.height {
+                    url = render(still, size: CGSize(width: surface.width, height: height), name: surface.name, to: dir)
+                } else {
+                    url = renderFitting(still, width: surface.width, name: surface.name, to: dir)
+                }
             }
             if let url {
                 print("rendered \(url.path)")
@@ -101,11 +143,16 @@ enum RenderHarness {
 /// The surfaces the harness renders. Later stages append theirs.
 enum RenderSurfaces {
     struct Surface {
+        enum Renderer { case cache, image }
         let name: String
         let width: CGFloat
         var phase: Double = 3.0
         /// A fixed height (windows with a scroll view); nil fits the content.
         var height: CGFloat? = nil
+        /// `.image` goes through ImageRenderer, which captures Metal shaders.
+        var renderer: Renderer = .cache
+        /// A motion sheet: its frames pin their own clocks (no forced still frame).
+        var motion = false
         let view: AnyView
     }
 
@@ -209,10 +256,31 @@ enum RenderSurfaces {
             out.append(Surface(name: "tower-\(section.rawValue)", width: w + pad * 2, height: h + pad * 2,
                                view: window(TowerFixtures.store(section: section))))
         }
-        for section in [TowerSection.power, .budget, .macsPhones, .attention, .agents] {
+        for section in [TowerSection.power, .budget, .macsPhones, .attention, .agents, .terminals] {
             out.append(Surface(name: "tower-\(section.rawValue)-tall", width: w + pad * 2, height: 1500 + pad * 2,
                                view: window(TowerFixtures.store(section: section), height: 1500)))
         }
+        // The Terminals page before the first probe answers, and after setup: all good with a notice.
+        let checking = TowerFixtures.store(section: .terminals)
+        checking.preview(terminalsUnprobed: true)
+        out.append(Surface(name: "tower-terminals-checking", width: w + pad * 2, height: h + pad * 2, view: window(checking)))
+        let good = TowerFixtures.store(section: .terminals)
+        var goodFacts = TowerFixtures.terminals()
+        goodFacts.facts[.iTerm] = TerminalCatalog.Facts(installed: true, use: .init(typable: 1), setup: .done)
+        goodFacts.facts[.cmux] = TerminalCatalog.Facts(installed: true, use: .init(typable: 2), setup: .done)
+        goodFacts.facts[.kitty] = TerminalCatalog.Facts(installed: true, use: .init(typable: 1), setup: .done)
+        goodFacts.pageAddedKittyLines = true
+        good.preview(terminals: goodFacts, terminalNotice: TowerStatusLine(text: "Added to /Users/studio/.config/kitty/kitty.conf. Restart kitty to turn it on. Your old file is saved as kitty.conf.bak-page-20261027-091500.", tone: .good))
+        out.append(Surface(name: "tower-terminals-good", width: w + pad * 2, height: h + pad * 2, view: window(good)))
+        // kitty.conf has Page's lines but the running kitty hasn't been restarted; one wezterm window works, one doesn't.
+        let restart = TowerFixtures.store(section: .terminals)
+        var restartFacts = TowerFixtures.terminals()
+        restartFacts.facts[.terminal] = TerminalCatalog.Facts(installed: true, use: .init(), setup: .done)
+        restartFacts.facts[.kitty] = TerminalCatalog.Facts(installed: true, use: .init(typable: 0, blocked: 1, blocker: KittyBridge.remoteControlHint), setup: .done)
+        restartFacts.facts[.wezterm] = TerminalCatalog.Facts(installed: true, use: .init(typable: 1, blocked: 1, blocker: "WezTerm’s command-line tool didn’t answer"), setup: .notNeeded)
+        restartFacts.pageAddedKittyLines = true
+        restart.preview(terminals: restartFacts)
+        out.append(Surface(name: "tower-terminals-restart", width: w + pad * 2, height: h + pad * 2, view: window(restart)))
         // Plugged in, values no preset matches, helper missing.
         out.append(Surface(name: "tower-power-ac-custom-tall", width: w + pad * 2, height: 1500 + pad * 2,
                            view: window(TowerFixtures.acCustom(section: .power), height: 1500)))

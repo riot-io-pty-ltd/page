@@ -15,9 +15,11 @@ struct NightWatchRoot: View {
     var body: some View {
         let busy = StopPlan.build(sessions: sessions.sessions, hasSessionList: sessions.hasList, workingFromStatus: api.macStatus?.working,
                                  macName: nwMacName(sessions: sessions, pairing: pairing))
+        let pulse = NowModel.pulse(inbox: api.inbox, now: Date())
         NWShell(destination: $router.destination,
                 decideCount: api.inbox.filter { NowRowBuilder.section(of: $0) == .decide }.count,
                 workingCount: sessions.hasList ? sessions.sessions.filter { $0.state == .active }.count : (api.macStatus?.working ?? 0),
+                pulseWaiting: pulse.waiting, pulseLongestWait: pulse.longestWait,
                 stop: stop.phase, stopPlan: busy, biometry: BiometricGate.displayName, held: $held,
                 onPulseTap: { router.openDispatch() },
                 onPulseHold: { stop.holdCompleted(plan: busy) }) {
@@ -64,7 +66,9 @@ private struct SheetHost: View {
                 .presentationDragIndicator(.hidden)
                 .presentationCornerRadius(34)
         case .session(let id):
+            // Keyed by the session: a room's draft and last-seen copy can never carry over to another session.
             SessionRoomContainer(sessionId: id)
+                .id(id)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.hidden)
                 .presentationCornerRadius(34)

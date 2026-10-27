@@ -54,6 +54,10 @@ protocol SessionRemoteBackends: AnyObject {
                completion: @escaping (SessionCommandResult) -> Void)
     func interrupt(_ session: AgentSession, interventionId: String?,
                    completion: @escaping (SessionCommandResult) -> Void)
+    /// Answers the session's pending AskUserQuestion dialog (`AnswerDelivery`):
+    /// the keys, each after a screen check. `completion` may run on any queue.
+    func answer(_ session: AgentSession, request: AnswerRequest,
+                completion: @escaping (SessionCommandResult) -> Void)
     /// Folders a phone may start a session in (`SessionStarter`).
     /// Blocking; probe queue only.
     func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder]
@@ -75,6 +79,14 @@ struct SessionCommand: Equatable {
     var agentId: String? = nil
     /// `start` only: the folder to start in (checked against the list).
     var folder: String? = nil
+    /// `input` and `interrupt`: the folder and title the phone's room showed,
+    /// verbatim as this Mac listed them. Optional (older phones omit them);
+    /// `SessionTargetCheck` refuses when they no longer match the session.
+    var expectCwd: String? = nil
+    var expectTitle: String? = nil
+    /// `answer` only: the tool_use id of the question the phone showed, and its answers.
+    var promptKey: String? = nil
+    var answers: [AnswerPick]? = nil
     /// Typed or clicked at this Mac (`SessionRemote.performLocal`), never
     /// parsed from the wire: `parse` cannot set it, so a phone command can
     /// never claim to be local.
@@ -96,11 +108,18 @@ struct SessionCommand: Equatable {
         cmd.runId = (obj["runId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
         cmd.agentId = (obj["agentId"] as? String).flatMap { SessionWorkflows.isSafeId($0) ? $0 : nil }
         cmd.folder = (obj["folder"] as? String).flatMap { $0.isEmpty || $0.count > 1024 ? nil : $0 }
+        cmd.expectCwd = (obj["expectCwd"] as? String).flatMap { $0.isEmpty || $0.count > 1024 ? nil : $0 }
+        cmd.expectTitle = (obj["expectTitle"] as? String).flatMap { $0.isEmpty || $0.count > 1024 ? nil : $0 }
+        cmd.promptKey = (obj["promptKey"] as? String).flatMap { $0.isEmpty || $0.count > maxIdLength ? nil : $0 }
+        cmd.answers = AnswerRequest.parseAnswers(obj["answers"])
         return cmd
     }
 }
 
 extension SessionRemoteBackends {
+    func answer(_ session: AgentSession, request: AnswerRequest, completion: @escaping (SessionCommandResult) -> Void) {
+        completion(.refused(.answerUnsupported, "Answering questions isn't available here"))
+    }
     func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder] { [] }
     func startSession(folder: SessionStarter.Folder, prompt: String) -> SessionCommandResult {
         .refused(.notTypable, "Starting sessions isn't available")
@@ -277,6 +296,10 @@ struct RemoteSessionRow: Equatable {
     let lastActivityAt: Date?
     let interventionId: String?
     let preview: String?
+    /// The pending AskUserQuestion, when the session is waiting on one the
+    /// phone can answer. Its presence is also how a phone knows this Mac
+    /// accepts `answer`.
+    var ask: AskedQuestionSet? = nil
 
     var jsonObject: [String: Any] {
         var o: [String: Any] = [
@@ -289,6 +312,7 @@ struct RemoteSessionRow: Equatable {
         if let lastActivityAt { o["lastActivityAt"] = SessionTranscript.isoFormatter.string(from: lastActivityAt) }
         if let interventionId { o["interventionId"] = interventionId }
         if let preview, !preview.isEmpty { o["preview"] = preview }
+        if let ask { o["ask"] = ask.phoneObject }
         return o
     }
 }
@@ -331,6 +355,8 @@ final class SessionRemote {
     private let queue = DispatchQueue(label: "ClaudePowerMode.sessions", qos: .utility)
     private let probeQueue = DispatchQueue(label: "ClaudePowerMode.sessions.probe", qos: .utility)
     private let macNameProvider: () -> String
+    /// Claude sessions a Page hook is holding right now (see `HookHoldMarkers`).
+    private let heldSessions: () -> Set<String>
 
     // Confined to `queue`.
     private var sink: SessionsUpdateSink?
@@ -352,6 +378,8 @@ final class SessionRemote {
     private var seq: Int64 = 0
     private var lastListAt: Date?
     private var lastListBody: Data?
+    /// The pending question per waiting Claude session, by transcript stamp.
+    private var asks: [String: (stamp: FileStamp, ask: AskedQuestionSet?)] = [:]
     private var lastTranscriptCheck: [String: Date] = [:]
     private var lastTranscriptBody: [String: Data] = [:]
     private var screenSources: [String: (source: SessionScreen.Source?, at: Date)] = [:]
@@ -385,7 +413,9 @@ final class SessionRemote {
     /// `replayStore`: where seen command ids survive a restart (nil keeps
     /// them in memory only, for tests).
     init(backends: SessionRemoteBackends, now: @escaping () -> Date = Date.init, autoTimer: Bool = true,
-         macName: @escaping () -> String = { Host.current().localizedName ?? "Mac" }, replayStore: URL? = nil) {
+         macName: @escaping () -> String = { Host.current().localizedName ?? "Mac" }, replayStore: URL? = nil,
+         heldSessions: @escaping () -> Set<String> = { HookHoldMarkers.heldSessions(in: HookHoldMarkers.defaultDirectory) }) {
+        self.heldSessions = heldSessions
         self.backends = backends
         self.replay = SessionReplayGuard(storeURL: replayStore, now: now())
         self.now = now
@@ -469,7 +499,7 @@ final class SessionRemote {
     /// same gates and the same backend calls. There is no envelope to check
     /// (nothing crossed the relay), and the result comes back to `completion`
     /// instead of being sealed for a phone. Only ops that answer with a
-    /// result ("input", "interrupt", "interruptAll", "start") belong here.
+    /// result ("input", "answer", "interrupt", "interruptAll", "start") belong here.
     func performLocal(_ cmd: SessionCommand, completion: @escaping (SessionCommandResult) -> Void) {
         queue.async {
             guard !self.stopped else {
@@ -800,6 +830,7 @@ final class SessionRemote {
     private func currentRows(_ t: Date) -> [RemoteSessionRow] {
         var seen = Set<String>()
         var rows: [RemoteSessionRow] = []
+        var held: Set<String>?   // read once per list, and only if a session is working
         for s in sessions where seen.insert(s.sessionId).inserted {
             let st = state(of: s)
             let host = Self.effectiveHost(hosts[s.sessionId]?.info ?? .checking, backend: s.backend, state: st)
@@ -812,10 +843,47 @@ final class SessionRemote {
                 host: host,
                 lastActivityAt: s.lastActivityAt,
                 interventionId: openPage(for: s)?.id,
-                preview: preview(for: s, state: st, at: t)
+                preview: preview(for: s, state: st, at: t),
+                ask: pendingQuestion(for: s, state: st, host: host, held: {
+                    if held == nil { held = heldSessions() }
+                    return held?.contains(s.sessionId) ?? false
+                })
             ))
         }
         return Self.ordered(rows)
+    }
+
+    /// The one AskUserQuestion a waiting Claude session is blocked on, read
+    /// raw from its transcript (re-read only when the file changes). nil for
+    /// anything else, so only sessions with a dialog on screen carry `ask`.
+    /// A session whose question Page's own hook is holding shows no dialog (it reads `active`), but the
+    /// hook wrote the tool call to the transcript first: the phone answers that page by text, mapped by
+    /// the hook, with no keys. The `answer` op refuses such a session.
+    /// A dialog on screen is answered by keys, so it carries `ask` only when Page can press keys in that
+    /// session's terminal (`AnswerDelivery.takesAnswerKeys`); otherwise the phone keeps "Tell it instead".
+    private func pendingQuestion(for s: AgentSession, state: AgentSessionState, host: SessionHostInfo, held: () -> Bool) -> AskedQuestionSet? {
+        guard s.backend == .claude,
+              state == .waitingOnUser || state == .waitingOnApproval || (state == .active && held()),
+              let file = backends.transcriptFile(for: s), file.format == .claude,
+              let stamp = Self.fileStamp(file.path) else {
+            asks[s.sessionId] = nil
+            return nil
+        }
+        let ask: AskedQuestionSet?
+        if let cached = asks[s.sessionId], cached.stamp == stamp {
+            ask = cached.ask
+        } else {
+            var found: AskedQuestionSet?
+            if let tools = InterventionDetector.readTranscriptTail(URL(fileURLWithPath: file.path))?.pendingToolUses,
+               tools.count == 1, tools[0].name == "AskUserQuestion" {
+                found = tools[0].asked
+            }
+            asks[s.sessionId] = (stamp, found)
+            ask = found
+        }
+        // The host is judged on every list (it can change without the transcript moving), so it is not cached.
+        if state == .active { return ask }
+        return AnswerDelivery.takesAnswerKeys(host) ? ask : nil
     }
 
     private func openPage(for s: AgentSession) -> InterventionEvent? {
@@ -1012,6 +1080,10 @@ final class SessionRemote {
                 Logger.shared.log("Sessions: input \(sid) → refused/not_found (\(length) chars)")
                 return sendResult(cmd.clientId, .refused(.notFound, "That session isn't running any more"))
             }
+            if let refusal = SessionTargetCheck.verify(cmd, against: s) {
+                Logger.shared.log("Sessions: input \(sid) → refused/target_mismatch (\(length) chars)")
+                return sendResult(cmd.clientId, refusal)
+            }
             if case .failure(let refusal) = SessionInputGate.validateText(cmd.text ?? "") {
                 Logger.shared.log("Sessions: input \(sid) → refused/\(refusal.reason?.rawValue ?? "error") (\(length) chars)")
                 return sendResult(cmd.clientId, refusal)
@@ -1025,10 +1097,38 @@ final class SessionRemote {
                     self.sendResult(clientId, r)
                 }
             }
+        case "answer":
+            guard let id = cmd.sessionId, let s = sessions.first(where: { $0.sessionId == id }) else {
+                Logger.shared.log("Sessions: answer \(sid) → refused/not_found")
+                return sendResult(cmd.clientId, .refused(.notFound, "That session isn't running any more"))
+            }
+            if let refusal = SessionTargetCheck.verify(cmd, against: s) {
+                Logger.shared.log("Sessions: answer \(sid) → refused/target_mismatch")
+                return sendResult(cmd.clientId, refusal)
+            }
+            guard s.backend == .claude, let promptKey = cmd.promptKey, let answers = cmd.answers else {
+                Logger.shared.log("Sessions: answer \(sid) → refused/answer_unsupported")
+                return sendResult(cmd.clientId, .refused(.answerUnsupported, "Page can't answer that question from here"))
+            }
+            Logger.shared.log("Sessions: answer \(sid) (\(answers.count) question(s))")
+            let clientId = cmd.clientId
+            backends.answer(s, request: AnswerRequest(promptKey: promptKey, answers: answers)) { [weak self] r in
+                guard let self else { return }
+                self.queue.async {
+                    Logger.shared.log("Sessions: answer \(sid) → \(r.code.rawValue)\(r.reason.map { "/\($0.rawValue)" } ?? "")")
+                    self.sendResult(clientId, r)
+                    // The dialog closed (or changed): let the list say so now.
+                    self.lastListBody = nil
+                }
+            }
         case "interrupt":
             guard let id = cmd.sessionId, let s = sessions.first(where: { $0.sessionId == id }) else {
                 Logger.shared.log("Sessions: interrupt \(sid) → refused/not_found")
                 return sendResult(cmd.clientId, .refused(.notFound, "That session isn't running any more"))
+            }
+            if let refusal = SessionTargetCheck.verify(cmd, against: s) {
+                Logger.shared.log("Sessions: interrupt \(sid) → refused/target_mismatch")
+                return sendResult(cmd.clientId, refusal)
             }
             let st = state(of: s)
             if st != .active || hosts[id]?.info.canInterrupt == false {
@@ -1355,6 +1455,15 @@ final class LiveSessionBackends: SessionRemoteBackends {
                                interventionId: interventionId, completion: completion)
         case .codex:
             codex.remoteInput(threadId: session.sessionId, text: text, interventionId: interventionId, completion: completion)
+        }
+    }
+
+    func answer(_ session: AgentSession, request: AnswerRequest, completion: @escaping (SessionCommandResult) -> Void) {
+        switch session.backend {
+        case .claude:
+            claude.remoteAnswer(sessionId: session.sessionId, request: request, completion: completion)
+        case .codex:
+            completion(.refused(.answerUnsupported, "Page can't answer Codex's questions from here"))
         }
     }
 

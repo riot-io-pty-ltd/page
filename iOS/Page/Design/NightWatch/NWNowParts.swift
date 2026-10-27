@@ -68,15 +68,19 @@ struct NWBannerCard: View {
 }
 
 /// The Return Brief. Collapsed it is one line ("While you were away · 1h
-/// 52m ›"); expanded, a glass card with a short sunrise behind the title
-/// (brighter the more finished), three counts, a line per thing that happened,
-/// and the two actions. Everything on it is counted from Page's own log.
+/// 52m ›"); expanded, a glass card that opens with the dawn's sunrise behind
+/// the title (the same sweep as Dusk and dawn, as bright as the absence was
+/// productive), three counts, a line per thing that happened, and the two
+/// actions. Everything on it is counted from Page's own log. The sunrise
+/// plays once and then holds still.
 struct NWBriefCard: View {
     var brief: ReturnBrief
     var expanded: Bool
     var onToggle: () -> Void = {}
     var onDismiss: () -> Void = {}
     var onReview: () -> Void = {}
+    @State private var openedAt: Double?
+    @Environment(\.nwMotion) private var pin
 
     var body: some View {
         if expanded { full } else { collapsed }
@@ -149,17 +153,30 @@ struct NWBriefCard: View {
         .background(
             ZStack(alignment: .top) {
                 NWGlassBackground(radius: NightWatch.Radius.card)
-                // The sunrise: brighter the more finished while you were away.
-                NWAnimated { t in
-                    NWAuroraCanvas(palette: .brief(sunrise: brief.sunrise), seconds: t)
-                        .frame(height: 150)
-                        .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom))
-                        .opacity(0.55)
+                // The sunrise: it rises once as the Brief opens, brighter the more finished.
+                NWOneShot(start: openedAt, duration: DawnModel.sweepDuration + 0.6,
+                          pinned: pin.flatMap { $0.kind == .brief ? $0.time : nil }) { e in
+                    sunrise(elapsed: e)
                 }
                 .clipShape(RoundedRectangle(cornerRadius: NightWatch.Radius.card, style: .continuous))
                 .allowsHitTesting(false)
             })
         .accessibilityElement(children: .contain)
+        .onAppear { if openedAt == nil { openedAt = Date().timeIntervalSinceReferenceDate } }
+    }
+
+    /// `elapsed` nil: the sunrise has risen and holds.
+    private func sunrise(elapsed e: Double?) -> some View {
+        let s = DawnModel.briefSunrise(elapsed: e ?? DawnModel.sweepDuration, share: brief.sunrise)
+        // Gold while it rises, settling to a low warmth that stays.
+        let warmth = s.strength * (e.map { 1 - 0.55 * MotionCurve.smooth(($0 - DawnModel.sweepDuration) / 0.6) } ?? 0.45)
+        return ZStack(alignment: .top) {
+            NWAuroraCanvas(palette: .brief(sunrise: brief.sunrise * s.sweep), seconds: 2)
+                .opacity(0.55)
+            NWDawnLight(sweep: s.sweep, warmth: warmth)
+        }
+        .frame(height: 150)
+        .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom))
     }
 
     private func color(_ k: ReturnBrief.Count.Kind) -> NightWatch.RGBA {

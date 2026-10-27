@@ -39,6 +39,22 @@ struct TowerEnvironment {
     var openConfigFile: () -> Void = {}
     var openLog: () -> Void = {}
     var reloadFromMenu: () -> Void = {}
+
+    // The Terminals page. Defaults touch nothing, so the harness and tests never
+    // read kitty.conf, ask macOS or look at a process.
+    /// Installed hosts, live sessions per host, setup state. Blocking: the live
+    /// window runs it off the main queue and calls back on main; nil = nothing learned.
+    var probeTerminals: (_ sessions: [AgentSession], _ done: @escaping (TerminalProbe.Snapshot?) -> Void) -> Void = { _, done in done(nil) }
+    var previewKitty: () -> Result<KittyConfigFile.Preview, KittyConfigFile.Failure> = { .failure(.unreadable) }
+    var enableKitty: () -> Result<KittyConfigFile.Outcome, KittyConfigFile.Failure> = { .failure(.unreadable) }
+    var undoKitty: () -> Bool = { false }
+    /// Asks macOS for Automation permission (may show its prompt); calls back on main.
+    var requestAutomation: (_ id: TerminalCatalog.ID, _ done: @escaping (TerminalProbe.Automation) -> Void) -> Void = { _, done in done(.unknown) }
+    /// An OK / Cancel question; true = OK.
+    var confirm: (_ title: String, _ text: String, _ okTitle: String) -> Bool = { _, _, _ in false }
+    var openURL: (URL) -> Void = { _ in }
+    /// The window is on screen (the Terminals page only refreshes then).
+    var windowVisible: () -> Bool = { true }
 }
 
 /// The state of the Tower window: the form being edited, what was on screen
@@ -74,6 +90,10 @@ final class TowerStore: ObservableObject {
     @Published private(set) var localLines: [String] = []
     /// config.json had a problem when the window opened.
     @Published private(set) var problem: String?
+    /// The Terminals page: facts per host (nil until the first probe) and the
+    /// line under the card.
+    @Published private(set) var terminals: TerminalProbe.Snapshot?
+    @Published private(set) var terminalNotice: TowerStatusLine?
 
     var env: TowerEnvironment
     var macName: String
@@ -83,6 +103,8 @@ final class TowerStore: ObservableObject {
 
     private var helperCheckGeneration = 0
     private var relayProbeGeneration = 0
+    private var terminalProbeGeneration = 0
+    private var terminalProbesInFlight = 0
 
     init(config: Config = Config(), macName: String = "this Mac", env: TowerEnvironment = TowerEnvironment()) {
         let f = PreferencesForm(config)
@@ -96,8 +118,17 @@ final class TowerStore: ObservableObject {
 
     /// A new snapshot and model from the app (each tick).
     func update(snapshot: Coordinator.Snapshot?, model: NowModel?) {
+        let before = liveSessionIDs
         if let snapshot { self.snapshot = snapshot }
         if let model, self.model != model { self.model = model }
+        // A session that starts or ends changes the Terminals page's counts:
+        // look again now, not at the next timer tick.
+        if liveSessionIDs != before { refreshTerminalsIfVisible() }
+    }
+
+    /// The live sessions, by id: what the Terminals page counts per host.
+    private var liveSessionIDs: Set<String> {
+        Set((snapshot?.sessions ?? []).filter { $0.state != .offline }.map(\.sessionId))
     }
 
     var card: TowerCardModel { TowerCardModel.build(model: model, macName: model?.macName ?? macName) }
@@ -107,13 +138,17 @@ final class TowerStore: ObservableObject {
     /// Sets the live-ish bits directly, for the render harness and tests (the
     /// real window gets them from `load()` and the environment).
     func preview(helper: SleepGuard.HelperStatus? = nil, installing: Bool = false, localLines: [String]? = nil,
-                 usageCapture: UsageCaptureStatus? = nil, relayTest: RelayTest? = nil, problem: String? = nil) {
+                 usageCapture: UsageCaptureStatus? = nil, relayTest: RelayTest? = nil, problem: String? = nil,
+                 terminals: TerminalProbe.Snapshot? = nil, terminalsUnprobed: Bool = false, terminalNotice: TowerStatusLine? = nil) {
         if let helper { helperStatus = helper }
         helperInstalling = installing
         if let localLines { self.localLines = localLines }
         if let usageCapture { self.usageCapture = usageCapture }
         if let relayTest { self.relayTest = relayTest }
         if let problem { self.problem = problem }
+        if terminalsUnprobed { self.terminals = nil }
+        if let terminals { self.terminals = terminals }
+        if let terminalNotice { self.terminalNotice = terminalNotice }
     }
 
     // MARK: opening
@@ -131,7 +166,9 @@ final class TowerStore: ObservableObject {
         relayTest = .idle
         refreshLocalModels()
         checkHelper(refresh: true)
+        terminalNotice = nil
         if let section { selection = section }
+        if selection == .terminals { refreshTerminals() }
     }
 
     private static func usageStatus(_ s: UsageCapture.State) -> UsageCaptureStatus {
@@ -143,6 +180,97 @@ final class TowerStore: ObservableObject {
     }
 
     func refreshLocalModels() { localLines = env.localModelLines() }
+
+    // MARK: terminals
+
+    /// The rows the Terminals page draws.
+    var terminalRows: [TerminalCatalog.Row] {
+        terminals.map { TerminalCatalog.rows($0.facts, pageAddedKittyLines: $0.pageAddedKittyLines) } ?? []
+    }
+
+    /// Looks again (installed hosts, sessions per host, setup state) off the
+    /// main thread. One probe at a time; a probe that finishes after a newer
+    /// one was asked for is dropped.
+    func refreshTerminals(force: Bool = false) {
+        guard force || terminalProbesInFlight == 0 else { return }
+        terminalProbesInFlight += 1
+        terminalProbeGeneration += 1
+        let generation = terminalProbeGeneration
+        let sessions = snapshot?.sessions ?? []
+        env.probeTerminals(sessions) { [weak self] result in
+            guard let self else { return }
+            self.terminalProbesInFlight -= 1
+            guard generation == self.terminalProbeGeneration else { return }
+            if let result, self.terminals != result { self.terminals = result }
+        }
+    }
+
+    /// The light timer: only while the page is up and the window is on screen.
+    func refreshTerminalsIfVisible() {
+        guard selection == .terminals, env.windowVisible() else { return }
+        refreshTerminals()
+    }
+
+    /// Set up… on a row.
+    func setUp(_ id: TerminalCatalog.ID) {
+        switch id {
+        case .cmux: env.setUpCmux()
+        case .kitty: setUpKitty()
+        default: break
+        }
+    }
+
+    /// Shows exactly what will change in kitty.conf, and only then writes it.
+    func setUpKitty() {
+        switch env.previewKitty() {
+        case .failure(let f):
+            env.showAlert("Couldn’t set up kitty", f.message)
+        case .success(let p):
+            switch p.plan {
+            case .alreadyDone:
+                terminalNotice = TowerStatusLine(text: "kitty already lets Page in. If a session still can’t be typed into, restart kitty.", tone: .good)
+            case .conflict(let why):
+                env.showAlert("kitty.conf already says something else", why)
+            case .write(_, let added):
+                let text = TerminalCatalog.kittyConfirmText(path: p.url.path, added: added, creating: p.creating, linkTarget: p.linkTarget?.path)
+                guard env.confirm("Turn on kitty remote control?", text, "Add the lines") else { return }
+                switch env.enableKitty() {
+                case .success(let outcome): terminalNotice = TerminalCatalog.kittyDoneText(outcome)
+                case .failure(let f): env.showAlert("Couldn’t set up kitty", f.message)
+                }
+            }
+        }
+        refreshTerminals(force: true)
+    }
+
+    func undoKitty() {
+        terminalNotice = env.undoKitty()
+            ? TowerStatusLine(text: "Took Page’s lines out of kitty.conf (a copy was saved first). Restart kitty.", tone: .good)
+            : TowerStatusLine(text: "Page found none of its lines in kitty.conf, so it left the file alone.", tone: .bad)
+        refreshTerminals(force: true)
+    }
+
+    /// Allow… on Terminal or iTerm2: macOS shows its own prompt.
+    func allowAutomation(_ id: TerminalCatalog.ID) {
+        let name = TerminalCatalog.entry(id).name
+        terminalNotice = TowerStatusLine(text: "Asking macOS for permission to control \(name)…", tone: .quiet)
+        env.requestAutomation(id) { [weak self] access in
+            guard let self else { return }
+            self.terminalNotice = TerminalCatalog.automationNotice(access, appName: name)
+            if access == .denied { self.env.openURL(TerminalProbe.automationSettingsURL) }
+            self.refreshTerminals(force: true)
+        }
+    }
+
+    /// The row's one button.
+    func perform(_ action: TerminalCatalog.Action, on id: TerminalCatalog.ID) {
+        switch action {
+        case .setUp: setUp(id)
+        case .allow: allowAutomation(id)
+        case .getIt(let url): env.openURL(url)
+        case .undo: undoKitty()
+        }
+    }
 
     // MARK: power helper
 

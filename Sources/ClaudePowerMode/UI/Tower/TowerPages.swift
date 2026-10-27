@@ -27,6 +27,7 @@ struct NWTowerPageContent: View {
         case .macsPhones: NWMacsPhonesPage(store: store)
         case .attention: NWAttentionPage(store: store)
         case .agents: NWAgentsPage(store: store)
+        case .terminals: NWTerminalsPage(store: store)
         case .shortcuts: NWShortcutsPage()
         case .pairing: NWPairingPage(store: store)
         case .about: NWAboutPage(store: store)
@@ -552,6 +553,10 @@ struct NWAgentsPage: View {
             NWNote(text: "Only while a model is actually generating — a loaded but idle model never keeps the Mac awake. Terminal tools (opencode, aider, goose, crush, ollama run, llama-cli…) count while they're producing output. Page only looks: it never starts, stops or unloads models. Claude Code and Codex pointed at Ollama or LM Studio are detected automatically, and Page won't restart them in the background on your Anthropic account.")
                 .padding(.horizontal, 4).padding(.top, -10)
             NWCard(title: "INTEGRATIONS") {
+                NWRow(title: "Terminals", detail: TerminalCatalog.namesLine + ": what works where, and what each needs") {
+                    NWButton(title: "See all…", kind: .secondary) { store.selection = .terminals }
+                }
+                NWDivider()
                 NWRow(title: "cmux", detail: "lets Page type into your cmux panes, and start sessions there") {
                     NWButton(title: "Set up cmux…", kind: .secondary) { store.env.setUpCmux() }
                 }

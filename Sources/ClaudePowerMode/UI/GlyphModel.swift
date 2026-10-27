@@ -104,9 +104,9 @@ struct GlyphDrawing: Equatable {
         }
     }
 
-    /// Pure. Breath: 4 s per cycle, a little faster with more agents.
+    /// Pure. Breath: 4 s per cycle, a little faster with more agents (PulseModel).
     static func breathPeriod(agents: Int) -> Double {
-        max(2.5, 4.0 / (1 + 0.06 * Double(max(0, agents - 1))))
+        PulseModel.breathPeriod(agents: agents)
     }
 
     /// Pure. 0...1 position in a cycle of `period` seconds at time `t`.
@@ -117,16 +117,27 @@ struct GlyphDrawing: Equatable {
     }
 
     /// Pure. Seconds between ripples: the longer the wait, the faster, never
-    /// faster than every 1.5 s.
+    /// faster than every 1.5 s (PulseModel).
     static func rippleInterval(longestWait: TimeInterval) -> Double {
-        max(1.5, 4.0 - longestWait / 120)
+        PulseModel.rippleInterval(longestWait: longestWait)
+    }
+
+    /// Rings in the 18 pt glyph: one per waiting item, up to three (more is a smudge at this size).
+    static let maxRings = 3
+
+    /// Pure. Seconds for one ripple ring to travel out in the glyph.
+    static func ringLife(waiting: Int, longestWait: TimeInterval) -> Double {
+        PulseModel.ringLife(waiting: waiting, longestWait: longestWait, cap: maxRings)
     }
 
     /// Pure. Maps a state to drawing parameters. `phase` is 0...1 through the
     /// current breath or ripple cycle; with `reduceMotion` the result is
     /// fixed (no breathing, no ripple, a still ring when something waits).
+    /// `exhale` is the 800 ms after the last waiting item cleared: the dot
+    /// turns from amber to teal and swells once while the rings fade.
     static func make(_ state: GlyphState, appearance: Appearance = .dark, phase: Double = 0.25,
-                     reduceMotion: Bool = false) -> GlyphDrawing {
+                     reduceMotion: Bool = false, exhale: PulseModel.Exhale? = nil,
+                     exhaleRings: Int = 0) -> GlyphDrawing {
         let c = colors(appearance)
         let wave = reduceMotion ? 0 : sin(phase * 2 * .pi) // -1...1
         var d = GlyphDrawing(
@@ -156,20 +167,34 @@ struct GlyphDrawing: Equatable {
             if reduceMotion {
                 d.staticRing = true
             } else {
-                // Two rings a half-cycle apart, growing and fading.
-                d.ripples = [phase, (phase + 0.5).truncatingRemainder(dividingBy: 1)].map {
-                    Ripple(radius: 4.2 + 3.4 * $0, alpha: 0.55 * (1 - $0))
+                // One ring per waiting item (up to three), evenly spaced, growing and fading.
+                d.ripples = PulseModel.rings(phase: phase, count: PulseModel.ringCount(waiting: count, cap: maxRings)).map {
+                    Ripple(radius: 4.2 + 3.4 * $0.progress, alpha: 0.75 * $0.alpha)
                 }
             }
         case .paused:
-            // A low glow: dimmed dot over a flat horizon.
+            // A low glow: dimmed dot over a flat horizon ("Paused for battery · resumes on power").
             d.dotColor = c.teal.opacity(0.4)
-            d.glow = 0.15
+            d.glow = PulseModel.pausedGlow
             d.horizon = true
             // Something is still waiting on you: a dimmed amber count, no ripple.
             if state.waiting > 0 {
                 d.dotColor = c.amber.opacity(0.75)
                 d.countText = state.waiting > 99 ? "99+" : "\(state.waiting)"
+            }
+        }
+        // The last waiting item cleared: amber exhales to the new colour, the
+        // glow swells once, and the rings that were out fade.
+        if let x = exhale, !x.finished, !reduceMotion {
+            switch state.mode {
+            case .working, .quiet:
+                d.dotColor = c.amber.mixedPerceptual(with: d.dotColor, x.tealMix)
+                d.glow = max(d.glow, 0.7 * (1 - x.tealMix)) + 0.8 * x.swell
+                d.dotRadius += 1.6 * x.swell
+                d.ripples = PulseModel.rings(phase: phase, count: PulseModel.ringCount(waiting: exhaleRings, cap: maxRings)).map {
+                    Ripple(radius: 4.2 + 3.4 * $0.progress, alpha: 0.75 * $0.alpha * x.ringFade)
+                }.filter { $0.alpha > 0.02 }
+            default: break
             }
         }
         return d
@@ -314,11 +339,29 @@ final class GlyphAnimator {
     /// Phase steps per cycle: identical frames are skipped.
     static let phaseSteps = 24
 
+    /// Frames per second during the 800 ms exhale (a short one-shot).
+    static let exhaleFramesPerSecond: Double = 15
+
     var onImage: ((NSImage) -> Void)?
     var appearance: GlyphDrawing.Appearance = .dark { didSet { redraw() } }
-    var state = GlyphState(mode: .off) { didSet { if oldValue != state { redraw(); updateTimer() } } }
+    var state = GlyphState(mode: .off) {
+        didSet {
+            guard oldValue != state else { return }
+            if case .needsYou(let n) = oldValue.mode, Self.exhalesInto(state.mode) {
+                exhaleStart = Date()
+                exhaleRings = n
+            } else if case .needsYou = state.mode {
+                exhaleStart = nil
+            }
+            redraw()
+            updateTimer()
+        }
+    }
     /// Seconds the longest waiting page has waited (ripple speed).
     var longestWait: TimeInterval = 0
+    /// When the last waiting item cleared (the exhale plays from it).
+    private var exhaleStart: Date?
+    private var exhaleRings = 0
 
     private var timer: Timer?
     private var lastDrawing: GlyphDrawing?
@@ -372,6 +415,14 @@ final class GlyphAnimator {
         updateTimer()
     }
 
+    /// Pure. The modes the needs-you amber exhales into (not dusk, not off).
+    static func exhalesInto(_ mode: GlyphState.Mode) -> Bool {
+        switch mode {
+        case .working, .quiet: return true
+        case .off, .needsYou, .paused: return false
+        }
+    }
+
     /// Pure. Whether a state moves at all.
     static func animates(_ mode: GlyphState.Mode) -> Bool {
         switch mode {
@@ -387,12 +438,22 @@ final class GlyphAnimator {
         return (phase * Double(steps)).rounded(.down) / Double(steps)
     }
 
+    /// The exhale still playing, if any.
+    private var exhale: PulseModel.Exhale? {
+        guard let start = exhaleStart else { return nil }
+        let x = PulseModel.exhale(elapsed: Date().timeIntervalSince(start))
+        return x.tealMix < 1 || x.swell > 0.001 ? x : nil
+    }
+
     private func updateTimer() {
         timer?.invalidate()
         timer = nil
-        guard started, !suspended, !reduceMotion(), Self.animates(state.mode) else { return }
-        let t = Timer(timeInterval: 1.0 / Self.framesPerSecond, repeats: true) { [weak self] _ in self?.redraw() }
-        t.tolerance = 0.05
+        let exhaling = exhaleStart.map { Date().timeIntervalSince($0) < PulseModel.clearDuration } ?? false
+        guard started, !suspended, !reduceMotion(), Self.animates(state.mode) || exhaling else { return }
+        // The status item is always visible: 8 fps normally, 15 only for the 800 ms exhale.
+        let fps = exhaling ? Self.exhaleFramesPerSecond : Self.framesPerSecond
+        let t = Timer(timeInterval: 1.0 / fps, repeats: true) { [weak self] _ in self?.redraw() }
+        t.tolerance = exhaling ? 0.01 : 0.05
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -403,11 +464,19 @@ final class GlyphAnimator {
         let phase: Double
         switch state.mode {
         case .working(let n): phase = GlyphDrawing.cyclePhase(at: now, period: GlyphDrawing.breathPeriod(agents: n))
-        case .needsYou: phase = GlyphDrawing.cyclePhase(at: now, period: GlyphDrawing.rippleInterval(longestWait: longestWait) * 2)
+        case .needsYou(let n): phase = GlyphDrawing.cyclePhase(at: now, period: GlyphDrawing.ringLife(waiting: n, longestWait: longestWait))
         default: phase = 0.25
         }
-        let drawing = GlyphDrawing.make(state, appearance: appearance, phase: Self.quantised(phase),
-                                        reduceMotion: reduceMotion())
+        let x = exhale
+        if x == nil, exhaleStart != nil {
+            // The exhale is over: back to the plain timer (or none at all).
+            exhaleStart = nil
+            updateTimer()
+        }
+        let ripplePhase = x == nil ? phase : GlyphDrawing.cyclePhase(at: now, period: GlyphDrawing.ringLife(waiting: exhaleRings, longestWait: 0))
+        let drawing = GlyphDrawing.make(state, appearance: appearance,
+                                        phase: x == nil ? Self.quantised(phase) : ripplePhase,
+                                        reduceMotion: reduceMotion(), exhale: x, exhaleRings: exhaleRings)
         guard drawing != lastDrawing else { return }
         lastDrawing = drawing
         onImage?(StatusGlyphRenderer.image(drawing))

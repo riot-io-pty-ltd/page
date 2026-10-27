@@ -15,8 +15,22 @@ struct DecisionScreenState {
     var hasSession = true
     /// The next Decide item, for "swipe up for the next".
     var nextTitle: String? = nil
+    /// The question behind a question page, when it can be answered from the phone (picker).
+    var ask: SessionAsk? = nil
+    var askDelivery: SentSessionCommand? = nil
+    /// The paired Mac's name, for the answers' delivery preview.
+    var macName = ""
+    /// The page is one Claude's question hook holds: the answers go as text through it.
+    var askViaHook = false
+    /// Draws this draft instead of the live one (the render harness).
+    var fixedSheet: AnswerSheet? = nil
     /// Draws the hold ring part-way (the render harness).
     var fixedHold: Double? = nil
+    /// The delivery state of this sheet's action, drawn as its Receipt thread.
+    var receipt: ReceiptThreadInput? = nil
+    /// When an Irreversible approve passed biometrics here (it outlives the
+    /// pending action, so the burst is not cut short by a quick relay).
+    var holdCommittedAt: Date? = nil
 }
 
 struct DecisionScreenActions {
@@ -26,6 +40,8 @@ struct DecisionScreenActions {
     var carryOn: () -> Void = {}
     var stop: () -> Void = {}
     var send: (String) -> Void = { _ in }
+    /// "Submit all": the draft's answers.
+    var submitAnswers: (AnswerSheet) -> Void = { _ in }
     var cancel: () -> Void = {}
     var openSession: () -> Void = {}
     var viewChanges: () -> Void = {}
@@ -75,7 +91,8 @@ struct NWDecisionScreen: View {
 
     var body: some View {
         GeometryReader { geo in
-            if geo.size.height >= Self.pinnedMinHeight { pinnedLayout } else { flowingLayout }
+            // The answer picker is as tall as a screenful: it flows with the rest instead of being pinned.
+            if geo.size.height >= Self.pinnedMinHeight, !(state.ask != nil && c.chip == .question) { pinnedLayout } else { flowingLayout }
         }
     }
 
@@ -295,18 +312,34 @@ struct NWDecisionScreen: View {
     /// composer is open, else the approve line, else the first action that sends.
     private var previewText: String? {
         if composerOpen, let t = row.action(.tellInstead)?.preview { return t }
+        // The answer picker carries its own preview (the review step names exactly what will be chosen).
+        if state.ask != nil, c.chip == .question { return nil }
         // Nothing will be typed: the controls below already say why, so a second line adds nothing.
         if row.action(.openOnMac) != nil { return nil }
         return row.focusPreview
     }
 
     @ViewBuilder private var statusBlock: some View {
-        if state.outcome != .none, accepts || state.pending != nil {
+        if let receipt = state.receipt, !receipt.isEmpty {
+            // The Receipt thread: arm, sent, then typed and verified only on the Mac's word.
+            NWReceiptThreadView(input: receipt, onTap: actions.cancel)
+        } else if state.outcome != .none, accepts || state.pending != nil {
             NWOutcomeStrip(outcome: state.outcome, pending: state.pending, onCancel: actions.cancel)
         }
-        if let s = state.phase.statusLine(legacyRelay: state.legacyRelay) {
+        // The line adds the detail ("typed into tmux pane %3"); a failure the thread already says is not said twice.
+        if let s = state.phase.statusLine(legacyRelay: state.legacyRelay),
+           !(state.receipt.map { r in r.frame(now: state.now).word == s.text } ?? false) {
             NWReceiptLine(text: s.text, failed: s.tone == .problem || s.tone == .warn)
         }
+    }
+
+    /// An Irreversible approve that passed biometrics: the full ring and its
+    /// burst stay while the thread below carries the delivery (until the
+    /// sheet takes input again, after a failure).
+    private var committedAt: Date? {
+        guard irreversible else { return nil }
+        if let p = state.pending, ActionGate.requiresBiometrics(kind: p.kind, commit: p.commit) { return p.startedAt }
+        return accepts ? nil : state.holdCommittedAt
     }
 
     @ViewBuilder private var secondaryLinks: some View {
@@ -341,10 +374,27 @@ struct NWDecisionScreen: View {
                     .font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textSecondary.color)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if state.hasSession { Button("Open session", action: actions.openSession).buttonStyle(NWButtonStyle(kind: .quiet)) }
+            } else if let at = committedAt {
+                VStack(spacing: 8) {
+                    NWHoldRing(spec: .irreversible, burstStart: at, onComplete: {})
+                    Text("Approved with \(state.biometry)")
+                        .font(NightWatch.Typo.bodyStrong)
+                        .foregroundColor(NightWatch.Palette.textSecondary.color)
+                }
+                .frame(maxWidth: .infinity)
             } else if !busy || state.phase == .unconfirmed {
                 switch c.section {
                 case .decide where c.chip == .question:
-                    composer(label: "Answer", placeholder: "Type your answer…", alwaysOpen: true)
+                    if let ask = state.ask, !composerOpen {
+                        NWAnswerHost(ask: ask, delivery: state.askDelivery, route: c.route, mac: state.macName, agent: c.agent,
+                                     fixedSheet: state.fixedSheet, showsChip: false, viaHook: state.askViaHook, onSubmit: actions.submitAnswers)
+                        Button("Write a reply instead…") { composerOpen = true }
+                            .buttonStyle(NWButtonStyle(kind: .quiet))
+                    } else if state.ask != nil {
+                        composer(label: "Answer", placeholder: "Type your answer…", alwaysOpen: false)
+                    } else {
+                        composer(label: "Answer", placeholder: "Type your answer…", alwaysOpen: true)
+                    }
                 case .decide:
                     approvalControls
                 case .look:

@@ -28,6 +28,16 @@ extension SessionRoomData {
         /// The newest Stop sent from this room, while it is worth showing.
         var latestStop: SentSessionCommand? = nil
         var composerProblem: String? = nil
+        /// The newest message sent from this room, for its receipt.
+        var latestInput: SentSessionCommand? = nil
+        /// A receipt the user closed.
+        var dismissedReceipt: String? = nil
+        /// Where the newest answers sent for this session's question stand.
+        var answerDelivery: SentSessionCommand? = nil
+        /// The pinned page is one Claude's question hook holds (answered by text through the hook).
+        var pageIsHook = false
+        /// That page's text, to check it is about the question the session row carries.
+        var pageContext: String? = nil
         var timeZone: TimeZone = .current
     }
 
@@ -84,6 +94,13 @@ extension SessionRoomData {
         data.pageRow = pinned
         data.pageOutcome = i.pageOutcome
         data.pagePending = i.pagePending
+        data.ask = AnswerPicker.ask(for: i.ended ? nil : s, pageIsQuestion: pinned?.chip == .question, hook: i.pageIsHook, pageContext: i.pageContext)
+        data.askViaHook = data.ask != nil && i.pageIsHook
+        // A hook page has no `answer` command: its delivery is the page's own outcome.
+        data.askDelivery = data.ask.flatMap { ask in
+            i.pageIsHook ? AnswerPicker.delivery(from: i.pageOutcome, sessionId: s.id, promptKey: ask.id, now: i.now)
+                         : (i.answerDelivery?.promptKey == ask.id ? i.answerDelivery : nil)
+        }
         data.screen = i.screen
         data.screenFreshness = i.screen.map { ScreenFreshness.evaluate(frameAt: $0.at, now: i.now, busy: busy) }
         data.runs = i.runs
@@ -92,13 +109,13 @@ extension SessionRoomData {
         data.reviewRow = review
         data.preview = plan.preview
         data.composerProblem = i.composerProblem
-        if let stop = i.latestStop {
+        data.target = SessionTarget(session: s, macName: i.macName)
+        if let r = SendReceipt.build(i.latestInput, agent: character.name, now: i.now), r.id != i.dismissedReceipt { data.receipt = r }
+        if let stop = i.latestStop, let line = SendReceipt.stopLine(stop, agent: character.name) {
             switch stop.state {
-            case .sending: data.stopNote = ("Stopping…", .working)
-            case .typed, .queued:
-                data.stopNote = ("Stopped. \(stop.state.explanation(.interrupt, agent: character.name) ?? "")", .good)
-            case .refused, .failed, .noAnswer:
-                data.stopNote = ("Couldn't stop: \(stop.state.explanation(.interrupt, agent: character.name) ?? "")", .problem)
+            case .sending: data.stopNote = (line, .working)
+            case .typed, .queued: data.stopNote = (line, .good)
+            case .refused, .failed, .noAnswer: data.stopNote = (line, .problem)
             }
         }
         data.stopping = i.latestStop?.state.isPending == true

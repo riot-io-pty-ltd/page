@@ -31,6 +31,8 @@ struct DecisionContainer: View {
     @State private var closeLookupFinished = false
     /// The session's changes, opened from a turn summary.
     @State private var showingDiff = false
+    /// When an Irreversible approve passed biometrics in this sheet (the hold ring's burst).
+    @State private var holdCommittedAt: Date?
 
     private var live: Intervention? { api.inbox.first { $0.id == interventionId } }
     private var intervention: Intervention? { live ?? snapshot }
@@ -65,6 +67,12 @@ struct DecisionContainer: View {
             }
         }
         .onChange(of: live) { _, newValue in if let newValue { snapshot = newValue } }
+        // The committed ring belongs to that one approve: any other action, or the
+        // sheet taking input again after a failure, puts it away.
+        .onChange(of: coordinator.pending[interventionId]) { _, p in
+            if let p { holdCommittedAt = ActionGate.requiresBiometrics(kind: p.kind, commit: p.commit) ? p.startedAt : nil }
+        }
+        .onChange(of: phase.acceptsInput) { _, accepts in if accepts { holdCommittedAt = nil } }
         .task(id: phase == .checkingClose) {
             guard phase == .checkingClose else { return }
             await api.resolveCloseReason(interventionId)
@@ -84,9 +92,26 @@ struct DecisionContainer: View {
         var outcome = CardOutcome.none
         if let why = coordinator.localProblems[iv.id] { outcome = .problem(why) }
         else if coordinator.isArming(iv.id, now: now) { outcome = .arming(progress: 0) }
-        let state = DecisionScreenState(content: content, row: row, phase: phase, legacyRelay: legacyRelay, now: now,
+        var state = DecisionScreenState(content: content, row: row, phase: phase, legacyRelay: legacyRelay, now: now,
                                         biometry: BiometricGate.displayName, pending: coordinator.pending[iv.id],
                                         outcome: outcome, hasSession: session != nil)
+        // The Receipt thread, from the real delivery state only.
+        state.receipt = ReceiptThreadInput(pending: coordinator.pending[iv.id], delivery: api.deliveries[iv.id],
+                                           localProblem: coordinator.localProblems[iv.id], changedAt: api.deliveryTimes[iv.id])
+        state.holdCommittedAt = holdCommittedAt
+        // A question the session is blocked on, answerable by tapping: only for the page the Mac has open
+        // for it (a hook-held page is answered through its own text reply).
+        // A page Claude's question hook holds has no dialog on screen: its answers go as text through the hook.
+        if let ask = AnswerPicker.ask(for: session, pageIsQuestion: content.chip == .question, hook: iv.isBlockingHook, pageContext: iv.context),
+           iv.isBlockingHook || session?.interventionId == iv.id {
+            state.ask = ask
+            state.macName = macName
+            state.askViaHook = iv.isBlockingHook
+            state.askDelivery = iv.isBlockingHook
+                ? AnswerPicker.delivery(from: CardOutcome.from(pending: coordinator.pending[iv.id], delivery: api.deliveries[iv.id], now: now),
+                                        sessionId: iv.sessionId, promptKey: ask.id, now: now)
+                : sessions.latestAnswer(for: iv.sessionId, promptKey: ask.id)
+        }
         return NWDecisionScreen(state: state, actions: actions(iv, row), draft: $draft, composerOpen: $composerOpen)
             .background(NWDecisionBackground(tint: row.tint).ignoresSafeArea())
             .sheet(isPresented: $showingDiff) { DiffView(sessionId: iv.sessionId, title: iv.projectName) }
@@ -103,6 +128,17 @@ struct DecisionContainer: View {
             // A written reply: Esc, then the text, then Return, which the Mac's reply planner does.
             coordinator.begin(row: row, kind: .tellInstead, text: text) { outcome in
                 if case .accepted = outcome { draft = ""; composerOpen = false }
+            }
+        }
+        a.submitAnswers = { sheet in
+            switch AnswerPicker.submit(viaHook: iv.isBlockingHook, hasPage: true, sheet: sheet) {
+            case .refuse: break
+            case .hook(let text):
+                // The hook maps the numbers to Claude's options; nothing is pressed.
+                coordinator.begin(row: row, kind: .tellInstead, text: text)
+            case .keys:
+                let target = sessions.session(iv.sessionId).map { SessionTarget(session: $0, macName: macName) }
+                sessions.sendAnswer(sessionId: iv.sessionId, sheet: sheet, target: target)
             }
         }
         a.cancel = { coordinator.cancel(iv.id) }

@@ -36,6 +36,7 @@ struct SkyContainer: View {
         let macs = TowerMacRow.build(saved: pairing.savedMacs, activeId: pairing.activeMacId, activeStatus: api.macStatus,
                                      others: pairing.otherStatus, now: now)
         var data = SkyScreenData(sky: sky, lanes: lanes, mode: mode, now: now, standby: macs, selectedStar: selected)
+        data.duskDawn = activity.duskDawn
         if availability != .ready { data.availability = SessionAvailabilityCopy(availability) }
         var a = SkyScreenActions()
         a.setMode = { m in mode = m; m.save() }
@@ -59,6 +60,11 @@ struct SkyContainer: View {
             await pairing.refreshOthers()
         }
         return NWSkyScreen(data: data, actions: a)
-            .onChange(of: sessions.sessions) { _, list in activity.observe(sessions: list, interventions: api.inbox, paused: paused) }
+            .onChange(of: sessions.sessions) { _, list in
+                activity.observe(sessions: list, interventions: api.inbox, paused: paused)
+                activity.observePower(paused: paused, sessions: list)
+            }
+            .onChange(of: paused) { _, p in activity.observePower(paused: p, sessions: sessions.sessions) }
+            .onAppear { activity.observePower(paused: paused, sessions: sessions.sessions) }
     }
 }

@@ -12,8 +12,11 @@ struct NWRoomStory: View {
     @State private var atBottom = true
     @State private var scrollRequest = 0
     @State private var openedGroups = Set<String>()
+    /// Bumped when the question card changes step: its top (Back, the question) is brought into view.
+    @State private var askStep = 0
 
     private static let bottomId = "story-bottom"
+    private static let askId = "story-ask"
 
     var body: some View {
         let signature = data.story.map(\.id).joined(separator: "|") + "\(data.story.count)" + (data.liveLine ?? "")
@@ -45,6 +48,7 @@ struct NWRoomStory: View {
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: signature) { _, _ in if atBottom { scrollToBottom(proxy) } }
+            .onChange(of: askStep) { _, _ in withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.askId, anchor: .top) } }
             .overlay(alignment: .bottomTrailing) {
                 if !atBottom && !data.story.isEmpty {
                     Button { scrollToBottom(proxy) } label: {
@@ -106,7 +110,14 @@ struct NWRoomStory: View {
     @ViewBuilder private func pinned(_ row: NowRow) -> some View {
         switch row.section {
         case .decide where row.chip == .question:
-            NWQuestionCard(row: row, now: data.now, onOpen: { actions.openDecision(row.id) })
+            if let ask = data.ask {
+                NWAnswerHost(ask: ask, delivery: data.askDelivery, route: data.answerRoute, mac: data.macName,
+                             agent: data.character.name, viaHook: data.askViaHook, onSubmit: actions.submitAnswers,
+                             onStepChange: { askStep += 1 })
+                    .id(Self.askId)
+            } else {
+                NWQuestionCard(row: row, now: data.now, onOpen: { actions.openDecision(row.id) })
+            }
         case .decide where row.chip == .undoable:
             NWUndoableRow(row: row, now: data.now, outcome: data.pageOutcome, pending: data.pagePending,
                           onApprove: { actions.approve(row) }, onOpen: { actions.openDecision(row.id) }, onCancel: { actions.cancel(row.id) })

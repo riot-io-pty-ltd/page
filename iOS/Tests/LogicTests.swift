@@ -1520,6 +1520,10 @@ do {
     check(RenderArguments.parse(["-NWRender"]) == nil, "missing screen is nil")
     check(RenderArguments.parse(["-NWRender", "-NWGlow", "full"]) == nil, "dash-prefixed screen is nil")
     check(RenderArguments.parse(["-NWRender", "now", "-NWGlow", "neon"])?.glow == nil, "unknown glow is nil, screen kept")
+    check(RenderArguments.parse(["-NWRender", "motion-approach", "-NWTime", "0.18"])?.time == 0.18, "NWTime pins the motion's seconds")
+    check(RenderArguments.parse(["-NWRender", "now"])?.time == nil, "no NWTime gives nil time")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWTime", "-1"])?.time == nil
+          && RenderArguments.parse(["-NWRender", "now", "-NWTime", "soon"])?.time == nil, "a negative or unreadable time is ignored")
 }
 
 do {
@@ -1536,17 +1540,19 @@ do {
 do {
     let stop = HoldRingSpec.stopAll
     check(stop.progress(elapsed: 0.3) == 0 && !stop.isVisible(elapsed: 0.3), "pulse ring hidden at 300 ms")
-    check(nwNear(stop.progress(elapsed: 1.05), 0.5), "pulse ring half at 1.05 s")
-    check(stop.isComplete(elapsed: 1.8) && !stop.isComplete(elapsed: 1.79), "pulse ring completes at 1.8 s")
+    check(nwNear(stop.progress(elapsed: 0.9), 0.5), "pulse ring half at 900 ms")
+    check(stop.isComplete(elapsed: 1.5) && !stop.isComplete(elapsed: 1.49), "pulse ring completes at 1.5 s (board 07)")
     let irr = HoldRingSpec.irreversible
-    check(nwNear(irr.progress(elapsed: 0.6), 0.5) && irr.isComplete(elapsed: 1.2), "irreversible ring fills over 1.2 s")
-    let ticks = HoldRingSpec.ticksCrossed(from: 0.3, to: 0.7)
-    check(ticks.count == 2 && nwNear(ticks[0], 1.0 / 3) && nwNear(ticks[1], 2.0 / 3), "ticks at a third and two thirds")
+    check(irr.progress(elapsed: 0.3) == 0 && !irr.isVisible(elapsed: 0.3), "irreversible ring hidden for 300 ms")
+    check(nwNear(irr.progress(elapsed: 0.9), 0.5) && irr.isComplete(elapsed: 1.5), "irreversible ring fills over 1.2 s after the dead zone")
+    let ticks = HoldRingSpec.ticksCrossed(from: 0.2, to: 0.8)
+    check(ticks.count == 3 && nwNear(ticks[0], 0.25) && nwNear(ticks[1], 0.5) && nwNear(ticks[2], 0.75), "ticks at 25, 50 and 75% (board 07)")
+    check(HoldRingSpec.ticksCrossed(from: 0.9, to: 1) == [1.0], "a firm tick when full")
     check(HoldRingSpec.ticksCrossed(from: 0.7, to: 0.3).isEmpty, "unwinding crosses no ticks")
     check(nwNear(HoldRingSpec.warmth(progress: 2.0 / 3), 0), "amber until two thirds")
     check(nwNear(HoldRingSpec.warmth(progress: 1), 1), "red at full")
     check(nwNear(HoldRingSpec.warmth(progress: 5.0 / 6), 0.5), "halfway warm at five sixths")
-    check(nwNear(stop.unwound(from: 1, since: 0.75), 0.5), "unwinds at the fill speed")
+    check(nwNear(stop.unwound(from: 1, since: 0.6), 0.5), "unwinds at the fill speed")
     check(stop.unwound(from: 0.2, since: 5) == 0, "unwound is floored at zero")
     check(HoldRingSpec.stopScope(busy: 4) == "Press Esc in 4 busy sessions", "scope plural")
     check(HoldRingSpec.stopScope(busy: 1) == "Press Esc in 1 busy session", "scope singular")
@@ -1608,8 +1614,8 @@ do {
     check(PulsePress.onRelease(held: 0.1) == .tap, "short press is a tap")
     check(PulsePress.onRelease(held: 0.3) == .tap, "dead zone is exclusive")
     check(PulsePress.onRelease(held: 0.31) == .abandonedHold, "just past the dead zone abandons")
-    check(PulsePress.onRelease(held: 1.79) == .abandonedHold, "released just before full abandons")
-    check(PulsePress.onRelease(held: 1.8) == .completedHold, "full ring completes")
+    check(PulsePress.onRelease(held: 1.49) == .abandonedHold, "released just before full abandons")
+    check(PulsePress.onRelease(held: 1.5) == .completedHold, "full ring completes")
 
     let nine = (1...9).map { i in
         nwSession("p\(i)", title: i <= 4 ? "t\(i)" : "idle\(i)", state: i <= 4 ? "active" : "idle", canInterrupt: true)
@@ -2728,6 +2734,661 @@ do {
     check(TerminalTone.classify("❯ ") == .prompt, "prompt row")
     check(TerminalTone.classify("────────────") == .quiet && TerminalTone.classify("⎿  Done") == .quiet, "rules and continuations are quiet")
     check(TerminalTone.classify("hello") == .plain && TerminalTone.classify("") == .plain, "anything else is plain")
+}
+
+// MARK: - Steer safety: tap targets, targets on the wire, Send, receipts
+
+do {
+    // Sky: no two tap targets overlap, in a crowded sky and a short one, and each star's centre hits itself.
+    let fleet = skyFleet(["page", "riot-io-teltonika", "payments", "bottle-flip", "tokenizer-lab"], perProject: 4)
+    let sky = SkyModel.build(sessions: fleet, interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    for (w, h) in [(393.0, 852.0), (375.0, 667.0), (430.0, 932.0)] {
+        let size = SkySize(width: w, height: h)
+        let pts = SkyModel.starPoints(sky.constellations, in: size)
+        let radii = SkyModel.hitRadii(sky.constellations, in: size)
+        let ids = sky.constellations.flatMap(\.stars).map(\.id)
+        var overlaps = 0, misses = 0
+        for (i, a) in ids.enumerated() {
+            if (radii[a] ?? 0) > SkyModel.maxHitRadius { overlaps += 1 }
+            if SkyModel.hitTest(pts[a]!, constellations: sky.constellations, in: size) != a { misses += 1 }
+            for b in ids[(i + 1)...] {
+                let d = hypot(pts[a]!.x - pts[b]!.x, pts[a]!.y - pts[b]!.y)
+                if (radii[a] ?? 0) + (radii[b] ?? 0) > d + 1e-9 { overlaps += 1 }
+            }
+        }
+        check(overlaps == 0, "no two star tap targets overlap at \(Int(w))x\(Int(h)) (\(overlaps))")
+        check(misses == 0, "each star's centre taps itself at \(Int(w))x\(Int(h)) (\(misses))")
+        check(SkyModel.hitTest(SkyPoint(x: -50, y: -50), constellations: sky.constellations, in: size) == nil, "a tap on empty sky opens nothing")
+    }
+    let lone = SkyModel.build(sessions: [nwSession("only", cwd: "~/code/only")], interventions: [], status: nil, rings: [], macName: "M", paused: false, now: nwNow)
+    check(SkyModel.hitRadii(lone.constellations, in: SkySize(width: 393, height: 852))["only"] == SkyModel.maxHitRadius, "a lone star gets the full target")
+}
+
+do {
+    let page = nwSession("d8a3f555-8774-4e26-a687-32b9f92815bc", title: "riot-io-teltonika", state: "active", host: "cmux", cwd: "~/projects/riot-io-teltonika")
+    let target = SessionTarget(session: page, macName: "Studio MBP")
+    check(target.project == "riot-io-teltonika" && target.shortId == "d8a3", "target names the folder and the id's start")
+    check(target.route == "riot-io-teltonika · cmux · Studio MBP", "route: project, terminal, Mac")
+    check(target.expectCwd == "~/projects/riot-io-teltonika" && target.expectTitle == "riot-io-teltonika", "what travels is what the Mac listed")
+    check(SessionTarget(session: nwSession("x1", host: "unknown", cwd: "~/a/b"), macName: "").route == "b · your Mac", "unknown terminal and blank Mac name")
+    check(SessionTarget(session: nwSession("zz", title: "Some thread", cwd: "~"), macName: "M").project == "Some thread", "home folder falls back to the title")
+    let blank = nwSession("abcdef123456", title: "", cwd: "")
+    check(SessionTarget(session: blank, macName: "M").expectCwd == nil && SessionTarget(session: blank, macName: "M").expectTitle == nil,
+          "a title this phone made up is never sent as an expectation")
+
+    // Wire: absent when unknown (old bytes unchanged), present when known; the Mac's own keys.
+    func obj(_ c: SessionCommand) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: c.plaintext(clientId: "c", viewer: "v", now: cmdNow))) as? [String: Any] ?? [:]
+    }
+    let plain = SessionCommand.input(sessionId: "s1", text: "hi").plaintext(clientId: "c1", viewer: "v1", now: cmdNow)
+    let plainTarget = SessionCommand.input(sessionId: "s1", text: "hi", target: nil).plaintext(clientId: "c1", viewer: "v1", now: cmdNow)
+    check(plain == plainTarget && obj(.input(sessionId: "s1", text: "hi"))["expectCwd"] == nil, "no target: the same bytes as before, no new keys")
+    let withTarget = obj(.input(sessionId: page.id, text: "hi", target: target))
+    check(withTarget["expectCwd"] as? String == "~/projects/riot-io-teltonika" && withTarget["expectTitle"] as? String == "riot-io-teltonika"
+          && withTarget["sessionId"] as? String == page.id && withTarget["op"] as? String == "input", "input carries what the room showed")
+    let stopWith = obj(.interrupt(sessionId: page.id, target: target))
+    check(stopWith["expectCwd"] as? String == "~/projects/riot-io-teltonika" && stopWith["op"] as? String == "interrupt", "Stop carries it too")
+    check(obj(.interrupt(sessionId: "s9"))["expectCwd"] == nil, "Stop without a target is unchanged")
+    check(SessionResultCopy.refusal(reason: "target_mismatch", detail: "Nothing was typed. X", agent: "Claude") == "Nothing was typed. X", "a mismatch shows the Mac's own words")
+    check(SessionResultCopy.refusal(reason: "target_mismatch", detail: nil, agent: "Claude").contains("nothing was typed"), "and has words of its own")
+}
+
+do {
+    let busy = nwSession("s-busy", title: "page", state: "active", host: "cmux", cwd: "~/projects/page")
+    let other = nwSession("s-other", title: "riot", state: "active", host: "cmux", cwd: "~/projects/riot")
+    func decide(_ mode: RoomComposerMode, _ text: String = "hello", shown: LiveSession? = nil, route: String = "s-busy", live: LiveSession?? = nil,
+                ended: Bool = false, reply: Bool = true) -> RoomSend.Decision {
+        RoomSend.decide(mode: mode, text: text, shown: shown ?? busy, routeSessionId: route, live: live ?? busy, ended: ended, hasReplyAction: reply, macName: "Studio MBP")
+    }
+    if case .input(let t) = decide(.steer) { check(t.sessionId == "s-busy" && t.project == "page", "steer types into the session the header drew") }
+    else { check(false, "steer sends") }
+    if case .input = decide(.nextTask) {} else { check(false, "next task sends") }
+    check(decide(.steer, shown: other) == .refuse("This room is showing a different session than it would type into, so nothing was sent. Close it and open the session again."),
+          "a room whose header is another session than its route sends nothing")
+    check({ if case .refuse = decide(.steer, ended: true) { return true }; return false }(), "an ended session is refused with a reason")
+    check({ if case .refuse = decide(.steer, live: .some(nil)) { return true }; return false }(), "a session that left the list is refused")
+    check(decide(.steer, "   ") == .refuse(SessionComposer.Problem.empty.message), "empty text says so")
+    check(decide(.steer, String(repeating: "x", count: 8001)) == .refuse(SessionComposer.Problem.tooLong(count: 8001).message), "too long says so")
+    check(decide(.locked("Answer the prompt on your Mac.")) == .refuse("Answer the prompt on your Mac."), "locked says why")
+    check(decide(.blocked("Ghostty can't be typed into")) == .refuse("Ghostty can't be typed into"), "blocked says why")
+    check(decide(.disabled("Waiting for your Mac.")) == .refuse("Waiting for your Mac."), "disabled says why")
+    check(decide(.tellInstead(pageId: "p"), reply: true) == .tellInstead, "tell-instead goes through the page")
+    check({ if case .refuse = decide(.tellInstead(pageId: "p"), reply: false) { return true }; return false }(), "tell-instead without its page is refused with a reason")
+    for mode in [RoomComposerMode.steer, .nextTask, .tellInstead(pageId: "p"), .locked("a"), .blocked("b"), .disabled("c")] {
+        for text in ["", "  ", "hi"] {
+            for ended in [false, true] {
+                let d = decide(mode, text, ended: ended)
+                if case .refuse(let why) = d { check(!why.isEmpty, "every refusal has words") }
+            }
+        }
+    }
+
+    check(DraftSubmit.isReturnKey(old: "run tests", new: "run tests\n"), "one Return at the end is the Send key")
+    check(!DraftSubmit.isReturnKey(old: "run", new: "run\nthe tests"), "a paste is not a send")
+    check(!DraftSubmit.isReturnKey(old: "ab", new: "a\nb"), "a Return in the middle is not a send")
+    check(!DraftSubmit.isReturnKey(old: "a\n", new: "a\n\n") == false, "a second Return after a newline is again a Return")
+    check(DraftSubmit.withoutReturn("hi\n") == "hi" && DraftSubmit.withoutReturn("hi") == "hi", "the Return is stripped")
+}
+
+do {
+    let page = nwSession("d8a3f555", title: "riot-io-teltonika", state: "active", host: "cmux", cwd: "~/projects/riot-io-teltonika")
+    let target = SessionTarget(session: page, macName: "Studio MBP")
+    func cmd(_ state: SessionDeliveryState, at: TimeInterval = 0, kind: SessionCommandKind = .input, target t: SessionTarget? = target) -> SentSessionCommand {
+        SentSessionCommand(clientId: "c1", sessionId: "d8a3f555", kind: kind, text: "hi", sentAt: nwNow.addingTimeInterval(at), state: state, target: t)
+    }
+    let r = { (c: SentSessionCommand?, at: TimeInterval) in SendReceipt.build(c, agent: "Claude", now: nwNow.addingTimeInterval(at)) }
+    check(r(cmd(.sending), 1)?.headline == "Sending to riot-io-teltonika · cmux · Studio MBP…" && r(cmd(.sending), 1)?.tone == .working, "sending names the target")
+    check(r(cmd(.typed(nil)), 2)?.headline == "Typed into riot-io-teltonika · cmux · Studio MBP" && r(cmd(.typed(nil)), 2)?.tone == .good, "typed names the target")
+    check(r(cmd(.queued(nil)), 2)?.headline == "Queued — Claude reads it after this step" && r(cmd(.queued(nil)), 2)?.detail == "riot-io-teltonika · cmux · Studio MBP", "queued says when, and where")
+    let refused = r(cmd(.refused(reason: "target_mismatch", message: "Nothing was typed.")), 2)
+    check(refused?.headline == "Refused: Nothing was typed." && refused?.tone == .problem && refused?.detail == "Target: riot-io-teltonika · cmux · Studio MBP", "refused says why and which target it was for")
+    check(r(cmd(.failed("Your Mac is offline.")), 2)?.headline == "Not sent: Your Mac is offline." && r(cmd(.failed("x")), 2)?.tone == .problem, "failed says why")
+    check(r(cmd(.noAnswer), 25)?.headline == "No answer from Studio MBP" && r(cmd(.noAnswer), 25)?.detail?.contains("riot-io-teltonika") == true, "no answer names the Mac and the target")
+    check(r(cmd(.typed(nil)), 61) == nil && r(cmd(.queued(nil)), 61) == nil, "good news fades after a minute")
+    check(r(cmd(.refused(reason: nil, message: "no")), 300) != nil && r(cmd(.refused(reason: nil, message: "no")), 601) == nil, "a refusal stays for ten minutes")
+    check(r(cmd(.sending), 3000) != nil, "a send still waiting is always shown")
+    check(r(nil, 0) == nil && r(cmd(.typed(nil), kind: .interrupt), 1) == nil, "no command, or a Stop, is no message receipt")
+    check(r(cmd(.typed(nil), target: nil), 1)?.headline == "Typed into the session", "without a recorded target it still never says nothing")
+    check(SendReceipt.stopLine(cmd(.typed(nil), kind: .interrupt), agent: "Claude") == "Stopped · pressed Esc in riot-io-teltonika · cmux · Studio MBP", "Stop names the target")
+    check(SendReceipt.stopLine(cmd(.sending, kind: .interrupt), agent: "Claude") == "Stopping riot-io-teltonika · cmux · Studio MBP…", "Stop in flight names it")
+    check(SendReceipt.stopLine(cmd(.refused(reason: nil, message: "Page can't stop this."), kind: .interrupt), agent: "Claude")?.hasPrefix("Couldn't stop riot-io-teltonika") == true, "a refused Stop says so")
+    check(SendReceipt.stopLine(cmd(.typed(nil)), agent: "Claude") == nil, "a message is not a Stop")
+
+    check(target.whereLine == "~/projects/riot-io-teltonika · #d8a3", "the header says which folder and which session")
+    check(SessionTarget(session: nwSession("abcd1234", cwd: ""), macName: "M").whereLine == "#abcd", "no folder: just the id")
+    let plan = SessionStopPlan.build(session: page, ready: true, ended: false, macName: "Studio MBP")
+    check(plan.scope == "Press Esc in riot-io-teltonika" && plan.preview.contains("cmux › riot-io-teltonika"), "Stop names the folder")
+}
+
+// Answering the terminal's questions (QuestionDraft)
+do {
+    let askJSON = """
+    {"id":"toolu_1","hasPreview":false,"questions":[
+      {"question":"Pick a color","header":"Color","multi":false,"options":[{"label":"Red","description":"warm"},{"label":"Green"},{"label":"Blue"}]},
+      {"question":"Pick toppings","header":"Toppings","multi":true,"options":[{"label":"Cheese"},{"label":"Ham"},{"label":"Olives"},{"label":"Corn"}]},
+      {"question":"Pick a size","multi":false,"options":[{"label":"Small"},{"label":"Large"}]}]}
+    """
+    let ask = try! JSONDecoder.page().decode(SessionAsk.self, from: Data(askJSON.utf8))
+    check(ask.id == "toolu_1" && ask.questions.count == 3 && ask.questions[1].multi && ask.questions[0].options[0].detail == "warm", "ask decodes")
+    check(ask.questions[2].header == "" && ask.isAnswerable, "a missing header is empty and the ask is answerable")
+
+    // A malformed ask is dropped, never a half question.
+    func decodes(_ s: String) -> Bool { (try? JSONDecoder.page().decode(SessionAsk.self, from: Data(s.utf8))) != nil }
+    check(!decodes(#"{"id":"","questions":[{"question":"Q","options":[{"label":"a"}]}]}"#), "an empty id is refused")
+    check(!decodes(#"{"id":"x","questions":[]}"#), "no questions is refused")
+    check(!decodes(#"{"id":"x","questions":[{"question":"Q","options":[]}]}"#), "a question without options is refused")
+    check(!decodes(#"{"id":"x","questions":[{"question":"Q","options":[{"label":""}]}]}"#), "an option without a label is refused")
+    check(!decodes(#"{"id":"x","questions":[{"question":"Q","options":[{"label":"a"},{"label":"b"},{"label":"c"},{"label":"d"},{"label":"e"},{"label":"f"},{"label":"g"},{"label":"h"}]}]}"#), "more options than keys is refused")
+    check(decodes(#"{"id":"x","extra":1,"questions":[{"question":"Q","future":true,"options":[{"label":"a","preview":"p"}]}]}"#), "unknown fields are ignored")
+    let withPreview = try! JSONDecoder.page().decode(SessionAsk.self, from: Data(#"{"id":"x","hasPreview":true,"questions":[{"question":"Q","options":[{"label":"a"}]}]}"#.utf8))
+    check(!withPreview.isAnswerable, "a preview layout is answered at the Mac")
+
+    // The session row: ask is optional, and a bad ask never loses the session.
+    let rowJSON = """
+    {"id":"s1","backend":"claude","title":"page","state":"waitingOnUser","host":"tmux","canType":true,"canInterrupt":true,"interventionId":"p1","ask":\(askJSON)}
+    """
+    let row = try! JSONDecoder.page().decode(LiveSession.self, from: Data(rowJSON.utf8))
+    check(row.ask?.id == "toolu_1", "the row carries the ask")
+    let bad = try! JSONDecoder.page().decode(LiveSession.self, from: Data(#"{"id":"s1","state":"waitingOnUser","ask":{"id":5}}"#.utf8))
+    check(bad.ask == nil && bad.id == "s1", "a malformed ask leaves the session intact")
+    let old = try! JSONDecoder.page().decode(LiveSession.self, from: Data(#"{"id":"s1","state":"waitingOnUser"}"#.utf8))
+    check(old.ask == nil, "an old Mac sends no ask")
+
+    // Single-select: tick, auto-advance.
+    var sheet = AnswerSheet(ask: ask)
+    check(sheet.step == .question(0) && !sheet.canSubmit && sheet.wire() == nil, "starts on question 1, nothing to submit")
+    check(sheet.tap(option: 1) && sheet.step == .question(1), "a single-select tick moves on at once")
+    check(sheet.isAnswered(0) && sheet.answerText(0) == "Green", "the answer is recorded")
+    // Multi-select: toggle, Next.
+    check(!sheet.tap(option: 1) && sheet.isPicked(1, option: 1), "a multi-select tick stays")
+    check(!sheet.next() == false && sheet.step == .question(2), "Next moves on once answered")
+    sheet.back()
+    check(sheet.step == .question(1), "Back goes one question back")
+    sheet.tap(option: 3)
+    check(sheet.answerText(1) == "Ham, Corn", "multi answers are in option order, not tick order")
+    sheet.tap(option: 1)
+    check(sheet.answerText(1) == "Corn", "a second tap unticks")
+    sheet.tap(option: 1)
+    check(sheet.next() && sheet.step == .question(2), "Next again")
+    check(sheet.tap(option: 0) && sheet.isReview && sheet.canSubmit, "the last answer goes to the review")
+    check(sheet.wire() == [AnswerWire(question: 0, picks: [1], other: nil), AnswerWire(question: 1, picks: [1, 3], other: nil),
+                           AnswerWire(question: 2, picks: [0], other: nil)], "the wire is indices, sorted")
+    check(sheet.reviewRows().map(\.answer) == ["Green", "Ham, Corn", "Small"] && sheet.reviewRows()[2].header == "Question 3", "review rows")
+    check(sheet.previewLine(route: "cmux › page", mac: "Studio MBP") == "Will choose Green; Ham, Corn; Small · cmux › page · Studio MBP", "the delivery preview says what, where, on which Mac")
+    check(sheet.previewLine(route: nil, mac: "").hasSuffix("· your Mac"), "a preview always names the Mac")
+    sheet.back()
+    check(sheet.step == .question(2), "Back from the review goes to the last question")
+
+    // Next can't skip an unanswered question; the strip can't pass one.
+    var fresh = AnswerSheet(ask: ask)
+    check(!fresh.next() && fresh.step == .question(0), "Next needs an answer")
+    fresh.go(to: 2)
+    check(fresh.step == .question(0) && !fresh.isReachable(1), "the strip can't jump past an unanswered question")
+    fresh.goToReview()
+    check(!fresh.isReview, "no review until everything is answered")
+
+    // Revisiting an answered question goes back to the review, not through the others.
+    sheet.go(to: 0)
+    check(sheet.step == .question(0), "the strip reopens an answered question")
+    check(sheet.tap(option: 2) && sheet.isReview, "changing an earlier answer returns to the review")
+    check(sheet.answerText(0) == "Blue", "and keeps the change")
+
+    // Other: single-select.
+    var o = AnswerSheet(ask: ask)
+    o.toggleOther()
+    check(o.otherChosen(0) && !o.isAnswered(0) && o.otherNeedsText(0), "Other with no text isn't an answer")
+    check(!o.commitOther() && o.step == .question(0), "Return on an empty Other does nothing")
+    o.setOther("Pur\nple")
+    check(o.otherText(0) == "Pur ple", "Other is one line")
+    check(o.commitOther() && o.step == .question(1), "Return on Other with text moves on")
+    check(o.answerText(0) == "Pur ple" && o.wire() == nil, "Other text is the answer; not complete yet")
+    o.go(to: 0)
+    o.tap(option: 0)
+    check(!o.otherChosen(0) && o.answerText(0) == "Red", "ticking an option replaces Other")
+    // Other: multi-select adds to the ticks and can be closed again.
+    var m = AnswerSheet(ask: ask)
+    m.tap(option: 0)   // question 1: Red, which opens question 2
+    m.tap(option: 0)   // Cheese
+    m.toggleOther()
+    m.setOther("kiwi")
+    check(m.answerText(1) == "Cheese, kiwi" && m.isAnswered(1), "multi: Other joins the ticks, last")
+    check(m.next() && m.step == .question(2), "Next after Other")
+    m.go(to: 1)
+    m.toggleOther()
+    check(!m.otherChosen(1) && m.answerText(1) == "Cheese", "closing Other forgets its text")
+    m.toggleOther()
+    check(m.otherNeedsText(1) && !m.next(), "an empty Other blocks Next")
+    m.setOther(String(repeating: "x", count: 900))
+    check(m.otherText(1).count == AnswerSheet.maxOtherChars, "Other is capped")
+    // A multi with only Other.
+    var mo = AnswerSheet(ask: ask)
+    mo.tap(option: 0); mo.tap(option: 0)
+    mo.toggleOther(); mo.setOther("only me")
+    check(mo.isAnswered(1) && mo.wire() == nil, "a multi-select with a tick and Other is answered; not complete yet")
+    check(mo.next() && !mo.isReview, "a later question is still open")
+    mo.tap(option: 1)
+    check(mo.wire() == [AnswerWire(question: 0, picks: [0], other: nil), AnswerWire(question: 1, picks: [0], other: "only me"),
+                        AnswerWire(question: 2, picks: [1], other: nil)], "Other travels as text next to the picks")
+    check(mo.wire()?[1].json["other"] as? String == "only me" && mo.wire()?[0].json["other"] == nil, "no other key when none")
+
+    // Out-of-range taps do nothing.
+    var r = AnswerSheet(ask: ask)
+    check(!r.tap(option: 9) && !r.tap(option: -1) && r.answeredCount == 0, "bad option index ignored")
+
+    // Through Claude's question hook: numbers, no Other.
+    var h = AnswerSheet(ask: ask, allowsOther: false)
+    h.toggleOther()
+    check(!h.otherChosen(0), "the hook can't take Other text")
+    check(h.hookReply() == nil, "nothing to send until every question is answered")
+    h.tap(option: 1); h.tap(option: 3); h.tap(option: 1); h.next(); h.tap(option: 0)
+    check(h.isReview && h.hookReply() == "2\n2, 4\n1", "one line per question: 1-based numbers, several comma-separated for a multi-select")
+    check(sheet.hookReply() == nil, "a sheet made for the keys never sends hook text")
+    check(h.previewLine(route: "cmux › page", mac: "Studio MBP", viaHook: true) == "Will answer through Claude's question hook: Green; Ham, Corn; Small · Studio MBP",
+          "the hook preview names the hook and the Mac, and no keys")
+    check(!h.previewLine(route: "cmux › page", mac: "Studio MBP", viaHook: true).contains("cmux"), "nothing is typed in a terminal, so no terminal is named")
+    var oneMulti = AnswerSheet(ask: SessionAsk(id: "t", questions: [AskQuestion(text: "Tags?", header: "", multi: true, options: [AskOption(label: "a, b", detail: ""), AskOption(label: "c", detail: ""), AskOption(label: "d", detail: "")])], hasPreview: false), allowsOther: false)
+    oneMulti.tap(option: 2); oneMulti.tap(option: 0)
+    check(oneMulti.hookReply() == "1, 3", "a label with a comma is sent as its number")
+    // The hook page's delivery is the page's own outcome.
+    let t0 = Date(timeIntervalSince1970: 100)
+    check(AnswerPicker.delivery(from: .none, sessionId: "s1", promptKey: "k", now: t0) == nil, "no outcome, no state")
+    check(AnswerPicker.delivery(from: .sending, sessionId: "s1", promptKey: "k", now: t0)?.state == .sending, "sending")
+    check(AnswerPicker.delivery(from: .arming(progress: 0.4), sessionId: "s1", promptKey: "k", now: t0)?.state == .sending, "arming reads as sending")
+    check(AnswerPicker.delivery(from: .delivered("Answered — Claude has your choice"), sessionId: "s1", promptKey: "k", now: t0)?.state == .typed("Answered — Claude has your choice"), "delivered")
+    check(AnswerPicker.delivery(from: .problem("Prompt closed"), sessionId: "s1", promptKey: "k", now: t0)?.state == .failed("Prompt closed"), "a problem is a failure")
+    let working = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .active, host: "tmux", canType: true,
+                              typeBlocker: nil, canInterrupt: true, provider: nil, lastActivityAt: nil, interventionId: nil, preview: "", ask: ask)
+    check(AnswerPicker.ask(for: working, pageIsQuestion: true) == nil, "a working session with no hook has no dialog to answer")
+    // The hook applies option numbers by position to ITS question: the page's own text must show this ask.
+    let hookText = ask.questions.enumerated().map { i, q in "Q\(i + 1). \(q.text)\n" + q.options.enumerated().map { "\($0 + 1). \($1.label)" }.joined(separator: "\n") }.joined(separator: "\n\n")
+    check(AnswerPicker.ask(for: working, pageIsQuestion: true, hook: true, pageContext: hookText)?.id == "toolu_1", "a hook-held page is answered though the session reads working")
+    check(AnswerPicker.ask(for: working, pageIsQuestion: true, hook: true) == nil, "a hook page whose text isn't known gets no picker")
+    check(AnswerPicker.ask(for: working, pageIsQuestion: true, hook: true, pageContext: "Which database should I use?\n1. Postgres\n2. SQLite") == nil,
+          "a hook page about a different question (the previous ask still on the row) gets no picker")
+    var done = AnswerSheet(ask: ask, allowsOther: false)
+    done.tap(option: 1); done.tap(option: 0); done.next(); done.tap(option: 0); done.tap(option: 0)
+    var unfinished = AnswerSheet(ask: ask, allowsOther: false)
+    unfinished.tap(option: 1)
+    check(AnswerPicker.submit(viaHook: false, hasPage: false, sheet: done) == .keys, "no hook: the Mac presses the keys")
+    check(AnswerPicker.submit(viaHook: true, hasPage: true, sheet: done) == done.hookReply().map { .hook($0) }, "a hook page takes numbers as text")
+    check({ if case .refuse = AnswerPicker.submit(viaHook: true, hasPage: false, sheet: done) { return true }; return false }(), "a hook answer with no page says so, it never silently does nothing")
+    check({ if case .refuse = AnswerPicker.submit(viaHook: true, hasPage: true, sheet: unfinished) { return true }; return false }(), "an unfinished hook answer is refused with a reason")
+    check(AnswerPicker.hookPageMatches(ask: ask, context: hookText.uppercased().replacingOccurrences(of: "\n", with: "  \n ")), "case and spacing don't matter")
+    let blocked = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .waitingOnUser, host: "cmux", canType: false,
+                              typeBlocker: "Checking where this session runs…", canInterrupt: false, provider: nil, lastActivityAt: nil, interventionId: "p1", preview: "", ask: ask)
+    check(AnswerPicker.ask(for: blocked, pageIsQuestion: true) == nil, "no keys can be pressed there: no picker, Tell it instead")
+    check(DraftSubmit.isDuplicate(text: "go on ", last: ("go on", Date(timeIntervalSince1970: 10)), now: Date(timeIntervalSince1970: 10.3)), "the same message again within a second is one Return")
+    check(!DraftSubmit.isDuplicate(text: "go on", last: ("go on", Date(timeIntervalSince1970: 10)), now: Date(timeIntervalSince1970: 12)), "later, it is a new message")
+    check(!DraftSubmit.isDuplicate(text: "stop", last: ("go on", Date(timeIntervalSince1970: 10)), now: Date(timeIntervalSince1970: 10.3)), "different text is never a duplicate")
+    check(!DraftSubmit.isDuplicate(text: "go on", last: nil, now: Date(timeIntervalSince1970: 10)), "the first message is never a duplicate")
+
+    // The command.
+    let target = SessionTarget(session: nwSession("d8a3f555", title: "page", state: "waitingOnUser", host: "tmux", cwd: "~/projects/page"), macName: "M")
+    let data = SessionCommand.answer(sessionId: "s1", promptKey: "toolu_1", answers: mo.wire()!, target: target)
+        .plaintext(clientId: "c1", viewer: "v1", now: Date(timeIntervalSince1970: 1_761_300_000))
+    let obj = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    check(obj["op"] as? String == "answer" && obj["promptKey"] as? String == "toolu_1" && obj["sessionId"] as? String == "s1", "answer command fields")
+    let wire = obj["answers"] as! [[String: Any]]
+    check(wire.count == 3 && wire[1]["i"] as? Int == 1 && (wire[1]["picks"] as? [Int]) == [0] && wire[1]["other"] as? String == "only me", "answers on the wire")
+    check(obj["expectCwd"] as? String == "~/projects/page", "the answer names the folder the room showed")
+
+    // Delivery state copy and the picker's gate.
+    check(SessionDeliveryState.sending.label(.answer) == "Sending your answers…" && SessionDeliveryState.typed(nil).label(.answer) == "Answered", "answer labels")
+    check(SessionResultCopy.refusal(reason: "question_changed", detail: nil, agent: "Claude").contains("changed"), "question_changed has copy")
+    check(SessionResultCopy.refusal(reason: "answer_unsupported", detail: "Terminal.app can't press keys", agent: "Claude") == "Terminal.app can't press keys", "answer_unsupported shows the Mac's words")
+    let waiting = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .waitingOnUser, host: "tmux", canType: true,
+                              typeBlocker: nil, canInterrupt: true, provider: nil, lastActivityAt: nil, interventionId: "p1", preview: "", ask: ask)
+    check(AnswerPicker.ask(for: waiting, pageIsQuestion: true)?.id == "toolu_1", "the picker is offered for a waiting question")
+    check(AnswerPicker.ask(for: waiting, pageIsQuestion: false) == nil, "…not for an approval page")
+    check(AnswerPicker.ask(for: nil, pageIsQuestion: true) == nil, "…not without a session")
+    let noAsk = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .waitingOnUser, host: "tmux", canType: true,
+                            typeBlocker: nil, canInterrupt: true, provider: nil, lastActivityAt: nil, interventionId: "p1", preview: "")
+    check(AnswerPicker.ask(for: noAsk, pageIsQuestion: true) == nil, "…not from a Mac that sent no ask")
+    let sent = [SentSessionCommand(clientId: "a", sessionId: "s1", kind: .answer, text: "x", sentAt: Date(timeIntervalSince1970: 1), state: .sending, promptKey: "toolu_1"),
+                SentSessionCommand(clientId: "b", sessionId: "s1", kind: .answer, text: "x", sentAt: Date(timeIntervalSince1970: 2), state: .typed(nil), promptKey: "toolu_1"),
+                SentSessionCommand(clientId: "c", sessionId: "s1", kind: .answer, text: "x", sentAt: Date(timeIntervalSince1970: 3), state: .typed(nil), promptKey: "toolu_2"),
+                SentSessionCommand(clientId: "d", sessionId: "s1", kind: .input, text: "x", sentAt: Date(timeIntervalSince1970: 4), state: .typed(nil))]
+    check(AnswerPicker.delivery(sent, sessionId: "s1", promptKey: "toolu_1")?.clientId == "b", "the newest answer for that very question")
+    check(AnswerPicker.delivery(sent, sessionId: "s1", promptKey: "toolu_9") == nil, "none for another question")
+}
+
+// MARK: - Signature motion: the timing and phase models
+
+// The curves: clamped, smooth, and the spring the board uses.
+do {
+    check(MotionCurve.clamp01(-0.5) == 0 && MotionCurve.clamp01(1.5) == 1, "clamp01 holds 0...1")
+    check(nwNear(MotionCurve.progress(0.5, from: 0, to: 1), 0.5) && MotionCurve.progress(1, from: 2, to: 2) == 0
+          && MotionCurve.progress(3, from: 2, to: 2) == 1, "progress over a segment; a zero-length one is a step")
+    check(nwNear(MotionCurve.smooth(0.5), 0.5) && nwNear(MotionCurve.smooth(0.25), 0.15625), "smoothstep eases in and out")
+    check(nwNear(MotionCurve.easeOut(0.5), 0.875) && nwNear(MotionCurve.easeIn(0.5), 0.125), "ease out and in are cubic")
+    check(nwNear(MotionCurve.spring(0.18, response: 0.5, damping: 0.8), 0.7519, 1e-3), "the approach spring at 180 ms")
+    let overshoot = MotionCurve.spring(0.36, response: 0.5, damping: 0.8)
+    check(nwNear(overshoot, 1.0096, 1e-3) && overshoot > 1, "the spring overshoots a little at 360 ms")
+    check(nwNear(MotionCurve.spring(0.52, response: 0.5, damping: 0.8), 1, 0.01), "and has settled by 520 ms")
+    check(nwNear(MotionCurve.spring(0.3, response: 0.5, damping: 1), 0.8900, 1e-3), "critically damped: no overshoot, 0.89 at 300 ms")
+    check(MotionCurve.spring(0, response: 0.5, damping: 0.8) == 0 && MotionCurve.spring(2, response: 0, damping: 0.8) == 1,
+          "no time, no motion; a zero period is at once")
+    check(nwNear(MotionCurve.shake(0.0525), 0.7656, 1e-3) && nwNear(MotionCurve.shake(0.105), 0, 1e-9)
+          && MotionCurve.shake(0) == 0 && MotionCurve.shake(0.5) == 0, "one soft shake, nothing before or after it")
+}
+
+// The pulse: quiet is still, working breathes, waiting rings, a battery pause dims.
+do {
+    let quiet = PulseModel(working: 0, waiting: 0)
+    check(quiet.mode == .quiet && !quiet.isAnimated && quiet.framesPerSecond == 0 && quiet.staticCount == nil, "quiet runs no clock")
+    let paused = PulseModel(working: 3, waiting: 2, paused: true)
+    check(paused.mode == .dusk && !paused.isAnimated && paused.ringCount == 0, "a battery pause wins, and is still")
+    let waiting = PulseModel(working: 3, waiting: 3, longestWait: 300)
+    check(waiting.mode == .waiting && waiting.staticCount == 3 && waiting.framesPerSecond == 30, "waiting rings at 30 fps at most")
+    let working = PulseModel(working: 3, waiting: 0)
+    check(working.mode == .working && working.isAnimated && working.framesPerSecond == 20, "working breathes at 20 fps")
+    check(nwNear(PulseModel(working: 1, waiting: 0).breathPeriod, 4) && nwNear(PulseModel(working: 5, waiting: 0).breathPeriod, 3.4)
+          && nwNear(PulseModel(working: 20, waiting: 0).breathPeriod, 3), "a breath is 4 s, quickening to a 3 s floor")
+    let one = PulseModel(working: 1, waiting: 0)
+    check(nwNear(one.breath(at: 0), 0) && nwNear(one.breath(at: 1), 0.5) && nwNear(one.breath(at: 2), 1) && nwNear(one.breath(at: 4), 0),
+          "out, half, in, out over one breath")
+    check(nwNear(quiet.breath(at: 1), 0.5), "not working: the resting half")
+    check(nwNear(PulseModel(working: 0, waiting: 1, longestWait: 0).rippleInterval, 3)
+          && nwNear(PulseModel(working: 0, waiting: 1, longestWait: 300).rippleInterval, 2.25)
+          && nwNear(PulseModel(working: 0, waiting: 1, longestWait: 3600).rippleInterval, 1.5), "rings come faster the longer one waits, capped at 1.5 s")
+    check(PulseModel(working: 0, waiting: 1).ringCount == 1 && PulseModel(working: 0, waiting: 3).ringCount == 3
+          && PulseModel(working: 0, waiting: 9).ringCount == 4, "one ring per waiting item, at most four")
+    check(nwNear(PulseModel(working: 0, waiting: 3, longestWait: 300).ringLifetime, 4.5)
+          && nwNear(PulseModel(working: 0, waiting: 3, longestWait: 300).emissionInterval, 1.5),
+          "three waiting: a ring every 1.5 s, the cap (faster with more, capped)")
+    let spread = PulseModel(working: 0, waiting: 3).ripples(at: 0)
+    check(spread.count == 3 && nwNear(spread[1].progress, 1.0 / 3) && nwNear(spread[1].opacity, 0.5443, 1e-3)
+          && nwNear(spread[2].opacity, 0.1925, 1e-3) && nwNear(spread[0].opacity, 0), "three rings evenly spread, fading in, then out as they open")
+    let half = PulseModel(working: 0, waiting: 1, longestWait: 0).ripples(at: 1.5)
+    check(half.count == 1 && nwNear(half[0].progress, 0.5) && nwNear(half[0].opacity, 0.3536, 1e-3), "one ring half way out at 1.5 s")
+    check(PulseModel.exhales(from: .waiting, to: .working) && PulseModel.exhales(from: .waiting, to: .quiet)
+          && !PulseModel.exhales(from: .waiting, to: .dusk) && !PulseModel.exhales(from: .working, to: .quiet),
+          "only the last item clearing exhales, not the battery pause")
+    let ex0 = PulseModel.exhale(elapsed: 0)
+    check(nwNear(ex0.colour, 0) && nwNear(ex0.swell, 0) && nwNear(ex0.aurora, 0) && !ex0.finished, "the exhale starts amber and still")
+    let ex4 = PulseModel.exhale(elapsed: 0.4)
+    check(nwNear(ex4.colour, 0.5) && nwNear(ex4.swell, 0.8017, 1e-3) && nwNear(ex4.aurora, 0.1562, 1e-3), "half way: half turned, the swell at its peak")
+    let ex8 = PulseModel.exhale(elapsed: 0.8)
+    check(nwNear(ex8.colour, 1) && nwNear(ex8.swell, 0.8648, 1e-3) && nwNear(ex8.aurora, 0.5), "teal by 800 ms, the long settle still going")
+    check(!PulseModel.exhale(elapsed: 1.5).finished && PulseModel.exhale(elapsed: 1.6).finished
+          && nwNear(PulseModel.exhale(elapsed: 1.6).aurora, 1), "the aurora settles by 1.6 s, and not before")
+    check(nwNear(PulseModel.longestWait(since: [nwNow.addingTimeInterval(-100), nwNow.addingTimeInterval(-40)], now: nwNow), 100)
+          && PulseModel.longestWait(since: [], now: nwNow) == 0, "the oldest waiting item sets the ripple pace")
+    check(NowModel.pulseWaiting(need: 2, look: 1) == 2 && NowModel.pulseWaiting(need: 0, look: 3) == 3
+          && NowModel.pulseWaiting(need: 0, look: 0) == 0, "every pulse counts the decisions, else the looks: what the headline names")
+    do {
+        func page(_ id: String, _ kind: InterventionKind, ago: TimeInterval, sub: String? = nil) -> Intervention {
+            Intervention(id: id, sessionId: "s-\(id)", cwd: "/p", projectName: "p", kind: kind, openedAt: nwNow.addingTimeInterval(-ago),
+                         context: "[Bash] ls", backend: .claude, source: .terminal, subtype: sub)
+        }
+        let stuck = page("l1", .idle, ago: 900, sub: "looping")
+        let ask = page("d1", .approval, ago: 60)
+        let both = NowModel.pulse(inbox: [stuck, ask], now: nwNow)
+        check(both.waiting == 1 && nwNear(both.longestWait, 60), "a decision waiting: the pulse counts it, and an older look does not set the pace")
+        let looks = NowModel.pulse(inbox: [stuck], now: nwNow)
+        check(looks.waiting == 1 && nwNear(looks.longestWait, 900), "only looks: their wait sets the pace")
+    }
+}
+
+// testPulseTimingsMatchTheMac: the pulse keeps one rhythm on every surface. This table is
+// pinned word for word by the Mac's SignatureMotionTests.testPulseTimingsMatchThePhone;
+// change a number here and there together.
+do {
+    for (agents, period) in [(1, 4.0), (5, 3.4), (20, 3.0)] {
+        check(nwNear(PulseModel(working: agents, waiting: 0).breathPeriod, period), "breath with \(agents) working matches the Mac")
+    }
+    let emission: [(Int, Double, Double)] = [(1, 0, 3), (1, 300, 2.25), (1, 3600, 1.5), (3, 0, 1.5), (3, 300, 1.5), (3, 3600, 1.5)]
+    for (waiting, wait, interval) in emission {
+        check(nwNear(PulseModel(working: 0, waiting: waiting, longestWait: wait).emissionInterval, interval),
+              "a ring every \(interval) s with \(waiting) waiting for \(wait) s, as on the Mac")
+    }
+    for (waiting, wait, life) in [(1, 0.0, 3.0), (3, 0, 4.5), (4, 3600, 6)] {
+        check(nwNear(PulseModel(working: 0, waiting: waiting, longestWait: wait).ringLifetime, life), "ring life with \(waiting) waiting matches the Mac")
+    }
+    check(nwNear(PulseModel.ringOpacity(0.05), 0.46297, 1e-4) && nwNear(PulseModel.ringOpacity(0.5), 0.35355, 1e-4),
+          "a ring fades in and out on the Mac's curve")
+}
+
+// The exhale's colours blend through OKLCH: amber reaches teal by way of green, never khaki.
+do {
+    let amber: PerceptualMix.RGB = (245.0 / 255, 177.0 / 255, 76.0 / 255), teal: PerceptualMix.RGB = (94.0 / 255, 234.0 / 255, 212.0 / 255)
+    let start = PerceptualMix.mix(amber, teal, 0), end = PerceptualMix.mix(amber, teal, 1)
+    check(start == amber && end == teal && PerceptualMix.mix(amber, teal, -2) == amber, "exactly its ends at 0 and 1")
+    func chroma(_ c: PerceptualMix.RGB) -> Double { let l = PerceptualMix.oklab(c); return (l.a * l.a + l.b * l.b).squareRoot() }
+    let mid = PerceptualMix.mix(amber, teal, 0.5)
+    let plain: PerceptualMix.RGB = ((amber.r + teal.r) / 2, (amber.g + teal.g) / 2, (amber.b + teal.b) / 2)
+    check(chroma(mid) > 1.3 * chroma(plain) && chroma(mid) > 0.9 * min(chroma(amber), chroma(teal)) && mid.g > mid.r,
+          "half way it keeps its colour (green), where an sRGB blend goes khaki")
+    let lab = PerceptualMix.oklab(amber)
+    let back = PerceptualMix.srgb(l: lab.l, a: lab.a, b: lab.b)
+    check(nwNear(back.r, amber.r, 1e-6) && nwNear(back.g, amber.g, 1e-6) && nwNear(back.b, amber.b, 1e-6), "Oklab round-trips")
+    let dark = PerceptualMix.mix((26.0 / 255, 19.0 / 255, 6.0 / 255), (11.0 / 255, 27.0 / 255, 36.0 / 255), 0.5, keepChroma: false)
+    check(chroma(dark) < 0.02, "the sky behind the curtains meets at a neutral night")
+}
+
+// Final approach: the card drops from the pulse onto its slot, and the rows below ease down by one card.
+do {
+    let a0 = ApproachModel.frame(elapsed: 0)
+    check(nwNear(a0.travel, 0) && nwNear(a0.scale, 0.35) && nwNear(a0.opacity, 0.4) && nwNear(a0.contrail, 0) && nwNear(a0.glow, 0)
+          && nwNear(a0.content, 0) && nwNear(a0.edge, 0.6) && !a0.finished, "the card leaves the pulse small and faint: an empty outline")
+    let a18 = ApproachModel.frame(elapsed: 0.18)
+    check(nwNear(a18.travel, 0.7519, 1e-3) && nwNear(a18.scale, 0.9999, 1e-3) && nwNear(a18.contrail, 0.8) && nwNear(a18.glow, 1)
+          && nwNear(a18.content, 0), "at 180 ms it is mid-air, full size, with its contrail and glow, still empty (board 07)")
+    check(nwNear(ApproachModel.frame(elapsed: 0.09).content, 0), "at 90 ms it is passing the Horizon's words: no words of its own")
+    check(nwNear(ApproachModel.frame(elapsed: 0.36).content, 1) && nwNear(ApproachModel.frame(elapsed: 0.36).edge, 0),
+          "landed at 360 ms with its words")
+    check((0...52).map { ApproachModel.frame(elapsed: Double($0) * 0.01) }.allSatisfy { $0.content == 0 || nwNear($0.scale, 1) },
+          "it is full size before any of its words show")
+    check(nwNear(ApproachModel.content(travel: 0.8), 0) && nwNear(ApproachModel.content(travel: 0.885), 0.5)
+          && nwNear(ApproachModel.content(travel: 0.97), 1), "the same content curve as the Mac's")
+    let a45 = ApproachModel.frame(elapsed: 0.45)
+    check(nwNear(a45.contrail, 0.3254, 1e-3) && nwNear(a45.glow, 0.4067, 1e-3), "after landing, the contrail and glow fade")
+    let a52 = ApproachModel.frame(elapsed: 0.52)
+    check(a52.finished && nwNear(a52.travel, 1) && nwNear(a52.scale, 1) && nwNear(a52.opacity, 1) && nwNear(a52.contrail, 0)
+          && nwNear(a52.glow, 0), "settled in its slot with the glow off by 520 ms")
+    check(nwNear(ApproachModel.offset(distance: 400, elapsed: 0), -400) && nwNear(ApproachModel.offset(distance: 400, elapsed: 0.18), -99.2, 0.2)
+          && nwNear(ApproachModel.offset(distance: 400, elapsed: 1), 0), "the card drops from the pulse to its slot")
+    check(nwNear(ApproachModel.pushOffset(height: 100, elapsed: 0), -100) && nwNear(ApproachModel.pushOffset(height: 100, elapsed: 0.18), -24.8, 0.1)
+          && nwNear(ApproachModel.pushOffset(height: 100, elapsed: 0.6), 0), "the rows below ease down by one card height")
+    check(ApproachModel.arrivals(previous: nil, current: ["a"]).isEmpty, "the first look is never a flood of approaches")
+    check(ApproachModel.arrivals(previous: ["a", "b"], current: ["c", "a", "d", "b"]) == ["c", "d"], "only new ids, in ranked order")
+    let sch = ApproachModel.schedule(["c", "d"], start: 0)
+    check(nwNear(sch["c"] ?? -1, 0) && nwNear(sch["d"] ?? -1, 0.09), "two arrivals leave a stagger apart")
+    check(ApproachModel.schedule(["a", "b", "c", "d"], start: 0).isEmpty, "more than three at once just appear")
+}
+
+// The receipt thread: only the Mac's confirmation of a keystroke makes it succeed.
+do {
+    let rt0 = Date(timeIntervalSinceReferenceDate: 0)
+    func pendingAt(_ kind: RowAction.Kind, _ commit: CommitGesture?, armed: Bool = true) -> PendingAction {
+        PendingAction(rowId: "r1", kind: kind, text: "", commit: commit, startedAt: rt0, armed: armed)
+    }
+    let arming = ReceiptThread.derive(pending: pendingAt(.deny, .tap), delivery: nil, changedAt: nil, now: rt0.addingTimeInterval(0.6))
+    check(arming.stage == .arming && nwNear(arming.arm, 0.5) && arming.word == "arm" && arming.moving, "the arm ring winds round the dot")
+    let fired = pendingAt(.deny, .tap, armed: false)
+    let sendingAfterArm = ReceiptThread.derive(pending: fired, delivery: nil, changedAt: nil, now: rt0.addingTimeInterval(1.45))
+    check(sendingAfterArm.stage == .sending && nwNear(sendingAfterArm.reach, 0.3675, 1e-3), "after the arm it reaches towards the relay")
+    let inFlight = ReceiptThread.derive(pending: fired, delivery: .sending, changedAt: rt0, now: rt0.addingTimeInterval(0.25))
+    check(inFlight.stage == .sending && nwNear(inFlight.reach, 0.3675, 1e-3), "a delivery still sending keeps reaching")
+    let faceID = ReceiptThread.derive(pending: pendingAt(.approve, .hold, armed: false), delivery: nil, changedAt: nil, now: rt0.addingTimeInterval(0.25))
+    check(faceID.stage == .sending && nwNear(faceID.reach, 0.3675, 1e-3), "an Irreversible approve sends the moment Face ID passed, with no second arm")
+
+    let onRelay = ReceiptThread.derive(pending: nil, delivery: .sent(queued: false, at: rt0), changedAt: nil, now: rt0.addingTimeInterval(0.7))
+    check(onRelay.stage == .sent && nwNear(onRelay.reach, 0.5) && onRelay.relayLit && !onRelay.macLit && onRelay.word == "sent",
+          "the relay has it; the Mac has not confirmed")
+    check(nwNear(onRelay.glint ?? -1, 0.75, 1e-3), "a glint travels past the relay")
+    let longWait = ReceiptThread.derive(pending: nil, delivery: .sent(queued: false, at: rt0), changedAt: nil, now: rt0.addingTimeInterval(61))
+    check(longWait.word == "sent · waiting for your Mac" && longWait.glint == nil && !longWait.moving, "after a minute it says so and stops moving")
+    let queued = ReceiptThread.derive(pending: nil, delivery: .sent(queued: true, at: rt0), changedAt: nil, now: rt0.addingTimeInterval(1))
+    check(queued.stage == .queued && queued.word == "queued · Mac offline" && !queued.isSuccess, "a queued reply is not a success")
+
+    let confirmed = { (s: Double) in ReceiptThread.derive(pending: nil, delivery: .delivered(detail: nil), changedAt: rt0, now: rt0.addingTimeInterval(s)) }
+    check(confirmed(0.18).stage == .typed && nwNear(confirmed(0.18).reach, 0.9375, 1e-3) && !confirmed(0.18).macLit,
+          "typed once the Mac has confirmed, and not a moment before")
+    check(confirmed(0.36).macLit && confirmed(0.6).stage == .verified && confirmed(0.6).word == "verified ✓", "then the Mac lights, then verified")
+    check(nwNear(confirmed(0.8).dotTeal, 0.5, 1e-3) && nwNear(confirmed(0.8).rings, 0.5, 1e-3), "the dot turns teal and the rings draw in")
+    check(nwNear(confirmed(1.15).fold, 0.5, 1e-3) && nwNear(confirmed(1.6).fold, 1) && nwNear(confirmed(1.6).drift, 1) && !confirmed(1.6).moving,
+          "the card folds, drifts into Settled, and stops")
+    check(ReceiptThread.derive(pending: nil, delivery: .delivered(detail: nil), changedAt: nil, now: rt0).stage == .verified,
+          "an old confirmation is drawn settled")
+
+    let failedAt = { (s: Double) in ReceiptThread.derive(pending: nil, delivery: .failed("nope"), changedAt: rt0, now: rt0.addingTimeInterval(s)) }
+    check(nwNear(failedAt(0).reach, 0.5) && nwNear(failedAt(0).shake, 0) && failedAt(0).isFailure && failedAt(0).word == "nope",
+          "a failure starts where the thread was, and says why")
+    check(nwNear(failedAt(0.12).reach, 0.4375, 1e-3) && nwNear(failedAt(0.12).shake, -0.2214, 1e-3), "it snaps back and shakes once")
+    check(nwNear(failedAt(0.24).reach, 0) && !failedAt(0.5).moving, "snapped back, and still once the shake is over")
+    check(ReceiptThread.derive(pending: nil, delivery: .failed(""), changedAt: rt0, now: rt0).word == "Couldn't deliver the reply", "an empty failure still says something")
+    check(ReceiptThread.derive(pending: nil, delivery: .gone, changedAt: rt0, now: rt0).word == "Prompt closed before your answer"
+          && ReceiptThread.derive(pending: nil, delivery: .alreadyReplied, changedAt: rt0, now: rt0).word == "Already answered at the Mac",
+          "the closed and answered-elsewhere reasons say so")
+    check(ReceiptThread.derive(pending: nil, delivery: .delivered(detail: nil), localProblem: "No passcode", changedAt: rt0, now: rt0).word == "No passcode",
+          "a problem on this phone beats the Mac's news")
+    check(ReceiptThread.derive(pending: nil, delivery: nil, changedAt: nil, now: rt0).stage == .idle, "nothing under way draws nothing")
+
+    // The invariant: no delivery other than a confirmed one ever draws a success, at any moment.
+    let never: [ReplyDelivery?] = [nil, .sending, .sent(queued: false, at: rt0), .sent(queued: true, at: rt0), .failed("x"), .alreadyReplied, .gone]
+    var leaked = 0
+    for d in never {
+        for step in stride(from: 0.0, through: 120.0, by: 0.5) {
+            let f = ReceiptThread.derive(pending: fired, delivery: d, changedAt: rt0, now: rt0.addingTimeInterval(step))
+            if f.isSuccess || f.stage == .verified || f.stage == .typed { leaked += 1 }
+        }
+    }
+    check(leaked == 0, "no success is drawn without a confirmed delivery (\(leaked) leaked)")
+
+    let movingDelivered = ReceiptThreadInput(pending: nil, delivery: .delivered(detail: nil), changedAt: rt0)
+    check(movingDelivered.movingUntil(now: rt0) == rt0.addingTimeInterval(1.6), "a confirmed card moves for 1.6 s")
+    let arm = ReceiptThreadInput(pending: pendingAt(.deny, .tap), delivery: nil)
+    check(arm.movingUntil(now: rt0.addingTimeInterval(0.3)) == rt0.addingTimeInterval(1.2), "the arm ring runs its 1.2 s")
+    check(ReceiptThreadInput(pending: nil, delivery: .sent(queued: true, at: rt0), changedAt: rt0).movingUntil(now: rt0) == nil, "a queued reply does not move")
+    check(ReceiptThreadInput().isEmpty && !movingDelivered.isEmpty, "nothing to draw is empty; a delivery is not")
+
+    // A row whose page closed with a confirmed reply stays in its place while it folds, then goes.
+    let rowA = NowRowBuilder.row(for: nwIv("a", .approval, "[Bash] ls", session: "w1"), session: nil, macName: "M")
+    let rowB = NowRowBuilder.row(for: nwIv("b", .approval, "[Bash] pwd", session: "w2"), session: nil, macName: "M")
+    let rowC = NowRowBuilder.row(for: nwIv("c", .approval, "[Bash] date", session: "w3"), session: nil, macName: "M")
+    let shown = [rowA, rowB, rowC]
+    let fresh = [rowA, rowC]   // b's page has closed
+    let folding = DepartingRows.merge(previous: shown, current: fresh, deliveries: ["b": .delivered(detail: nil)], changedAt: ["b": rt0], now: rt0.addingTimeInterval(0.5))
+    check(folding.rows.map(\.id) == ["a", "b", "c"] && folding.ghosts == ["b"], "a confirmed row keeps its place while it folds")
+    let folded = DepartingRows.merge(previous: shown, current: fresh, deliveries: ["b": .delivered(detail: nil)], changedAt: ["b": rt0], now: rt0.addingTimeInterval(1.6))
+    check(folded.rows.map(\.id) == ["a", "c"] && folded.ghosts.isEmpty, "then it is gone")
+    let refusedRow = DepartingRows.merge(previous: shown, current: fresh, deliveries: ["b": .failed("x")], changedAt: ["b": rt0], now: rt0.addingTimeInterval(0.5))
+    check(refusedRow.ghosts.isEmpty && refusedRow.rows.map(\.id) == ["a", "c"], "a failed row is not kept as a ghost")
+    check(DepartingRows.nextExpiry(ghosts: ["b"], changedAt: ["b": rt0]) == rt0.addingTimeInterval(1.6), "the next expiry is the end of the fold")
+}
+
+// Dusk and dawn: the sky dims together, then each star relights only once its resume is confirmed.
+do {
+    let base = Date(timeIntervalSinceReferenceDate: 0)
+    let d0 = DawnModel.dusk(elapsed: 0)
+    check(nwNear(d0.aurora, 0) && nwNear(d0.stars, 1) && nwNear(d0.band, 0), "the pause begins at the working sky")
+    let d24 = DawnModel.dusk(elapsed: 0.24)
+    check(nwNear(d24.stars, 1.12, 1e-3) && nwNear(d24.aurora, 0.0607, 1e-3), "the stars swell once as they breathe out")
+    let d12 = DawnModel.dusk(elapsed: 1.2)
+    check(nwNear(d12.stars, 0.3, 1e-3) && nwNear(d12.starScale, 0.9, 1e-3) && nwNear(d12.band, 0.6995, 1e-3),
+          "then dim together to 30%, and the grey band holds")
+    check(nwNear(DawnModel.dusk(elapsed: 1.6).band, 1) && nwNear(DawnModel.dusk(elapsed: 1.6).aurora, 1), "dusk has settled by 1.6 s")
+    check(nwNear(DawnModel.sweepReaches(y: 1), 0) && nwNear(DawnModel.sweepReaches(y: 0), 1.8) && nwNear(DawnModel.sweepReaches(y: 0.5), 0.3713, 1e-3),
+          "the light reaches the horizon first and the top last")
+    check(nwNear(DawnModel.sweep(elapsed: 0.9), 0.875), "the sweep eases out")
+
+    let times = DawnModel.relightTimes([
+        .init(id: "a", y: 0.9, confirmedAt: 0.3), .init(id: "b", y: 0.9, confirmedAt: 0.3),
+        .init(id: "c", y: 0.1, confirmedAt: 0.2), .init(id: "d", y: 0.5, confirmedAt: nil),
+    ])
+    check(times["d"] == nil, "an unconfirmed star stays dim")
+    check(nwNear(times["a"] ?? -1, 0.3) && nwNear(times["b"] ?? -1, 0.46), "two stars confirmed together relight one by one")
+    let reachC = DawnModel.sweepReaches(y: 0.1)
+    check(nwNear(times["c"] ?? -1, reachC, 1e-9) && nwNear(DawnModel.sweep(elapsed: reachC), 0.9, 1e-6),
+          "the top star waits for the sweep, and the sweep is at its height then")
+    let ordered = ["a", "b", "c"].compactMap { times[$0] }.sorted()
+    check(zip(ordered, ordered.dropFirst()).allSatisfy { $1 - $0 >= DawnModel.stagger - 1e-9 }, "never two stars at once")
+
+    check(nwNear(DawnModel.starBrightness(elapsed: 0.2, relightAt: 0.3), 0.3) && nwNear(DawnModel.starBrightness(elapsed: 0.3, relightAt: 0.3), 0.3),
+          "a star stays dim until its moment")
+    check(nwNear(DawnModel.starBrightness(elapsed: 0.5, relightAt: 0.3), 0.9572, 1e-3) && nwNear(DawnModel.starBrightness(elapsed: 0.63, relightAt: 0.3), 1, 1e-3),
+          "then comes up to full")
+    check(nwNear(DawnModel.starBrightness(elapsed: 5, relightAt: nil), 0.3), "a star never confirmed stays dim however long the dawn runs")
+    check(DawnModel.starBrightness(elapsed: 0.63, relightAt: 0.3) <= 1.15, "the flare stays within its bound")
+
+    let w0 = DawnModel.dawn(elapsed: 0, lastRelight: 1.1)
+    check(nwNear(w0.sweep, 0) && nwNear(w0.warmth, 0) && nwNear(w0.band, 1) && nwNear(w0.aurora, 1) && !w0.finished, "dawn starts at the horizon, in the dusk")
+    let w54 = DawnModel.dawn(elapsed: 0.54, lastRelight: 1.1)
+    check(nwNear(w54.sweep, 0.657, 1e-3) && nwNear(w54.warmth, 0.5, 1e-3) && nwNear(w54.band, 0.352, 1e-3), "the sun rises and the band fades")
+    let w18 = DawnModel.dawn(elapsed: 1.8, lastRelight: 1.1)
+    check(nwNear(w18.sweep, 1) && nwNear(w18.warmth, 1) && nwNear(w18.band, 0) && nwNear(w18.aurora, 0.4818, 1e-3),
+          "at the top the gold is full and the working aurora is coming back")
+    check(!DawnModel.dawn(elapsed: 2.99, lastRelight: nil).finished && DawnModel.dawn(elapsed: 3.01, lastRelight: nil).finished,
+          "with no star to wait for, the dawn ends after its settle")
+    check(!DawnModel.dawn(elapsed: 4.0, lastRelight: 2.4).finished && DawnModel.dawn(elapsed: 4.2, lastRelight: 2.4).finished,
+          "a late relight holds the dawn open until it has settled")
+    let br = DawnModel.briefSunrise(elapsed: 0.9, share: 0.5)
+    check(nwNear(br.sweep, 0.875) && nwNear(br.strength, 0.625), "the Brief's sunrise is as bright as the absence was finished")
+    let brFull = DawnModel.briefSunrise(elapsed: 5, share: 2)
+    check(nwNear(brFull.sweep, 1) && nwNear(brFull.strength, 1), "and clamps to full")
+
+    // The log of a pause: what it stopped, and which of those were seen working again.
+    var log = DuskDawnLog()
+    log.observe(paused: false, working: ["a", "b"], at: base)
+    log.observe(paused: true, working: [], at: base.addingTimeInterval(10))
+    check(log.isPaused && log.duskAt == base.addingTimeInterval(10) && log.affected == ["a", "b"],
+          "a pause remembers what was working the moment before")
+    log.observe(paused: true, working: ["c"], at: base.addingTimeInterval(20))
+    check(log.affected == ["a", "b", "c"], "a session that comes back during the pause joins the affected")
+    log.observe(paused: false, working: [], at: base.addingTimeInterval(30))
+    check(!log.isPaused && log.duskAt == nil && log.dawnAt == base.addingTimeInterval(30), "power back: the dawn begins")
+    log.observe(paused: false, working: ["b", "z"], at: base.addingTimeInterval(31))
+    check(log.resumedAt == ["b": base.addingTimeInterval(31)], "only an affected session that is seen working counts")
+    let stars = Dictionary(uniqueKeysWithValues: log.dawnStars(ys: ["b": 0.2]).map { ($0.id, $0) })
+    check(nwNear(stars["b"]?.confirmedAt ?? -1, 1.0) && stars["a"]?.confirmedAt == nil && stars["c"]?.confirmedAt == nil && nwNear(stars["b"]?.y ?? -1, 0.2),
+          "the dawn carries each star's height and its confirmation")
+
+    var cold = DuskDawnLog()
+    cold.observe(paused: true, working: ["x"], at: base)
+    check(cold.duskAt == .distantPast && cold.affected == ["x"], "a pause already under way is drawn settled, not replayed")
+
+    var slow = DuskDawnLog()
+    slow.observe(paused: false, working: ["a"], at: base)
+    slow.observe(paused: true, working: [], at: base.addingTimeInterval(10))
+    slow.observe(paused: false, working: [], at: base.addingTimeInterval(30))
+    slow.observe(paused: false, working: [], at: base.addingTimeInterval(121))
+    check(slow.dawnAt == nil, "a dawn that never confirms stops after 90 s")
+
+    var full = DuskDawnLog()
+    full.observe(paused: false, working: ["a", "b"], at: base)
+    full.observe(paused: true, working: [], at: base.addingTimeInterval(10))
+    full.observe(paused: false, working: [], at: base.addingTimeInterval(30))
+    full.observe(paused: false, working: ["a", "b"], at: base.addingTimeInterval(31))
+    check(full.dawnAt != nil, "all back, but the dawn plays out first")
+    full.observe(paused: false, working: ["a", "b"], at: base.addingTimeInterval(35.2))
+    check(full.dawnAt == nil, "once everyone is back and the sweep has settled, the dawn clears")
+}
+
+// The hold ring's burst after Touch ID, and the one ring Stop-all and Irreversible share.
+do {
+    let b0 = HoldRingSpec.burst(elapsed: 0)
+    check(nwNear(b0.scale, 1) && nwNear(b0.opacity, 0.9) && nwNear(b0.flash, 0), "the burst opens from the full ring")
+    let b15 = HoldRingSpec.burst(elapsed: 0.15)
+    check(nwNear(b15.scale, 1.2602, 1e-3) && nwNear(b15.opacity, 0.8859, 1e-3) && nwNear(b15.flash, 1), "the core flashes a quarter of the way through")
+    let bEnd = HoldRingSpec.burst(elapsed: 0.6)
+    check(nwNear(bEnd.scale, 1) && nwNear(bEnd.opacity, 0) && nwNear(bEnd.flash, 0), "and is gone by 600 ms")
+    check(HoldRingSpec.stopAll == HoldRingSpec.irreversible, "Stop-all and Irreversible share one ring")
+}
+
+// The phone's read-only "Works with" list mirrors the Mac's TerminalCatalog:
+// the same eight hosts in the same order (TerminalCatalog.namesLine), the same symbols.
+do {
+    let names = TowerHosts.hosts.map(\.name)
+    check(names == ["Terminal", "iTerm2", "tmux", "cmux", "WezTerm", "kitty", "Herdr", "Claude Squad"], "hosts in the Mac's order \(names)")
+    check(Set(names).count == names.count, "host names are unique")
+    check(TowerHosts.hosts.map(\.symbol) == ["macwindow", "terminal", "rectangle.split.3x1", "square.grid.2x2",
+                                             "terminal.fill", "pawprint", "rectangle.3.group", "person.3"], "host symbols match the Mac")
+    check(TowerHosts.hosts.allSatisfy { !$0.line.isEmpty }, "every host has a line")
+    check(TowerHosts.setUpLine.contains("Page ▸ Tower ▸ Terminals"), "the set-up line points at the Mac page")
+    check(TowerHosts.othersLine.contains("Ghostty") && TowerHosts.othersLine.contains("Warp") && TowerHosts.othersLine.contains("VS Code"), "the unsupported terminals are named")
+    check(TowerSection.allCases.contains(.terminals), "the Works with section is in the list")
+    check(TowerSection.terminals.title == "Works with", "the section is titled Works with")
 }
 
 print("passes=\(passes) failures=\(failures)")

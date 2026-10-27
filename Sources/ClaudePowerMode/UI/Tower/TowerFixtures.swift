@@ -70,8 +70,26 @@ enum TowerFixtures {
         st.update(snapshot: scene.snapshot, model: scene.model)
         st.now = { NightWatchFixtures.boardNow() }
         st.preview(helper: .available, localLines: ["Ollama — generating · exact", "LM Studio — idle"],
-                   usageCapture: TowerStore.UsageCaptureStatus(on: true))
+                   usageCapture: TowerStore.UsageCaptureStatus(on: true), terminals: terminals())
         return st
+    }
+
+    /// The Terminals page with a bit of everything: in use, ready, a blocked
+    /// cmux, kitty without remote control, Terminal not checked (not running),
+    /// iTerm2 not yet allowed, Herdr missing.
+    static func terminals() -> TerminalProbe.Snapshot {
+        typealias F = TerminalCatalog.Facts
+        typealias U = TerminalCatalog.HostUse
+        return TerminalProbe.Snapshot(facts: [
+            .terminal: F(installed: true, use: U(), setup: .unchecked),
+            .iTerm: F(installed: true, use: U(), setup: .needed("Page hasn’t asked macOS for permission to control iTerm2 yet. Click Allow…")),
+            .tmux: F(installed: true, use: U(typable: 3), setup: .notNeeded),
+            .cmux: F(installed: true, use: U(typable: 0, blocked: 1, blocker: "cmux isn’t letting Page type yet — click Set up…"), setup: .needed("cmux’s socket is set to “cmux processes only”, which keeps Page out. Click Set up…")),
+            .wezterm: F(installed: true, use: U(), setup: .notNeeded),
+            .kitty: F(installed: true, use: U(), setup: .needed("Remote control is off in kitty. Page adds two lines to kitty.conf; restart kitty after.")),
+            .herdr: F(installed: false, use: U(), setup: .notNeeded),
+            .claudeSquad: F(installed: true, use: U(typable: 2), setup: .notNeeded),
+        ], pageAddedKittyLines: false)
     }
 
     /// Plugged in, odd values that no preset matches, the helper missing and wanted, Pause off.

@@ -368,9 +368,11 @@ struct SessionStopPlan: Equatable {
 
     /// Offered only mid-turn, where the Mac says Esc works, with the relay ready.
     static func build(session: LiveSession, ready: Bool, ended: Bool, macName: String) -> SessionStopPlan {
-        let route = DeliveryPreview.route(host: session.host, project: session.title)
+        // The folder's name, not the title: the same words the receipt and the header use.
+        let project = SessionTarget(session: session, macName: macName).project
+        let route = DeliveryPreview.route(host: session.host, project: project)
         return SessionStopPlan(canStop: session.isStoppable && ready && !ended,
-                               scope: "Press Esc in \(session.title)",
+                               scope: "Press Esc in \(project)",
                                preview: DeliveryPreview.pressEsc(route: route, mac: macName))
     }
 }
@@ -407,7 +409,7 @@ struct RoomPlan: Equatable {
             pageAcceptsReply: pinned?.action(.tellInstead) != nil,
             pageArriving: s.interventionId != nil && pinned == nil,
             ended: i.ended, ready: i.ready))
-        let route = DeliveryPreview.route(host: s.host, project: s.title)
+        let route = DeliveryPreview.route(host: s.host, project: SessionTarget(session: s, macName: i.macName).project)
         let preview = mode.preview(character: i.character, route: route, mac: i.macName,
                                    pagePreview: pinned?.action(.tellInstead)?.preview)
         return RoomPlan(pinned: pinned, review: review, mode: mode, preview: preview)
