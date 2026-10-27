@@ -3490,6 +3490,71 @@ do {
     check(TowerSection.terminals.title == "Works with", "the section is titled Works with")
 }
 
+// The Tower's Widgets page: where it sits, the kinds it knows, the status line from WidgetCenter's configurations, the steps.
+do {
+    let all = TowerSection.allCases
+    check(TowerSection.widgets.title == "Widgets" && TowerSection.widgets.rawValue == "widgets", "the Widgets section is titled Widgets")
+    check(all.firstIndex(of: .widgets) == all.firstIndex(of: .terminals).map { $0 + 1 }, "Widgets comes right after Works with")
+    check(all.map(\.rawValue) == ["power", "budget", "macs", "attention", "gestures", "terminals", "widgets", "pairing", "appearance", "about"], "the Tower's section order \(all.map(\.rawValue))")
+    check(Set(all.map(\.rawValue)).count == all.count, "section ids are unique")
+
+    // The kinds are the strings the extension registers (iOS/PageWidget/PageWidget.swift).
+    check(TowerWidgets.Widget.Kind.macStatus.rawValue == "page.mac-status" && TowerWidgets.Widget.Kind.claudeUsage.rawValue == "page.claude-usage", "the widget kinds match the extension")
+    check(TowerWidgets.widgets.map(\.name) == ["Page", "Claude usage"], "the widgets are named as the extension names them")
+    check(TowerWidgets.widgets[0].homeSizes == [.small, .medium, .large] && TowerWidgets.widgets[0].lockSizes == [.rectangular, .circular, .inline], "Page's sizes match its supportedFamilies")
+    check(TowerWidgets.widgets[1].homeSizes == [.small, .medium] && TowerWidgets.widgets[1].lockSizes == [.circular, .rectangular], "Claude usage's sizes match its supportedFamilies")
+    check(TowerWidgets.widgets[1].sizesLine == "Home Screen: small, medium\nLock Screen: circular, rectangular", "sizes line: \(TowerWidgets.widgets[1].sizesLine)")
+    check(TowerWidgets.Size(family: "systemMedium") == .medium && TowerWidgets.Size(family: "accessoryInline") == .inline && TowerWidgets.Size(family: "systemExtraLarge") == nil
+          && TowerWidgets.Size(family: "") == nil, "families read as sizes; the ones Page has no widget for do not")
+
+    // The status line.
+    func placed(_ pairs: (String, String)...) -> [TowerWidgets.PlacedWidget] { pairs.map { TowerWidgets.PlacedWidget(kind: $0.0, family: $0.1) } }
+    let none = TowerWidgets.status(placed: [])
+    check(none.lines == ["Not added yet"] && none.placed == false && !none.isPlaced, "nothing placed reads Not added yet")
+    check(TowerWidgets.Status.checking.placed == nil && TowerWidgets.Status.checking.text == "Checking…", "before WidgetCenter answers it says Checking…")
+    let home = TowerWidgets.status(placed: placed(("page.mac-status", "systemMedium")))
+    check(home.lines == ["On your Home Screen: Page (medium)"] && home.isPlaced, "one medium Page: \(home.lines)")
+    let lock = TowerWidgets.status(placed: placed(("page.claude-usage", "accessoryCircular")))
+    check(lock.lines == ["On your Lock Screen: Claude usage (circular)"], "a Lock Screen circle: \(lock.lines)")
+    let mixed = TowerWidgets.status(placed: placed(("page.claude-usage", "systemSmall"), ("page.mac-status", "accessoryRectangular"), ("page.mac-status", "systemLarge"), ("page.mac-status", "systemSmall")))
+    check(mixed.lines == ["On your Home Screen: Page (small, large), Claude usage (small)", "On your Lock Screen: Page (rectangular)"], "Page first, sizes small to large, Home then Lock: \(mixed.lines)")
+    check(mixed.text == mixed.lines.joined(separator: "\n"), "the text is the lines, one per place")
+    let twice = TowerWidgets.status(placed: placed(("page.mac-status", "systemMedium"), ("page.mac-status", "systemMedium")))
+    check(twice.lines == ["On your Home Screen: Page (medium)"], "the same size placed twice reads once: \(twice.lines)")
+    let foreign = TowerWidgets.status(placed: placed(("com.other.app", "systemMedium"), ("page.mac-status", "systemExtraLarge"), ("page.unknown", "systemSmall")))
+    check(foreign.lines == ["Not added yet"] && foreign.placed == false, "other apps' widgets, unknown kinds and unknown families are ignored: \(foreign.lines)")
+    let lockOrder = TowerWidgets.status(placed: placed(("page.mac-status", "accessoryInline"), ("page.mac-status", "accessoryCircular"), ("page.mac-status", "accessoryRectangular")))
+    check(lockOrder.lines == ["On your Lock Screen: Page (circular, rectangular, inline)"], "Lock Screen sizes in a fixed order: \(lockOrder.lines)")
+    let bothLock = TowerWidgets.status(placed: placed(("page.claude-usage", "accessoryRectangular"), ("page.mac-status", "accessoryCircular")))
+    check(bothLock.lines == ["On your Lock Screen: Page (circular), Claude usage (rectangular)"] && bothLock.isPlaced, "two Lock Screen widgets share one line, Page first: \(bothLock.lines)")
+    let lockAndHome = TowerWidgets.status(placed: placed(("page.claude-usage", "accessoryCircular"), ("page.claude-usage", "systemMedium")))
+    check(lockAndHome.lines == ["On your Home Screen: Claude usage (medium)", "On your Lock Screen: Claude usage (circular)"], "Home line first, then Lock: \(lockAndHome.lines)")
+    // A size a widget does not come in (Claude usage has no large or inline) cannot be placed, so it is not reported.
+    let wrongSize = TowerWidgets.status(placed: placed(("page.claude-usage", "systemLarge"), ("page.claude-usage", "accessoryInline")))
+    check(wrongSize.lines == ["Not added yet"] && wrongSize.placed == false, "a size the widget does not come in is ignored: \(wrongSize.lines)")
+    check(TowerWidgets.status(placed: placed(("page.claude-usage", "systemLarge"), ("page.mac-status", "systemLarge"))).lines == ["On your Home Screen: Page (large)"], "a large Claude usage is ignored, a large Page is not")
+
+    // The steps.
+    let homeSteps = TowerWidgets.steps(.homeScreen)
+    let lockSteps = TowerWidgets.steps(.lockScreen)
+    check(homeSteps.map(\.number) == [1, 2, 3, 4, 5] && lockSteps.map(\.number) == [1, 2, 3, 4], "the steps are numbered from 1")
+    check(homeSteps.map(\.title) == ["Touch and hold an empty spot", "Tap Edit, then Add Widget", "Search for Page", "Pick a size", "Tap Add Widget"], "Home Screen steps \(homeSteps.map(\.title))")
+    check(lockSteps.map(\.title) == ["Touch and hold the Lock Screen", "Tap Customize, then Lock Screen", "Tap the row of widgets", "Choose Page"], "Lock Screen steps \(lockSteps.map(\.title))")
+    check((homeSteps + lockSteps).allSatisfy { !$0.detail.isEmpty }, "every step says more")
+    check(TowerWidgets.Place.allCases.map(\.label) == ["Home Screen", "Lock Screen"], "the two places")
+    check(TowerWidgets.honestLine.contains("only lets you place a widget yourself") && TowerWidgets.hint(none).contains("can’t put one there for you"), "it says plainly that Page cannot place a widget")
+    check(TowerWidgets.macNote.contains("Use iPhone widgets") && TowerWidgets.macNote.contains("Desktop & Dock") && TowerWidgets.macNote.contains("Page ▸ Tower ▸ Widgets"), "the Mac note names the setting and the Mac page")
+    let terminal = ["terminal", "command line", "defaults write", "swift run"]
+    let words = (homeSteps + lockSteps).flatMap { [$0.title, $0.detail] } + [TowerWidgets.honestLine, TowerWidgets.macNote, TowerWidgets.hint(none), TowerWidgets.hint(home)]
+    check(!words.contains { w in terminal.contains { w.lowercased().contains($0) } }, "no terminal steps in the words")
+
+    // The preview data is a whole, believable reading.
+    let exNow = Date(timeIntervalSince1970: 1_793_063_520)
+    let ex = TowerWidgets.exampleStatus(now: exNow)
+    check(ex.needsYou == 2 && ex.working == 5 && ex.presence == .online && ex.faceHeadline == "2 need you" && ex.detail == "5 working · 9 live", "example status reads \(ex.faceHeadline), \(ex.detail ?? "nil")")
+    check(UsageCardModel(ex.usage, now: exNow)?.fiveHour != nil && !ex.runway(now: exNow).markers.isEmpty, "the example has rings and a Runway")
+}
+
 
 // In flight rows, how a room opens, the first-time tips and the Gestures page.
 do {

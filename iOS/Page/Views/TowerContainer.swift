@@ -1,4 +1,5 @@
 import SwiftUI
+import WidgetKit
 
 /// The Tower, live: power, budget, Macs, attention, pairing, appearance and
 /// about, from the stores. Every option the old Settings screen had is here.
@@ -13,6 +14,8 @@ struct TowerContainer: View {
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var tips: TipStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var widgets: TowerWidgets.Status = .checking
     @State private var addingMac = false
     @State private var removingMac: SavedMac?
     @State private var confirmingUnpair = false
@@ -30,6 +33,11 @@ struct TowerContainer: View {
             await api.refreshStatus()
             await notifications.refreshAuthorization()
             await pairing.refreshOthers()
+        }
+        .task { await refreshWidgets() }
+        // The person leaves to add a widget and comes back: ask again.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await refreshWidgets() } }
         }
         .sheet(isPresented: $addingMac) {
             PairMacView(onPaired: {
@@ -55,6 +63,35 @@ struct TowerContainer: View {
         }
     }
 
+    /// Which of Page's widgets are on the Home Screen and Lock Screen, from WidgetCenter.
+    /// An answer WidgetKit can't give leaves "Not added yet" off the page rather than guessing.
+    private func refreshWidgets() async {
+        let placed: [TowerWidgets.PlacedWidget]? = await withCheckedContinuation { cont in
+            WidgetCenter.shared.getCurrentConfigurations { result in
+                if case .success(let infos) = result {
+                    cont.resume(returning: infos.map { TowerWidgets.PlacedWidget(kind: $0.kind, family: Self.familyName($0.family)) })
+                } else {
+                    cont.resume(returning: nil)
+                }
+            }
+        }
+        if let placed { widgets = TowerWidgets.status(placed: placed) }
+    }
+
+    /// WidgetKit's family as the name the pure model reads ("systemMedium").
+    private static func familyName(_ f: WidgetFamily) -> String {
+        switch f {
+        case .systemSmall: return "systemSmall"
+        case .systemMedium: return "systemMedium"
+        case .systemLarge: return "systemLarge"
+        case .systemExtraLarge: return "systemExtraLarge"
+        case .accessoryCircular: return "accessoryCircular"
+        case .accessoryRectangular: return "accessoryRectangular"
+        case .accessoryInline: return "accessoryInline"
+        @unknown default: return "unknown"
+        }
+    }
+
     private func data(now: Date) -> TowerScreenData {
         let name = pairing.pairedMac?.name ?? nwMacName(sessions: sessions, pairing: pairing)
         let presence = MacPresence.evaluate(api.macStatus, now: now)
@@ -76,7 +113,8 @@ struct TowerContainer: View {
             macLine: line.joined(separator: " · "), relayHost: pairing.relayHost,
             relayText: RelayConnectionText.text(connected: api.connection == .connected, connecting: api.connection == .connecting, failure: api.inboxLoad.failureMessage),
             notifications: notifications.authorization.nw, push: notifications.nwPush, liveSessionsText: live,
-            glow: glowStore.glow, version: SettingsVersion.string, now: now, scrollTo: scrollTo, feedbackURL: Self.feedbackURL)
+            glow: glowStore.glow, version: SettingsVersion.string, now: now, scrollTo: scrollTo, feedbackURL: Self.feedbackURL,
+            widgets: widgets)
     }
 
     private var actions: TowerScreenActions {

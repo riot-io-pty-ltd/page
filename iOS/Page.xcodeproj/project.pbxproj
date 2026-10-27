@@ -40,11 +40,13 @@
 		2CDCF12376463F545C6679D7 /* NWHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C8F6A46105C343F15409A9 /* NWHistory.swift */; };
 		31835CD965B42F094E69B2BD /* WireDecoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D8FC33307E6D89193C51CF7 /* WireDecoding.swift */; };
 		345939846824CE2F7A44CF20 /* NWAnswerCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 225BE0F4263A7FDD27E3FD7C /* NWAnswerCard.swift */; };
+		3672A382778ECA1362886704 /* TowerWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514D7FD17D487F5D78DA41ED /* TowerWidgets.swift */; };
 		36ED5D492FCC362FEC9F915D /* SettledLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF3533950CD3451682225AE4 /* SettledLog.swift */; };
 		392E687EADD1A7C43A821524 /* SessionTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44B90895A351DF8461282E0C /* SessionTarget.swift */; };
 		3A2645F66B7C357A2484DA8B /* StopPlan.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBE02CBE7023D073A2EA82B8 /* StopPlan.swift */; };
 		3A906B685FA2F7C70E836EE6 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 441BF454F53895EC953AC453 /* KeychainStore.swift */; };
 		3B47A463B16611215DADA115 /* Pairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7BAEF88F841A9AD5CC4D047C /* Pairing.swift */; };
+		3B901D3853CC92D72FB60F97 /* NWTowerWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6A5077B285508A8F7CC3202 /* NWTowerWidgets.swift */; };
 		3F812253C961C2BE1CFF0FDE /* InFlightRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE2959752C6B91E300994D8B /* InFlightRows.swift */; };
 		425D037A61E9D52A7FE990CF /* UsageDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE95F5541E992F13DB7BC9EB /* UsageDisplay.swift */; };
 		46D46904188936C634EBBFF6 /* AnswerDraftStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A2189090B0D49DB6F90FF81 /* AnswerDraftStore.swift */; };
@@ -110,6 +112,7 @@
 		A451B6AAAA2DA96007C27F07 /* SessionRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB8DB987081303E7E57F635 /* SessionRoom.swift */; };
 		A4806154B483216206E3842F /* RenderHarnessStage3.swift in Sources */ = {isa = PBXBuildFile; fileRef = 89E80633A09CB0F64FA70C1F /* RenderHarnessStage3.swift */; };
 		A6370B2B054B1EF37E96981A /* SkyContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9724975FF83F18AFB5C1D85 /* SkyContainer.swift */; };
+		A6D7AE5551CAB3E211939065 /* TowerWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 514D7FD17D487F5D78DA41ED /* TowerWidgets.swift */; };
 		A9FAFE26E2C3D9E12B4C1534 /* NowBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F67E4F21F4AB8C27797449A /* NowBanners.swift */; };
 		AACE7808002E2BE61CE32318 /* PageWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87F90880A9F324A1582416D0 /* PageWidget.swift */; };
 		ACAC73C0C4BDCAAFF2618B41 /* QuestionDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = D5BA7C69B41FB272EC3AA8D5 /* QuestionDraft.swift */; };
@@ -240,6 +243,7 @@
 		4F67E4F21F4AB8C27797449A /* NowBanners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowBanners.swift; sourceTree = "<group>"; };
 		50B587A02CEE72845414D065 /* SharedWidgetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedWidgetStore.swift; sourceTree = "<group>"; };
 		51036CDE820AA99318F71E11 /* NWWidgetFaces.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWWidgetFaces.swift; sourceTree = "<group>"; };
+		514D7FD17D487F5D78DA41ED /* TowerWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TowerWidgets.swift; sourceTree = "<group>"; };
 		54CA044DBD374EC8E9F3FEF7 /* ReceiptThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiptThread.swift; sourceTree = "<group>"; };
 		56A4E9BDC4D4A983454BF246 /* NWSettled.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWSettled.swift; sourceTree = "<group>"; };
 		5748C5A2B2542A30FA18EDDA /* NWCapsule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWCapsule.swift; sourceTree = "<group>"; };
@@ -308,6 +312,7 @@
 		D3C8F6A46105C343F15409A9 /* NWHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHistory.swift; sourceTree = "<group>"; };
 		D5BA7C69B41FB272EC3AA8D5 /* QuestionDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuestionDraft.swift; sourceTree = "<group>"; };
 		D5CACB53FCB55623D9E957E3 /* BiometricGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricGate.swift; sourceTree = "<group>"; };
+		D6A5077B285508A8F7CC3202 /* NWTowerWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWTowerWidgets.swift; sourceTree = "<group>"; };
 		D7B0C560E57C871E726A7532 /* Intervention.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Intervention.swift; sourceTree = "<group>"; };
 		DE2959752C6B91E300994D8B /* InFlightRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InFlightRows.swift; sourceTree = "<group>"; };
 		E24FFBAA98ED261B197120B3 /* NWReceiptThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWReceiptThread.swift; sourceTree = "<group>"; };
@@ -431,6 +436,7 @@
 				8A1B182529EABA01A1EC9443 /* NWStar.swift */,
 				C57C01CC45A7D831FDDBE2EF /* NWTheme.swift */,
 				2DA54CD037CB906F0950E091 /* NWTower.swift */,
+				D6A5077B285508A8F7CC3202 /* NWTowerWidgets.swift */,
 				51036CDE820AA99318F71E11 /* NWWidgetFaces.swift */,
 			);
 			path = NightWatch;
@@ -521,6 +527,7 @@
 				37DB696FFFB8618F5D72AA5C /* SkyModel.swift */,
 				BBE02CBE7023D073A2EA82B8 /* StopPlan.swift */,
 				44B338746D330F48E7DB6C5C /* TowerModel.swift */,
+				514D7FD17D487F5D78DA41ED /* TowerWidgets.swift */,
 				AF7D356B1106DA755245C297 /* TurnSummaryChips.swift */,
 				BE95F5541E992F13DB7BC9EB /* UsageDisplay.swift */,
 				1D8FC33307E6D89193C51CF7 /* WireDecoding.swift */,
@@ -676,6 +683,7 @@
 				69C5C41E04867EE3A40BE97D /* SkyModel.swift in Sources */,
 				3A2645F66B7C357A2484DA8B /* StopPlan.swift in Sources */,
 				933A47C355D8A6AECF00B37A /* TowerModel.swift in Sources */,
+				A6D7AE5551CAB3E211939065 /* TowerWidgets.swift in Sources */,
 				99D10BF27B1CAD93D602143D /* TurnSummaryChips.swift in Sources */,
 				B332B8F769197DAEECF6B571 /* UsageDisplay.swift in Sources */,
 				C34FE1405D1D0EAF8D7D12E3 /* WireDecoding.swift in Sources */,
@@ -752,6 +760,7 @@
 				838A4565CB5EDFDB80B8227C /* NWStar.swift in Sources */,
 				0A63F3F9F6C5EAE570D56D09 /* NWTheme.swift in Sources */,
 				EC27B1D409716FAFF9E80458 /* NWTower.swift in Sources */,
+				3B901D3853CC92D72FB60F97 /* NWTowerWidgets.swift in Sources */,
 				F7B4C3F7BB2FD26A437C0C93 /* NWWidgetFaces.swift in Sources */,
 				00D47F53E252CAD3BC55B352 /* NavigationModel.swift in Sources */,
 				FBDFE3B97809EF2FF31326E2 /* NightWatchNow.swift in Sources */,
@@ -797,6 +806,7 @@
 				D22BFE6EACDCE12D70527DEC /* TipStore.swift in Sources */,
 				680BCF8D2990A2273EA4B074 /* TowerContainer.swift in Sources */,
 				E4F8A862FE8A222F228F4F70 /* TowerModel.swift in Sources */,
+				3672A382778ECA1362886704 /* TowerWidgets.swift in Sources */,
 				E454A1092D671B6A107B3E18 /* TurnSummaryChips.swift in Sources */,
 				425D037A61E9D52A7FE990CF /* UsageDisplay.swift in Sources */,
 				BC1585BF614F1BA55955642F /* WidgetShare.swift in Sources */,

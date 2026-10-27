@@ -23,6 +23,7 @@ enum RenderHarness {
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
         "sky", "sky-selected", "sky-crowded", "sky-empty", "sky-problem", "lanes", "lanes-standby",
         "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
+        "tower-widgets", "tower-widgets-lock", "tower-widgets-previews", "tower-widgets-large", "tower-widgets-lockscreen",
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
@@ -522,8 +523,25 @@ struct HarnessDecision: View {
 struct HarnessTower: View {
     let screen: String
     let glow: CardGlow
+
+    private var towerData: TowerScreenData {
+        var d = RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : (screen == "tower-terminals" ? .terminals : (screen == "tower-gestures" ? .gestures : (screen.hasPrefix("tower-widgets") ? .widgets : nil)))), glow: glow)
+        if screen.hasPrefix("tower-widgets") {
+            // Home and Lock Screen both placed, so the status row shows the placed state.
+            d.widgets = TowerWidgets.status(placed: [
+                .init(kind: "page.mac-status", family: "systemMedium"), .init(kind: "page.claude-usage", family: "systemSmall"),
+                .init(kind: "page.mac-status", family: "accessoryRectangular"),
+            ])
+            if screen == "tower-widgets" || screen == "tower-widgets-lock" { d.widgetGuideOpen = true }
+            if screen == "tower-widgets-lock" { d.widgetGuidePlace = .lockScreen }
+            if screen == "tower-widgets-large" { d.scrollToId = "widgets-large" }
+            if screen == "tower-widgets-lockscreen" { d.scrollToId = "widgets-lock" }
+            if screen == "tower-widgets" { d.widgets = TowerWidgets.status(placed: []) }
+        }
+        return d
+    }
     var body: some View {
-        NWTowerScreen(data: RenderFixtures.tower(scroll: screen == "tower-budget" ? .budget : (screen == "tower-glow" ? .appearance : (screen == "tower-terminals" ? .terminals : (screen == "tower-gestures" ? .gestures : nil))), glow: glow))
+        NWTowerScreen(data: towerData)
             .padding(.top, 50)
     }
 }

@@ -21,6 +21,13 @@ struct TowerScreenData {
     /// Open the Tower scrolled to a section (the Runway opens Budget).
     var scrollTo: TowerSection? = nil
     var feedbackURL: URL? = nil
+    /// Which of Page's widgets are placed, from WidgetCenter (`.checking` until it answers).
+    var widgets: TowerWidgets.Status = .checking
+    /// The Widgets page opens with its "Show me how" steps showing (the render harness; a person taps to show them).
+    var widgetGuideOpen = false
+    var widgetGuidePlace: TowerWidgets.Place = .homeScreen
+    /// Scroll to this id inside the page instead of a section (the render harness).
+    var scrollToId: String? = nil
 }
 
 struct TowerScreenActions {
@@ -46,6 +53,15 @@ struct TowerScreenActions {
 struct NWTowerScreen: View {
     var data: TowerScreenData
     var actions = TowerScreenActions()
+    @State var widgetGuideOpen: Bool
+    @State var widgetGuidePlace: TowerWidgets.Place
+
+    init(data: TowerScreenData, actions: TowerScreenActions = TowerScreenActions()) {
+        self.data = data
+        self.actions = actions
+        _widgetGuideOpen = State(initialValue: data.widgetGuideOpen)
+        _widgetGuidePlace = State(initialValue: data.widgetGuidePlace)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -58,6 +74,7 @@ struct NWTowerScreen: View {
                     section(.attention) { attention }
                     section(.gestures) { gestures }
                     section(.terminals) { terminals }
+                    section(.widgets) { widgets }
                     section(.pairing) { pairing }
                     section(.appearance) { appearance }
                     section(.about) { about }
@@ -68,7 +85,8 @@ struct NWTowerScreen: View {
             }
             .refreshable { await actions.refresh() }
             .onAppear {
-                if let s = data.scrollTo { DispatchQueue.main.async { proxy.scrollTo(s.rawValue, anchor: UnitPoint(x: 0.5, y: -0.04)) } }
+                if let id = data.scrollToId { DispatchQueue.main.async { proxy.scrollTo(id, anchor: UnitPoint(x: 0.5, y: 0.0)) } }
+                else if let s = data.scrollTo { DispatchQueue.main.async { proxy.scrollTo(s.rawValue, anchor: UnitPoint(x: 0.5, y: -0.04)) } }
             }
         }
     }
@@ -103,7 +121,7 @@ struct NWTowerScreen: View {
         .id(s.rawValue)
     }
 
-    private func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+    func card<C: View>(@ViewBuilder _ content: () -> C) -> some View {
         VStack(spacing: 0) { content() }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(NWGlassBackground(radius: NightWatch.Radius.card))
@@ -111,7 +129,7 @@ struct NWTowerScreen: View {
             .overlay(NWGlassRim(radius: NightWatch.Radius.card, withGlow: false))
     }
 
-    private var divider: some View { Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1).padding(.leading, 70) }
+    var divider: some View { Rectangle().fill(Color.white.opacity(0.07)).frame(height: 1).padding(.leading, 70) }
 
     // MARK: Power
 
@@ -363,7 +381,7 @@ struct NWTowerScreen: View {
 
     // MARK: Rows
 
-    @ViewBuilder private func towerRow(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool, action: (() -> Void)?) -> some View {
+    @ViewBuilder func towerRow(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool, action: (() -> Void)?) -> some View {
         if let action {
             Button(action: action) { towerRowBody(icon: icon, tint: tint, title: title, detail: detail, trailing: trailing, chevron: chevron) }.buttonStyle(.plain)
         } else {
@@ -371,7 +389,7 @@ struct NWTowerScreen: View {
         }
     }
 
-    private func towerRowBody(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool) -> some View {
+    func towerRowBody(icon: String, tint: NightWatch.RGBA, title: String, detail: String?, trailing: String?, chevron: Bool) -> some View {
         HStack(spacing: 14) {
             Image(systemName: icon).font(.system(.body, weight: .medium)).foregroundColor(tint.color)
                 .frame(width: 44, height: 44)
