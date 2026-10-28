@@ -12,6 +12,7 @@ struct NowContainer: View {
     @EnvironmentObject var activity: ActivityStore
     @EnvironmentObject var tips: TipStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Ids on screen, so the order never re-sorts under a finger.
     @State private var shown: [String] = []
@@ -52,7 +53,8 @@ struct NowContainer: View {
 
     private func inputs(now: Date) -> NowInputs {
         NowInputs(interventions: api.inbox, inbox: api.inboxLoad.nowState, sessions: sessions.sessions, hasSessionList: sessions.hasList,
-                  status: api.macStatus, history: api.history, deliveries: api.deliveries, deliveryTimes: api.deliveryTimes, now: now, macName: macName)
+                  status: api.macStatus, history: api.history, deliveries: api.deliveries, deliveryTimes: api.deliveryTimes, now: now, macName: macName,
+                  relayFeatures: sessions.relayFeatures, macCaps: sessions.macCaps, retractNotes: sessions.retractNotes)
     }
 
     private func content(now: Date) -> some View {
@@ -108,6 +110,7 @@ struct NowContainer: View {
         }
         d.outcomes = outcomes
         d.receipts = receipts
+        d.retractNote = model.receiptRetract.flatMap { sessions.retractNotes[$0.pageId] }
         // One first-time tip at a time, under the first row of its kind that has nothing under way.
         d.tip = tips.book.nowTip(NowTipInputs(rows: model.rows, inFlight: d.inFlight.rows.map(\.id),
                                               busy: Set(outcomes.keys).union(coordinator.pending.keys)))
@@ -161,7 +164,7 @@ struct NowContainer: View {
         }
         a.deny = { coordinator.begin(row: $0, kind: .deny) }
         a.looksGood = { coordinator.begin(row: $0, kind: .carryOn) }
-        a.steer = { router.open(interventionId: $0.id) }
+        a.steer = { router.open(interventionId: $0.id, composer: true) }
         a.cancel = { id in
             // The ring, if it is still running; otherwise the sheet, to see and retry.
             if coordinator.isArming(id) { coordinator.cancel(id) } else { router.open(interventionId: id) }
@@ -174,12 +177,21 @@ struct NowContainer: View {
             router.openSession(id, entry: entry)
         }
         a.toggleInFlight = { inFlightExpanded.toggle() }
-        a.dismissTip = { tips.retire($0) }
+        a.dismissTip = { tip in
+            // The tip fades and the cards below glide up into its room, on the stream's spring.
+            withAnimation(reduceMotion ? nil : .spring(response: ApproachModel.response, dampingFraction: ApproachModel.damping)) { tips.retire(tip) }
+        }
         a.toLanes = { withAnimation { router.destination = .lanes } }
         a.toggleBrief = { briefExpanded.toggle() }
         a.dismissBrief = { away.dismissBrief(); briefExpanded = false }
         a.reviewFinished = { briefExpanded = false }
         a.seeAll = { router.openHistory() }
+        a.deleteQueued = { r in
+            switch r.layer {
+            case .relay: Task { await api.retractReply(r.pageId) }
+            case .macHold: sessions.deleteHeldReply(interventionId: r.pageId, sessionId: r.sessionId)
+            }
+        }
         a.banner = { action in
             switch action {
             case .repair: router.requestUnpair()

@@ -34,6 +34,10 @@ struct ReceiptThread: Equatable {
         case sent
         /// The relay holds it until the Mac is back online.
         case queued
+        /// The Mac holds it (a rate-limit reply held until the limit resets): not typed, and it can be deleted.
+        case held
+        /// Taken back: nothing was typed. Said in words, with no shake.
+        case retracted(String)
         /// Confirmed by the Mac: the thread has reached it.
         case typed
         /// Confirmed by the Mac, and the receipt has settled.
@@ -109,7 +113,7 @@ struct ReceiptThread: Equatable {
             // behind biometrics sent the moment it passed; anything else sent
             // when its arm ran out.
             let biometric = ActionGate.requiresBiometrics(kind: p.kind, commit: p.commit)
-            let start = biometric ? p.startedAt : p.startedAt.addingTimeInterval(ArmSpec.duration)
+            let start = biometric ? p.startedAt : p.startedAt.addingTimeInterval(p.armDuration)
             return sending(since: max(0, now.timeIntervalSince(start)))
         case .sending?:
             return sending(since: since)
@@ -128,6 +132,10 @@ struct ReceiptThread: Equatable {
             return failed("Already answered at the Mac", since: since)
         case .gone?:
             return failed("Prompt closed before your answer", since: since)
+        case .heldOnMac?:
+            return ReceiptThread(stage: .held, arm: 1, reach: 0.5, relayLit: true, word: "held on your Mac")
+        case .retracted(let why)?:
+            return ReceiptThread(stage: .retracted(why), arm: 0, word: why)
         }
     }
 
@@ -181,16 +189,17 @@ struct ReceiptThreadInput: Equatable {
     func movingUntil(now: Date) -> Date? {
         let T = ReceiptThread.self
         if localProblem != nil { return changedAt?.addingTimeInterval(max(T.snapBack, T.shakeDuration)) }
-        if let p = pending, case .arming = p.phase(now: now) { return p.startedAt.addingTimeInterval(ArmSpec.duration) }
+        if let p = pending, case .arming = p.phase(now: now) { return p.startedAt.addingTimeInterval(p.armDuration) }
         switch delivery {
         case nil:
             guard let p = pending else { return nil }
             let biometric = ActionGate.requiresBiometrics(kind: p.kind, commit: p.commit)
-            return (biometric ? p.startedAt : p.startedAt.addingTimeInterval(ArmSpec.duration)).addingTimeInterval(T.reachRelay)
+            return (biometric ? p.startedAt : p.startedAt.addingTimeInterval(p.armDuration)).addingTimeInterval(T.reachRelay)
         case .sending?: return changedAt?.addingTimeInterval(T.reachRelay)
         case .sent(let queued, let at)?: return queued ? nil : at.addingTimeInterval(T.glintFor)
         case .delivered?: return changedAt?.addingTimeInterval(T.resolveDuration)
         case .failed?, .alreadyReplied?, .gone?: return changedAt?.addingTimeInterval(max(T.snapBack, T.shakeDuration))
+        case .heldOnMac?, .retracted?: return nil
         }
     }
 }

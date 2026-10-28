@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Live sessions on the paired Mac (docs/SESSIONS-PROTOCOL.md): the list,
 /// the transcript of the session being viewed, and where each message typed
@@ -43,6 +46,13 @@ final class SessionStore: ObservableObject {
     private var pendingStart: (folder: String, existing: Set<String>, at: Date)?
     /// Messages and Stops sent from this phone, by `clientId`.
     @Published private(set) var commands: [String: SentSessionCommand] = [:]
+    /// What the Mac accepts beyond the basic ops (the last `list`'s `caps`): `hold-v1`, `retract-v1`, `images-v1`.
+    /// Empty from an older Mac, so nothing newer is offered to it.
+    @Published private(set) var macCaps: Set<String> = []
+    /// Where each Delete stands, by what it takes back (a held message's clientId, or a reply's page id).
+    @Published private(set) var retractNotes: [String: RetractNote] = [:]
+    /// Drafts a countdown the app was killed on, back for their screen (see `takeRestoredDraft`).
+    @Published private(set) var restoredDrafts: [String: RestoredDraft] = [:]
     /// From GET /status; nil until known.
     @Published private(set) var relayFeatures: Set<String>?
     @Published private(set) var hasKey = false
@@ -63,6 +73,33 @@ final class SessionStore: ObservableObject {
     private var undecryptableInARow = 0
     private var timeoutTasks: [String: Task<Void, Never>] = [:]
     private var waitTask: Task<Void, Never>?
+    /// Messages waiting out their countdown. App-level on purpose: leaving the room doesn't cancel one.
+    private var outbox: [String: QueuedSend] = [:]
+    private var outboxTasks: [String: Task<Void, Never>] = [:]
+    #if canImport(UIKit)
+    private var outboxBackground: [String: UIBackgroundTaskIdentifier] = [:]
+    #endif
+    /// Held messages (clientIds) seen in a list, so a later absence means the Mac let go of it.
+    private var heldSeen: Set<String> = []
+    /// retract clientId -> what it takes back.
+    private var retractSubjects: [String: String] = [:]
+    /// The retracts Page sent because the relay said "forwarded" (see `ForwardedRetract`): they read in the relay's words.
+    private var chainedRetracts: Set<String> = []
+    /// The outbox file's entries from before this launch, which never went out.
+    private var restoredFromFile: [PersistedSend] = []
+    /// Photo messages (`images-v1`), by the message's clientId: the re-encoded photos and where the upload stands.
+    /// In memory only (never written to disk); gone once the message is delivered or the phone is unpaired.
+    private var photoPayloads: [String: PhotoPayload] = [:]
+    /// Which bubble each `inputImages` clientId answers for: a resend after `attachment_missing` has a new clientId,
+    /// and an answer after the 30 s wait (or a failed POST) still settles the bubble, for 5 minutes.
+    private var photoRoutes = PhotoResultRoutes()
+
+    private struct PhotoPayload {
+        let sessionId: String
+        let caption: String
+        let photos: [PreparedPhoto]
+        var machine: PhotoUploadMachine
+    }
 
     #if DEBUG
     /// "Skip pairing (DEV)": mock sessions, simulated results, no network.
@@ -81,6 +118,8 @@ final class SessionStore: ObservableObject {
 
     private init() {
         reloadKey()
+        restoredFromFile = OutboxFile.load()
+        for d in OutboxRestore.restore(restoredFromFile) { restoredDrafts[d.scope] = d }
     }
 
     // MARK: Lookup
@@ -139,6 +178,18 @@ final class SessionStore: ObservableObject {
         #endif
         for task in timeoutTasks.values { task.cancel() }
         timeoutTasks = [:]
+        for task in outboxTasks.values { task.cancel() }
+        outboxTasks = [:]
+        for id in outbox.keys { endBackground(id); OutboxFile.remove(id: id) }
+        outbox = [:]
+        for id in photoPayloads.keys { endBackground(id) }
+        photoPayloads = [:]
+        photoRoutes.removeAll()
+        heldSeen = []
+        retractSubjects = [:]
+        chainedRetracts = []
+        retractNotes = [:]
+        macCaps = []
         waitTask?.cancel()
         waitTask = nil
         gate.reset()
@@ -287,7 +338,11 @@ final class SessionStore: ObservableObject {
         case .accept:
             if onlyStaleFrames { onlyStaleFrames = false }
         }
-        if case .list = plaintext.update { macDisabled = plaintext.macDisabled }
+        if case .list = plaintext.update {
+            macDisabled = plaintext.macDisabled
+            let caps = plaintext.caps ?? []
+            if macCaps != caps { macCaps = caps }
+        }
         apply(plaintext.update)
     }
 
@@ -303,6 +358,7 @@ final class SessionStore: ObservableObject {
                     startedSessionId = s.id
                 }
             }
+            reconcileHeld(list)
             if name != nil { macName = name }
             hasList = true
             lastListAt = Date()
@@ -346,19 +402,29 @@ final class SessionStore: ObservableObject {
             startFolders = f
             startFoldersError = nil
         case .result(let r):
+            // An `inputImages` sent again after `attachment_missing`, or answered late, belongs to the first message.
+            let key = photoRoutes.bubble(for: r.clientId, now: Date()) ?? r.clientId
             if let sid = diffClients.removeValue(forKey: r.clientId) {
                 diffErrors[sid] = r.detail ?? "Your Mac couldn't read the changes."
                 return
             }
-            guard var cmd = commands[r.clientId] else { return }
+            if let subject = retractSubjects.removeValue(forKey: r.clientId) {
+                retractAnswered(r, subject: subject)
+                return
+            }
+            guard var cmd = commands[key] else { return }
+            // Pieces that never arrived: one resend of those photos, then a new `inputImages`. The second time is final.
+            if cmd.photos != nil, cmd.state == .sending, r.reason == "attachment_missing", resendMissingPhotos(key, r) { return }
             // A refused start won't create a session: stop waiting for one.
             if cmd.kind == .start, !r.ok { pendingStart = nil }
             cmd.state = cmd.state.applying(r, agent: agentName(cmd.sessionId))
-            commands[r.clientId] = cmd
+            if cmd.photos != nil { cmd.photos?.attached = r.attached }
+            commands[key] = cmd
             print("[SessionStore] \(cmd.kind.rawValue) \(r.clientId.prefix(8)) -> \(r.code.rawValue)\(r.reason.map { "/\($0)" } ?? "")")
             if !cmd.state.isPending {
-                timeoutTasks[r.clientId]?.cancel()
-                timeoutTasks[r.clientId] = nil
+                timeoutTasks[key]?.cancel()
+                timeoutTasks[key] = nil
+                if cmd.photos != nil { settlePhotos(key, cmd.state) }
             }
         }
     }
@@ -379,7 +445,12 @@ final class SessionStore: ObservableObject {
     /// Types `text` into the session. Returns the problem to show instead
     /// when the text can't be sent; otherwise the message's delivery state
     /// appears in `commands` under a fresh `clientId`.
-    func sendInput(sessionId: String, text: String, target: SessionTarget? = nil) -> SessionComposer.Problem? {
+    ///
+    /// `hold`: the Mac types it when the turn ends (`hold-v1`), and it can be deleted until then.
+    /// `countdown`: wait this many seconds before anything leaves the phone (Undo works until then).
+    /// The wait lives here, not in a screen, so leaving the room doesn't cancel the send.
+    func sendInput(sessionId: String, text: String, target: SessionTarget? = nil, hold: Bool = false,
+                   countdown: TimeInterval? = nil) -> SessionComposer.Problem? {
         let clean: String
         switch SessionComposer.validate(text) {
         case .failure(let problem): return problem
@@ -387,20 +458,374 @@ final class SessionStore: ObservableObject {
         }
         #if DEBUG
         if isDevMode {
-            simulateDevCommand(.input, sessionId: sessionId, text: clean, target: target)
+            simulateDevCommand(.input, sessionId: sessionId, text: clean, target: target, hold: hold)
             return nil
         }
         #endif
         let clientId = UUID().uuidString.lowercased()
-        guard let body = encrypt(.input(sessionId: sessionId, text: clean, target: target), clientId: clientId) else {
+        let command = SessionCommand.input(sessionId: sessionId, text: clean, target: target, hold: hold)
+        guard let body = encrypt(command, clientId: clientId) else {
             record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean,
                    state: .failed("This iPhone has no session key. Re-pair with your Mac."), target: target)
             return nil
         }
         guard SessionComposer.fitsRelay(body) else { return .tooLarge }
+        if let seconds = countdown, seconds > 0, !hold {
+            let cd = SendCountdown(startedAt: Date(), duration: seconds)
+            outbox[clientId] = QueuedSend(id: clientId, sessionId: sessionId, text: clean, countdown: cd)
+            record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean, state: .counting(cd), target: target)
+            OutboxFile.add(PersistedSend(id: clientId, scope: OutboxRestore.scope(sessionId: sessionId), text: clean,
+                                         startedAt: cd.startedAt.timeIntervalSince1970))
+            scheduleFire(clientId)
+            return nil
+        }
         record(clientId: clientId, sessionId: sessionId, kind: .input, text: clean, state: .sending, target: target)
         deliver(body, clientId: clientId, op: "input")
         return nil
+    }
+
+    // MARK: Outbox (the Undo before a send)
+
+    /// Undo: nothing was sent, the message is gone from the outbox and its text is returned for the
+    /// composer. Nil once the send has begun.
+    func undoSend(clientId: String) -> String? {
+        guard var q = outbox[clientId], q.undo(now: Date()) else { return nil }
+        outboxTasks[clientId]?.cancel()
+        outboxTasks[clientId] = nil
+        outbox[clientId] = nil
+        commands[clientId] = nil
+        OutboxFile.remove(id: clientId)
+        endBackground(clientId)
+        return q.text
+    }
+
+    /// The app came back to the foreground: a countdown that ran out meanwhile fires (or, if the app
+    /// slept through it, comes back as a draft).
+    func appBecameActive() {
+        for id in Array(outbox.keys) { fireOutbox(id) }
+    }
+
+    private func scheduleFire(_ id: String) {
+        guard let q = outbox[id] else { return }
+        beginBackground(id)
+        outboxTasks[id]?.cancel()
+        outboxTasks[id] = Task { [weak self] in
+            let wait = max(0, q.countdown.remaining(now: Date())) + 0.02
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            self.fireOutbox(id)
+        }
+    }
+
+    private func fireOutbox(_ id: String) {
+        guard var q = outbox[id] else { return }
+        let verdict = q.fire(now: Date())
+        switch verdict {
+        case .wait:
+            // Woke early (a clock step): sleep the rest.
+            scheduleFire(id)
+        case .stale:
+            outbox[id] = nil
+            outboxTasks[id] = nil
+            commands[id] = nil
+            OutboxFile.remove(id: id)
+            endBackground(id)
+            restoreDraft(scope: OutboxRestore.scope(sessionId: q.sessionId), text: q.text, note: RestoredDraft.slept)
+        case .send:
+            outbox[id] = nil
+            outboxTasks[id] = nil
+            OutboxFile.remove(id: id)
+            guard var cmd = commands[id] else { endBackground(id); return }
+            // Encrypted now, so the Mac's replay guard sees a fresh timestamp.
+            guard let body = encrypt(.input(sessionId: q.sessionId, text: q.text, target: cmd.target), clientId: id) else {
+                cmd.state = .failed("This iPhone has no session key. Re-pair with your Mac.")
+                commands[id] = cmd
+                endBackground(id)
+                return
+            }
+            cmd.sentAt = Date()
+            cmd.state = .sending
+            commands[id] = cmd
+            startTimeout(clientId: id, kind: .input, sentAt: cmd.sentAt)
+            deliver(body, clientId: id, op: "input")
+        }
+    }
+
+    /// Words that didn't go out (the page closed while they waited), kept for their screen.
+    func restoreDraft(scope: String, text: String, note: String = RestoredDraft.answeredNote) {
+        restoredDrafts[scope] = RestoredDraft(scope: scope, text: text, note: note)
+    }
+
+    /// A draft a killed countdown left, for the screen it belongs to (consumed on reading).
+    func takeRestoredDraft(scope: String) -> RestoredDraft? {
+        guard let d = restoredDrafts.removeValue(forKey: scope) else { return nil }
+        for item in restoredFromFile where item.scope == scope { OutboxFile.remove(id: item.id) }
+        restoredFromFile.removeAll { $0.scope == scope }
+        return d
+    }
+
+    /// Holds the app awake long enough to send what the countdown promised if the person leaves Page.
+    private func beginBackground(_ id: String) {
+        #if canImport(UIKit)
+        guard outboxBackground[id] == nil else { return }
+        outboxBackground[id] = UIApplication.shared.beginBackgroundTask(withName: "page-outbox") { [weak self] in
+            Task { @MainActor in self?.endBackground(id) }
+        }
+        #endif
+    }
+
+    private func endBackground(_ id: String) {
+        #if canImport(UIKit)
+        if let t = outboxBackground.removeValue(forKey: id), t != .invalid { UIApplication.shared.endBackgroundTask(t) }
+        #endif
+    }
+
+    // MARK: Photos (images-v1)
+
+    /// Sends the photos with a caption into the session: each photo in pieces (every piece its own sealed
+    /// `imagePart`, at most 3 in flight), then one `inputImages` once every piece got its 202. Returns the problem
+    /// to show instead when nothing could be started; otherwise the message appears in `commands` under a fresh
+    /// `clientId` and its state walks Uploading → Typing → the Mac's result.
+    func sendPhotos(sessionId: String, text: String, photos: [PreparedPhoto], target: SessionTarget? = nil, attach: String? = nil) -> String? {
+        guard macCaps.contains(PhotoLimits.capability) else { return PhotoOffer.goneReason }
+        let total = photos.reduce(0) { $0 + $1.bytes }
+        guard !photos.isEmpty, photos.count <= PhotoLimits.maxPhotos, total <= PhotoLimits.maxBytesTotal else {
+            return PhotoEncoder.Failure.overTotal.message
+        }
+        let caption = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let why = PhotoCaption.problem(caption) { return why }
+        let pieces = photos.reduce(0) { $0 + $1.pieceCount }
+        #if DEBUG
+        if isDevMode {
+            simulateDevPhotos(sessionId: sessionId, text: caption, count: photos.count, pieces: pieces, target: target, attach: attach)
+            return nil
+        }
+        #endif
+        let id = UUID().uuidString.lowercased()
+        // The wait for the Mac's result starts with `inputImages`, not now.
+        record(clientId: id, sessionId: sessionId, kind: .input, text: caption, state: .sending, target: target, timeout: nil)
+        commands[id]?.photos = PhotoSend(count: photos.count, attach: attach, phase: .uploading(done: 0, total: pieces), attached: nil)
+        releasePhotos(except: id)
+        photoPayloads[id] = PhotoPayload(sessionId: sessionId, caption: caption, photos: photos,
+                                         machine: PhotoUploadMachine(counts: photos.map(\.pieceCount)))
+        // The upload takes a moment: keep the app awake for it if the person leaves Page.
+        beginBackground(id)
+        Task { await uploadPhotos(id) }
+        return nil
+    }
+
+    /// Posts every piece of the message's photos (3 at a time) until the machine says all were accepted, or stops.
+    private func uploadPhotos(_ id: String) async {
+        guard let payload = photoPayloads[id] else { return }
+        var machine = payload.machine
+        func body(_ ref: PhotoPieceRef) -> Data? {
+            let p = payload.photos[ref.photo]
+            let range = PhotoPieces.range(index: ref.index, bytes: p.bytes)
+            // A new clientId for every post, so a retried piece is a new command to the Mac and the relay.
+            return encrypt(.imagePart(sessionId: payload.sessionId, photo: PhotoRef(p), index: ref.index, total: p.pieceCount,
+                                      data: p.data.subdata(in: range)), clientId: UUID().uuidString.lowercased())
+        }
+        guard body(PhotoPieceRef(photo: 0, index: 0)) != nil else {
+            failPhotos(id, "This iPhone has no session key. Re-pair with your Mac.")
+            return
+        }
+        await withTaskGroup(of: (PhotoPieceRef, SessionCommandOutcome).self) { group in
+            var inFlight = 0
+            while true {
+                guard photoPayloads[id] != nil else { group.cancelAll(); return }
+                for ref in machine.startable(now: Date()) {
+                    guard let data = body(ref) else { machine.finished(ref, .failed("This iPhone has no session key. Re-pair with your Mac."), now: Date()); continue }
+                    inFlight += 1
+                    group.addTask { @MainActor in (ref, await APIClient.shared.postSessionCommand(body: data)) }
+                }
+                if inFlight == 0 {
+                    guard machine.phase == .uploading else { return }
+                    // Backing off after a 429: nothing is in flight to wait for.
+                    try? await Task.sleep(nanoseconds: UInt64((machine.wait(now: Date()) + 0.02) * 1_000_000_000))
+                    continue
+                }
+                guard let (ref, outcome) = await group.next() else { return }
+                inFlight -= 1
+                noteOutcome(outcome)
+                machine.finished(ref, outcome, now: Date())
+                commands[id]?.photos?.phase = .uploading(done: machine.doneCount, total: machine.total)
+            }
+        }
+        guard photoPayloads[id] != nil else { return }
+        photoPayloads[id]?.machine = machine
+        switch machine.phase {
+        case .ready: sendInputImages(id)
+        case .stopped(let why): failPhotos(id, why)
+        case .uploading: break
+        }
+    }
+
+    /// Every piece was accepted: the one `inputImages` that names the photos and carries the caption.
+    private func sendInputImages(_ id: String) {
+        guard let payload = photoPayloads[id], var cmd = commands[id], cmd.state == .sending else { return }
+        // After a resend the first command's id was spent: the new one answers for the same message.
+        let clientId = payload.machine.resent ? UUID().uuidString.lowercased() : id
+        let command = SessionCommand.inputImages(sessionId: payload.sessionId, text: payload.caption,
+                                                 photos: payload.photos.map(PhotoRef.init), target: cmd.target)
+        guard let data = encrypt(command, clientId: clientId) else {
+            failPhotos(id, "This iPhone has no session key. Re-pair with your Mac.")
+            return
+        }
+        photoRoutes.record(clientId: clientId, bubble: id, now: Date())
+        cmd.photos?.phase = .typing
+        cmd.sentAt = Date()
+        commands[id] = cmd
+        startTimeout(clientId: id, kind: .input, sentAt: cmd.sentAt, timeout: PhotoLimits.resultTimeout)
+        deliver(data, clientId: id, op: "inputImages")
+    }
+
+    /// `attachment_missing`: send the named photos' pieces again, once, then a new `inputImages`. False when it
+    /// was already done (the second time is the answer) or the ids named no photo.
+    private func resendMissingPhotos(_ id: String, _ r: CommandResult) -> Bool {
+        guard var payload = photoPayloads[id] else { return false }
+        let which = r.missing.compactMap { m in payload.photos.firstIndex { $0.id == m } }
+        guard payload.machine.resend(photos: which) else { return false }
+        photoPayloads[id] = payload
+        timeoutTasks[id]?.cancel()
+        timeoutTasks[id] = nil
+        commands[id]?.photos?.phase = .uploading(done: payload.machine.doneCount, total: payload.machine.total)
+        beginBackground(id)
+        Task { await uploadPhotos(id) }
+        return true
+    }
+
+    private func failPhotos(_ id: String, _ why: String) {
+        guard var cmd = commands[id] else { return }
+        cmd.state = .failed(why)
+        commands[id] = cmd
+        timeoutTasks[id]?.cancel()
+        timeoutTasks[id] = nil
+        endBackground(id)
+        settlePhotos(id, cmd.state)
+    }
+
+    /// A photo message that has settled: delivered, so the bytes go; refused or failed, so the photos can be put
+    /// back (the latest one only); no answer, so nothing is held that might be sent twice.
+    private func settlePhotos(_ id: String, _ state: SessionDeliveryState) {
+        switch state {
+        case .refused, .failed: releasePhotos(except: id)
+        default: photoPayloads[id] = nil
+        }
+        endBackground(id)
+    }
+
+    private func releasePhotos(except id: String) {
+        for key in photoPayloads.keys where key != id { photoPayloads[key] = nil }
+    }
+
+    /// The message whose photos are still held after a refusal, so the composer can take them back.
+    func puttableBackPhotoMessage(sessionId: String) -> String? {
+        photoPayloads.first { key, value in
+            guard value.sessionId == sessionId, let c = commands[key] else { return false }
+            switch c.state { case .refused, .failed: return true; default: return false }
+        }?.key
+    }
+
+    /// Puts a refused photo message back: its caption and photos return to the composer and the bubble goes.
+    func takeBackPhotos(clientId: String) -> (text: String, photos: [PreparedPhoto])? {
+        guard let payload = photoPayloads[clientId], let c = commands[clientId] else { return nil }
+        switch c.state { case .refused, .failed: break; default: return nil }
+        photoPayloads[clientId] = nil
+        commands[clientId] = nil
+        return (payload.caption, payload.photos)
+    }
+
+    // MARK: Held messages and Delete
+
+    /// Settles held messages from the list's `held` entries, which reach phones that were not connected
+    /// for the `result`. A message is "no longer held" only once it was seen held and then isn't, or
+    /// when its session left the list: a list built just before the Mac accepted it names nothing yet.
+    private func reconcileHeld(_ list: [LiveSession]) {
+        for (id, cmd) in commands where cmd.kind == .input {
+            switch cmd.state {
+            case .held, .sending, .noAnswer: break
+            default: continue
+            }
+            let session = list.first { $0.id == cmd.sessionId }
+            // A Mac with live sessions turned off lists nothing: that isn't the session ending, or a message gone.
+            if macDisabled { continue }
+            let next = cmd.state.reconciled(entry: session?.held.first { $0.clientId == id },
+                                            seen: heldSeen.contains(id), sessionListed: session != nil,
+                                            sentAt: cmd.sentAt, now: Date())
+            if next != cmd.state {
+                var c = cmd
+                c.state = next
+                commands[id] = c
+                if !next.isPending { timeoutTasks[id]?.cancel(); timeoutTasks[id] = nil }
+            }
+        }
+        for s in list { for h in s.held { heldSeen.insert(h.clientId) } }
+        if heldSeen.count > 400 && !macDisabled { heldSeen = Set(list.flatMap { $0.held.map(\.clientId) }) }
+    }
+
+    /// Delete a message the Mac holds (`retract` with `heldId`). Only a Mac that says `retract-v1` is asked.
+    func deleteHeld(clientId heldId: String, sessionId: String) {
+        sendRetract(subject: heldId, sessionId: sessionId, command: .retract(heldId: heldId, interventionId: nil))
+    }
+
+    /// Delete a reply the Mac holds until a rate limit resets (`retract` with `interventionId`).
+    func deleteHeldReply(interventionId: String, sessionId: String) {
+        sendRetract(subject: interventionId, sessionId: sessionId, command: .retract(heldId: nil, interventionId: interventionId))
+    }
+
+    /// The relay said it already handed this reply to the Mac (`DELETE /reply` answered 409 `too_late`, stage
+    /// `forwarded`): the Mac may still hold it, so ask it to take it back. The line reads "Asking your Mac…" meanwhile,
+    /// then the Mac's answer in the relay's words (`ForwardedRetract`).
+    func askMacToRetractForwarded(interventionId: String, sessionId: String) {
+        guard macCaps.contains(SendChoicePlan.retractCap) else { noteRelayRetract(id: interventionId, ForwardedRetract.timeoutNote); return }
+        sendRetract(subject: interventionId, sessionId: sessionId, command: .retract(heldId: nil, interventionId: interventionId), chained: true)
+    }
+
+    private func sendRetract(subject: String, sessionId: String, command: SessionCommand, chained: Bool = false) {
+        // The chained ask follows a Delete that was busy a moment ago: it sets the busy note itself.
+        guard macCaps.contains(SendChoicePlan.retractCap), chained || retractNotes[subject]?.isBusy != true else { return }
+        #if DEBUG
+        if isDevMode {
+            retractNotes[subject] = chained ? .askingMac : .deleting
+            Task {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                guard self.isDevMode else { return }
+                self.retractNotes[subject] = .deleted(SessionDeliveryState.deletedCopy)
+                if var c = self.commands[subject] { c.state = .deleted(SessionDeliveryState.deletedCopy); self.commands[subject] = c }
+            }
+            return
+        }
+        #endif
+        let rid = UUID().uuidString.lowercased()
+        guard let body = encrypt(command, clientId: rid) else {
+            retractNotes[subject] = chained ? ForwardedRetract.timeoutNote : .failed("This iPhone has no session key. Re-pair with your Mac.")
+            return
+        }
+        retractNotes[subject] = chained ? .askingMac : .deleting
+        retractSubjects[rid] = subject
+        if chained { chainedRetracts.insert(rid) }
+        record(clientId: rid, sessionId: sessionId, kind: .retract, text: "", state: .sending, subject: subject)
+        deliver(body, clientId: rid, op: "retract")
+    }
+
+    /// The Mac answered a Delete. Keyed on `retract`, never on `code`: a delete arrives as `delivered`.
+    private func retractAnswered(_ r: CommandResult, subject: String) {
+        timeoutTasks[r.clientId]?.cancel()
+        timeoutTasks[r.clientId] = nil
+        commands[r.clientId] = nil
+        let note = chainedRetracts.remove(r.clientId) != nil ? ForwardedRetract.note(for: r) : RetractOutcome.note(for: r)
+        retractNotes[subject] = note
+        print("[SessionStore] retract \(r.clientId.prefix(8)) -> \(note)")
+        guard case .deleted(let why) = note else { return }
+        // A held message's own final result (`cancelled`) follows; this settles it at once.
+        if var c = commands[subject], c.state.isHeld { c.state = .deleted(why); commands[subject] = c }
+        // A held reply: the page is free for a new answer.
+        APIClient.shared.markRetracted(interventionId: subject, detail: why)
+    }
+
+    /// The relay answered DELETE /reply/<id> (or it never got there).
+    func noteRelayRetract(id: String, _ note: RetractNote?) {
+        if let note { retractNotes[id] = note } else { retractNotes[id] = nil }
     }
 
     /// The newest answers sent for this very question (the ask's id), for the card's receipt.
@@ -534,22 +959,36 @@ final class SessionStore: ObservableObject {
     }
 
     private func record(clientId: String, sessionId: String, kind: SessionCommandKind, text: String,
-                        state: SessionDeliveryState, target: SessionTarget? = nil, promptKey: String? = nil) {
+                        state: SessionDeliveryState, target: SessionTarget? = nil, promptKey: String? = nil, subject: String? = nil,
+                        timeout: TimeInterval? = SessionDeliveryState.resultTimeout) {
         let sentAt = Date()
         commands[clientId] = SentSessionCommand(clientId: clientId, sessionId: sessionId, kind: kind,
                                                 text: text, sentAt: sentAt, state: state,
                                                 priorEntryIds: transcripts[sessionId].map { Set($0.entries.map(\.id)) },
-                                                target: target, promptKey: promptKey)
+                                                target: target, promptKey: promptKey, subject: subject)
         pruneCommands()
-        guard state.isPending else { return }
+        guard state.isPending, let timeout else { return }
+        startTimeout(clientId: clientId, kind: kind, sentAt: sentAt, timeout: timeout)
+    }
+
+    /// The 20 s wait for the Mac's `result`, counted from when the send began.
+    private func startTimeout(clientId: String, kind: SessionCommandKind, sentAt: Date,
+                              timeout: TimeInterval = SessionDeliveryState.resultTimeout) {
+        timeoutTasks[clientId]?.cancel()
         timeoutTasks[clientId] = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(SessionDeliveryState.resultTimeout * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             guard !Task.isCancelled, let self, var cmd = self.commands[clientId] else { return }
-            let next = cmd.state.timedOut(sentAt: sentAt, now: Date())
+            let next = cmd.state.timedOut(sentAt: sentAt, now: Date(), timeout: timeout)
             if next != cmd.state {
                 cmd.state = next
                 self.commands[clientId] = cmd
                 print("[SessionStore] \(kind.rawValue) \(clientId.prefix(8)) -> no answer")
+                if cmd.photos != nil { self.settlePhotos(clientId, next) }
+                // A Delete the Mac never answered (an older Mac ignores the op).
+                if kind == .retract, let subject = cmd.subject {
+                    self.retractNotes[subject] = self.chainedRetracts.remove(clientId) != nil ? ForwardedRetract.timeoutNote : .unconfirmed
+                    self.retractSubjects[clientId] = nil
+                }
             }
             self.timeoutTasks[clientId] = nil
         }
@@ -578,7 +1017,14 @@ final class SessionStore: ObservableObject {
                 commands[clientId] = cmd
                 timeoutTasks[clientId]?.cancel()
                 timeoutTasks[clientId] = nil
+                if cmd.kind == .retract, let subject = cmd.subject, case .failed(let why) = next {
+                    // The relay already said the Mac has it: a retract that didn't get through leaves that as the word.
+                    retractNotes[subject] = chainedRetracts.remove(clientId) != nil ? ForwardedRetract.timeoutNote
+                        : RetractNote.postFailure(outcome) ?? .failed(why)
+                    retractSubjects[clientId] = nil
+                }
             }
+            endBackground(clientId)
         }
     }
 
@@ -625,6 +1071,7 @@ final class SessionStore: ObservableObject {
         self.macName = macName
         sessions = list
         hasList = true
+        macCaps = [SendChoicePlan.holdCap, SendChoicePlan.retractCap, PhotoLimits.capability]
         lastListAt = Date()
         for t in seeded { transcripts[t.sessionId] = t }
     }
@@ -633,7 +1080,7 @@ final class SessionStore: ObservableObject {
     /// using the same refusal rules as the Mac's input gate where they're
     /// visible from here.
     private func simulateDevCommand(_ kind: SessionCommandKind, sessionId: String, text: String, target shown: SessionTarget? = nil,
-                                    promptKey: String? = nil) {
+                                    promptKey: String? = nil, hold: Bool = false) {
         let clientId = UUID().uuidString.lowercased()
         record(clientId: clientId, sessionId: sessionId, kind: kind, text: text, state: .sending, target: shown, promptKey: promptKey)
         let target = session(sessionId)
@@ -653,8 +1100,15 @@ final class SessionStore: ObservableObject {
                     ? CommandResult(clientId: clientId, ok: true, code: .delivered, reason: nil, detail: "Pressed Esc in \(target.host) (simulated)", interventionId: nil)
                     : CommandResult(clientId: clientId, ok: false, code: .refused, reason: "interrupt_unsupported", detail: nil, interventionId: nil)
                 if target.isStoppable { self.replaceDevSession(target, state: .interrupted) }
+            case .retract:
+                return
             case .input:
                 let busy = target.state == .active
+                if hold && busy {
+                    self.apply(.result(CommandResult(clientId: clientId, ok: true, code: .queued, reason: nil,
+                                                     detail: "Held — Page types it when Claude finishes this turn (simulated)", interventionId: nil, held: true)))
+                    return
+                }
                 if target.state.isWaiting {
                     result = CommandResult(clientId: clientId, ok: false, code: .refused, reason: "waiting", detail: nil, interventionId: target.interventionId)
                 } else if busy, text.first?.isNumber == true {
@@ -676,6 +1130,31 @@ final class SessionStore: ObservableObject {
         }
     }
 
+    /// A photo message in DEV mode: the upload walks its pieces, then the Mac "types" them.
+    private func simulateDevPhotos(sessionId: String, text: String, count: Int, pieces: Int, target: SessionTarget?, attach: String?) {
+        let clientId = UUID().uuidString.lowercased()
+        record(clientId: clientId, sessionId: sessionId, kind: .input, text: text, state: .sending, target: target, timeout: nil)
+        commands[clientId]?.photos = PhotoSend(count: count, attach: attach, phase: .uploading(done: 0, total: pieces), attached: nil)
+        Task {
+            for done in stride(from: 0, through: pieces, by: max(1, pieces / 4)) {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard self.isDevMode else { return }
+                self.commands[clientId]?.photos?.phase = .uploading(done: done, total: pieces)
+            }
+            guard self.isDevMode else { return }
+            self.commands[clientId]?.photos?.phase = .typing
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard self.isDevMode, var c = self.commands[clientId] else { return }
+            c.photos?.attached = count
+            c.state = .typed("Sent \(PhotoDraft.countLabel(count)) to Claude in \(c.target?.host ?? "the terminal") (simulated)")
+            self.commands[clientId] = c
+            let old = self.transcripts[sessionId]
+            let entry = TranscriptEntry(id: "dev-\(clientId)", role: .user,
+                                        text: (0..<count).map { "[Image #\($0 + 1)]" }.joined(separator: " ") + text, at: Date(), tool: nil, images: count)
+            self.transcripts[sessionId] = SessionTranscript(sessionId: sessionId, entries: (old?.entries ?? []) + [entry], truncated: old?.truncated ?? false)
+        }
+    }
+
     private func replaceDevSession(_ s: LiveSession, state: LiveSessionState) {
         let next = LiveSession(id: s.id, backend: s.backend, title: s.title, cwd: s.cwd, state: state, host: s.host,
                                canType: s.canType, typeBlocker: s.typeBlocker, canInterrupt: s.canInterrupt,
@@ -683,4 +1162,69 @@ final class SessionStore: ObservableObject {
         sessions = sessions.map { $0.id == s.id ? next : $0 }
     }
     #endif
+}
+
+/// The messages waiting out a countdown, kept on disk only while they wait, so one the app was killed
+/// on isn't lost: it is removed the moment it is sent or undone, and what is left at the next launch
+/// comes back as a draft (`OutboxRestore`). The only place a typed message touches disk: encrypted at
+/// rest by the device, never logged, and gone within seconds.
+///
+/// The protection is "until first unlock", not "complete": a countdown that runs out while the phone is
+/// locked still sends (under its background task), and the entry must be removable then. With complete
+/// protection the file can't be read once the phone locks, the entry would stay, and the next launch
+/// would give back as "not sent" a message that was sent, inviting a second send.
+enum OutboxFile {
+    private static var url: URL? {
+        guard let dir = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true) else { return nil }
+        return dir.appendingPathComponent("page-outbox.json")
+    }
+
+    static func load() -> [PersistedSend] {
+        guard let url, let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([PersistedSend].self, from: data)) ?? []
+    }
+
+    private static func save(_ items: [PersistedSend]) {
+        guard let url else { return }
+        if items.isEmpty { try? FileManager.default.removeItem(at: url); return }
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    static func add(_ item: PersistedSend) {
+        var items = load().filter { $0.id != item.id }
+        items.append(item)
+        save(items)
+    }
+
+    static func remove(id: String) {
+        guard let url else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard let data = try? Data(contentsOf: url) else {
+            // There but unreadable: drop it whole. Losing a restore is better than one that says
+            // "not sent" about a message that went.
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        let items = (try? JSONDecoder().decode([PersistedSend].self, from: data)) ?? []
+        let kept = items.filter { $0.id != id }
+        if kept.count != items.count { save(kept) }
+    }
+}
+
+/// The last "Now" / "When it finishes" choice, kept per device, and whether its one-line explanations
+/// have been seen (they show until a message has gone out with the choice in front of the person).
+enum SendChoiceMemory {
+    private static let lastKey = "page.sendChoice.last"
+    private static let explainedKey = "page.sendChoice.explained"
+
+    static var last: SendChoice? {
+        UserDefaults.standard.string(forKey: lastKey).flatMap(SendChoice.init(rawValue:))
+    }
+
+    static func remember(_ choice: SendChoice) { UserDefaults.standard.set(choice.rawValue, forKey: lastKey) }
+
+    static var explained: Bool { UserDefaults.standard.bool(forKey: explainedKey) }
+
+    static func markExplained() { UserDefaults.standard.set(true, forKey: explainedKey) }
 }

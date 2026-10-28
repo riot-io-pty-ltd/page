@@ -92,9 +92,9 @@ struct NWHoldSurface<Content: View>: View {
             return
         }
         let from = progress
-        // Back the way it came, at the speed it filled; nothing was sent.
+        // Back the way it came, at the fill speed but never longer than maxUnwind; nothing was sent.
         if reduceMotion || from <= 0 { progress = 0 }
-        else { withAnimation(.linear(duration: from * spec.fill)) { progress = 0 } }
+        else { withAnimation(.linear(duration: from * min(spec.fill, HoldRingSpec.maxUnwind))) { progress = 0 } }
     }
 }
 
@@ -102,17 +102,16 @@ struct NWHoldSurface<Content: View>: View {
 /// "hold ring": the red button alone at first; after 300 ms a ring appears
 /// and fills clockwise over 1.2 s, amber warming to red only in its final
 /// third, with haptic ticks at 25%, 50% and 75% (firm at 100%); full, the
-/// core turns to Face ID; once biometrics pass (`burstStart`), a burst of
-/// light leaves the ring. The burst means committed, never delivered: the
-/// Receipt thread below says that. Letting go early unwinds the ring
-/// backwards. VoiceOver users get a "Confirm" action instead of a hold (the
-/// biometric check still follows).
+/// core turns green-teal and its Face ID glyph bounces once (biometrics
+/// next); once biometrics pass (`burstStart`), a burst of light leaves the
+/// ring. The burst means committed, never delivered: the Receipt thread
+/// below says that. Letting go early unwinds the ring backwards. VoiceOver
+/// users get a "Confirm" action instead of a hold (the biometric check
+/// still follows).
 struct NWHoldRing: View {
     var spec: HoldRingSpec
-    /// Shown in the core when the ring is full (the biometric next).
+    /// The glyph in the core, at rest too: what follows the hold.
     var symbol = "faceid"
-    /// Shown in the core while holding.
-    var holdSymbol = "hand.raised"
     var size: CGFloat = 132
     /// Draws this progress instead of tracking a press (the render harness).
     var fixedProgress: Double? = nil
@@ -121,6 +120,9 @@ struct NWHoldRing: View {
     var onComplete: () -> Void
 
     @Environment(\.nwMotion) private var pin
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Counts the ring filling, for the glyph's one bounce (never on the way back down).
+    @State private var filled = 0
 
     var body: some View {
         NWHoldSurface(spec: spec, fixedProgress: burstStart != nil ? 1 : fixedProgress, onComplete: onComplete) { shown in
@@ -150,8 +152,8 @@ struct NWHoldRing: View {
         // Red is the class colour of the button; green-teal once it is full and biometrics are next.
         let core = full ? NightWatch.Palette.green.mixed(with: NightWatch.Palette.teal, 0.25) : NightWatch.Palette.red
         return ZStack {
-            // The track appears only once the ring does (after the dead zone).
-            Circle().stroke(Color.white.opacity(shown > 0 ? 0.08 : 0), lineWidth: 14)
+            // The track appears only once the ring does (after the dead zone): a dim red the arc fills (board 33).
+            Circle().stroke(NightWatch.Palette.red.opacity(shown > 0 ? 0.20 : 0).color, lineWidth: 14)
                 .frame(width: size, height: size)
             Circle()
                 .trim(from: 0, to: CGFloat(shown))
@@ -159,17 +161,19 @@ struct NWHoldRing: View {
                 .rotationEffect(.degrees(-90))
                 .frame(width: size, height: size)
                 .shadow(color: tone.opacity((full ? 0.75 : 0.5) * shown).color, radius: full ? 16 : 10)
-            Circle()
-                .fill(RadialGradient(colors: [core.opacity(0.98).color, core.opacity(0.82).color],
-                                     center: .center, startRadius: 0, endRadius: size * 0.36))
+            // The core is a soft rounded square (board 33), not a disc.
+            RoundedRectangle(cornerRadius: size * 0.31 * 0.46, style: .continuous)
+                .fill(LinearGradient(colors: [core.opacity(0.98).color, core.opacity(0.84).color], startPoint: .top, endPoint: .bottom))
                 .frame(width: size * 0.62, height: size * 0.62)
                 .scaleEffect(1 + 0.04 * shown)
                 .shadow(color: core.opacity(full ? 0.5 : 0.25).color, radius: full ? 14 : 8)
-            Image(systemName: full ? symbol : holdSymbol)
-                .font(.system(size: size * 0.24, weight: .regular))
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.32, weight: .regular))
                 .foregroundColor(NightWatch.Palette.onBright.color)
-                .contentTransition(.symbolEffect(.replace))
+                // Full: one bounce as the core turns, biometrics next.
+                .symbolEffect(.bounce, value: filled)
         }
+        .onChange(of: full) { _, now in if now, !reduceMotion { filled += 1 } }
         .frame(width: size + 20, height: size + 20)
     }
 
@@ -189,35 +193,41 @@ struct NWHoldRing: View {
     }
 }
 
-/// "Hold to approve" as a button on a card: a small ring fills beside the
-/// label while the finger stays down (an Irreversible approve is 1.2 s, then
-/// Face ID / Touch ID / passcode). A tap does nothing but say how to use it.
+/// "Hold to approve" as a button on a card: a filled red button with the
+/// Face ID glyph (board 06); while the finger stays down a warmer fill
+/// sweeps across it (an Irreversible approve is 1.2 s, then Face ID / Touch
+/// ID / passcode). A tap does nothing but say how to use it.
 struct NWHoldButton: View {
     var label = "Hold to approve"
+    /// What follows the hold.
+    var symbol = "faceid"
     var fixedProgress: Double? = nil
     var onComplete: () -> Void
 
     var body: some View {
         NWHoldSurface(spec: .irreversible, fixedProgress: fixedProgress, onComplete: onComplete) { p in
-            let tone = NightWatch.Palette.amber.mixed(with: NightWatch.Palette.red, HoldRingSpec.warmth(progress: p))
+            // Warmest as it starts, settling into the red as it fills.
+            let tone = NightWatch.Palette.red.mixed(with: NightWatch.Palette.amber, 0.35 * (1 - HoldRingSpec.warmth(progress: p)))
+            let shape = RoundedRectangle(cornerRadius: NightWatch.Radius.button, style: .continuous)
             HStack(spacing: 10) {
-                ZStack {
-                    Circle().stroke(NightWatch.Palette.red.opacity(0.3).color, lineWidth: 3)
-                    Circle().trim(from: 0, to: CGFloat(max(0.02, p)))
-                        .stroke(p > 0 ? tone.color : NightWatch.Palette.red.color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                }
-                .frame(width: 24, height: 24)
+                Image(systemName: symbol)
+                    .font(.system(size: 20, weight: .regular))
+                    .frame(width: 24, height: 24)
                 Text(label)
                     .font(NightWatch.Typo.button)
-                    .foregroundColor(NightWatch.Palette.textPrimary.color)
                     .lineLimit(1).minimumScaleFactor(0.8)
             }
+            .foregroundColor(NightWatch.Palette.onBright.color)
             .frame(maxWidth: .infinity, minHeight: 52)
-            .background(RoundedRectangle(cornerRadius: NightWatch.Radius.button, style: .continuous)
-                .fill(NightWatch.Palette.red.opacity(0.14 + 0.10 * p).color))
-            .overlay(RoundedRectangle(cornerRadius: NightWatch.Radius.button, style: .continuous)
-                .strokeBorder(NightWatch.Palette.red.opacity(0.45).color, lineWidth: 1))
+            .background(
+                NightWatch.Palette.red.color
+                    .overlay(alignment: .leading) {
+                        GeometryReader { geo in
+                            Rectangle().fill(tone.opacity(0.85).color)
+                                .frame(width: geo.size.width * CGFloat(MotionCurve.clamp01(p)))
+                        }
+                    }
+                    .clipShape(shape))
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(label))

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import PhotosUI
 
 /// The Session Room, live. It keeps what the old session screen did: it tells
 /// the Mac it is watching (re-sent every 30 s, which is what makes the Mac
@@ -14,7 +15,8 @@ import UIKit
 ///   it is never sent as session input;
 /// - Approve, Deny and Looks good on the pinned page are the same
 ///   `ActionCoordinator` calls Now makes;
-/// - Stop is `SessionStore.interrupt`, behind a 0.6 s hold.
+/// - Stop is `SessionStore.interrupt`, behind a 0.6 s hold;
+/// - photos (`images-v1`) are picked, re-encoded here and sent with `SessionStore.sendPhotos`.
 ///
 /// The drawing is `NWSessionRoom`.
 struct SessionRoomContainer: View {
@@ -44,6 +46,14 @@ struct SessionRoomContainer: View {
     @State private var focusComposer = false
     /// Opened with Stop: the room says what holding its stop button does, for a few seconds.
     @State private var stopHint = false
+    /// The last "Now" / "When it finishes" choice (kept per device).
+    @State private var lastChoice: SendChoice? = SendChoiceMemory.last
+    /// The one-line explanations under the choice are done with.
+    @State private var choiceExplained = SendChoiceMemory.explained
+    /// A Yes or No in its 1.2 s ring: nothing is sent until it runs out, and Cancel works.
+    @State private var yesNoArm: YesNoArm?
+    /// The photos in the composer: picked, then re-encoded (no metadata) before Send is allowed.
+    @State private var photos: [PhotoDraftItem] = []
 
     struct AgentRef: Identifiable, Equatable {
         let runId: String
@@ -78,6 +88,7 @@ struct SessionRoomContainer: View {
         .onAppear {
             if let live { snapshot = live }
             requestChanges()
+            applyRestoredDraft()
             // How the row that opened this room asked for it (Screen, Type, Stop). Read once.
             let entry = router.takeRoomEntry(for: sessionId)
             if entry != .story {
@@ -85,6 +96,10 @@ struct SessionRoomContainer: View {
                 focusComposer = entry.focusesComposer
                 stopHint = entry.showsStopHint
             }
+        }
+        // A countdown the app slept through or was killed on: the message is back, with a note it was never sent.
+        .onChange(of: sessions.restoredDrafts[OutboxRestore.scope(sessionId: sessionId)]) { _, d in
+            if d != nil { applyRestoredDraft() }
         }
         .task(id: stopHint) {
             guard stopHint else { return }
@@ -121,7 +136,8 @@ struct SessionRoomContainer: View {
 
     // MARK: Room
 
-    private func room(now: Date) -> some View {
+    /// The room as it stands right now: what the stores say, the page row and the data built from them.
+    private func roomState(now: Date) -> (data: SessionRoomData, row: NowRow?) {
         let s = session!
         let presence = MacPresence.evaluate(api.macStatus, now: Date())
         let availability = sessions.availability(presence: presence, socketConnected: api.connection == .connected, now: Date())
@@ -150,12 +166,40 @@ struct SessionRoomContainer: View {
         inputs.dismissedReceipt = dismissedReceipt
         inputs.pageIsHook = page?.isBlockingHook ?? false
         inputs.pageContext = page?.context
+        inputs.caps = sessions.macCaps
+        inputs.lastChoice = lastChoice
+        inputs.choiceExplained = choiceExplained
+        inputs.retractNotes = sessions.retractNotes
+        inputs.yesNoArm = yesNoArm
+        inputs.photos = photos
+        inputs.putBackId = sessions.puttableBackPhotoMessage(sessionId: sessionId)
         if let ask = s.ask { inputs.answerDelivery = sessions.latestAnswer(for: sessionId, promptKey: ask.id) }
-        let data = SessionRoomData.make(inputs)
+        return (SessionRoomData.make(inputs), row)
+    }
+
+    private func room(now: Date) -> some View {
+        let (data, row) = roomState(now: now)
         return NWSessionRoom(data: data, actions: actions(row: row, data: data),
                              lens: Binding(get: { RoomLens.resolve(lens, offered: data.lenses) }, set: { setLens($0) }),
                              draft: $draft, runId: $runId, focusComposer: focusComposer, stopHint: stopHint)
             .onChange(of: draft) { _, _ in if composerProblem != nil { composerProblem = nil } }
+            // The ring on a tapped Yes or No: when it runs out the word goes the way a typed message does.
+            .task(id: yesNoArm?.countdown.startedAt) {
+                guard let arm = yesNoArm else { return }
+                try? await Task.sleep(nanoseconds: UInt64((arm.countdown.remaining(now: Date()) + 0.02) * 1_000_000_000))
+                guard !Task.isCancelled, yesNoArm == arm else { return }
+                yesNoArm = nil
+                // Read fresh: the room this task started with is 1.2 s old (the session may have ended, the page been answered).
+                guard session != nil else { return }
+                let fresh = roomState(now: Date())
+                send(arm.word, data: fresh.data, row: fresh.row)
+            }
+    }
+
+    private func applyRestoredDraft() {
+        guard let restored = sessions.takeRestoredDraft(scope: OutboxRestore.scope(sessionId: sessionId)) else { return }
+        draft = DraftRestore.merge(restored: restored.text, current: draft)
+        composerProblem = restored.note
     }
 
     private func setLens(_ l: RoomLens) {
@@ -182,6 +226,30 @@ struct SessionRoomContainer: View {
             sessions.interrupt(sessionId: sessionId, target: data.target)
         }
         a.dismissReceipt = { dismissedReceipt = $0 }
+        a.setChoice = { choice in lastChoice = choice; SendChoiceMemory.remember(choice) }
+        // Undo: nothing was sent, and the words go back in the box (above anything typed since).
+        a.undoSend = { id in
+            if let text = sessions.undoSend(clientId: id) { draft = DraftRestore.merge(restored: text, current: draft) }
+        }
+        a.deleteHeld = { id in sessions.deleteHeld(clientId: id, sessionId: sessionId) }
+        a.pickPhotos = { addPhotos($0) }
+        a.removePhoto = { id in photos.removeAll { $0.id == id } }
+        a.photoBlocked = { composerProblem = $0 }
+        a.putBackPhotos = { id in
+            guard let back = sessions.takeBackPhotos(clientId: id) else { return }
+            draft = DraftRestore.merge(restored: back.text, current: draft)
+            photos = Array((back.photos.map { PhotoDraftItem(id: $0.id, phase: .ready($0)) } + photos).prefix(PhotoLimits.maxPhotos))
+            composerProblem = nil
+        }
+        a.armReply = { word in
+            // The same checks as Send, before the ring starts: a refusal says why now, not 1.2 s later (as Android).
+            let decision = RoomSend.decide(mode: data.composer, text: word, shown: data.session, routeSessionId: sessionId,
+                                           live: live, ended: ended, hasReplyAction: row?.action(.tellInstead) != nil, macName: macName,
+                                           photos: 0)
+            if case .refuse(let why) = decision { composerProblem = why; return }
+            if yesNoArm == nil { composerProblem = nil; yesNoArm = YesNoArm(word: word, startedAt: Date()) }
+        }
+        a.cancelArm = { yesNoArm = nil }
         // The answers go with what the room showed (folder, terminal, Mac): the Mac refuses on a mismatch.
         a.submitAnswers = { sheet in
             // A page Claude's question hook holds takes the answers as text, which the hook maps: nothing is pressed.
@@ -219,11 +287,14 @@ struct SessionRoomContainer: View {
     /// session typed into is the one the header drew (`data.session`), carried
     /// as the target so the Mac can refuse if that is not what it has.
     private func send(_ text: String, data: SessionRoomData, row: NowRow?) {
+        if PhotoDraft.anyEncoding(photos) { composerProblem = "Your photos are still being prepared."; return }
+        let outgoing = PhotoDraft.prepared(photos)
         let decision = RoomSend.decide(mode: data.composer, text: text, shown: data.session, routeSessionId: sessionId,
-                                       live: live, ended: ended, hasReplyAction: row?.action(.tellInstead) != nil, macName: macName)
+                                       live: live, ended: ended, hasReplyAction: row?.action(.tellInstead) != nil, macName: macName,
+                                       photos: outgoing.count)
         if case .refuse(let why) = decision { composerProblem = why; return }
         // One Return can arrive twice (the field's submit and its trailing newline): type it once.
-        if DraftSubmit.isDuplicate(text: text, last: lastSend, now: Date()) { return }
+        if outgoing.isEmpty, DraftSubmit.isDuplicate(text: text, last: lastSend, now: Date()) { return }
         switch decision {
         case .refuse:
             break
@@ -236,16 +307,63 @@ struct SessionRoomContainer: View {
             coordinator.begin(row: row, kind: .tellInstead, text: text) { outcome in
                 if case .accepted = outcome { draft = "" }
             }
+        case .input(let target) where !outgoing.isEmpty:
+            // Photos: an idle session only, and no countdown (the upload is the wait). The photos stay in memory only.
+            if let problem = sessions.sendPhotos(sessionId: sessionId, text: text, photos: outgoing, target: target, attach: data.session.attach) {
+                composerProblem = problem
+                return
+            }
+            lastSend = nil
+            draft = ""
+            photos = []
+            composerProblem = nil
+            dismissedReceipt = nil
         case .input(let target):
-            if let problem = sessions.sendInput(sessionId: sessionId, text: text, target: target) {
+            // A message to a busy session is held on the Mac (when it finishes) or waits 10 s with Undo (now).
+            let choice = data.choice
+            if let problem = sessions.sendInput(sessionId: sessionId, text: text, target: target, hold: choice.holds,
+                                                countdown: choice.countsDown ? SendCountdown.sendNow : nil) {
                 composerProblem = problem.message
                 return
             }
+            if choice.offersChoice, !choiceExplained { choiceExplained = true; SendChoiceMemory.markExplained() }
             lastSend = (text, Date())
             draft = ""
             composerProblem = nil
             dismissedReceipt = nil
         }
+    }
+
+    // MARK: Photos
+
+    /// The picker handed over photos: each is decoded and re-encoded here, one at a time (the room left for the
+    /// next depends on what the others took), and Send waits until every one is ready.
+    private func addPhotos(_ items: [PhotosPickerItem]) {
+        let picked = Array(items.prefix(PhotoDraft.slots(photos)))
+        guard !picked.isEmpty else { return }
+        let ids = picked.map { _ in UUID().uuidString.lowercased() }
+        photos += ids.map { PhotoDraftItem(id: $0, phase: .encoding) }
+        composerProblem = nil
+        Task {
+            for (id, item) in zip(ids, picked) {
+                guard photos.contains(where: { $0.id == id }) else { continue }  // removed while waiting
+                let loaded = try? await item.loadTransferable(type: Data.self)
+                guard photos.contains(where: { $0.id == id }) else { continue }
+                guard let loaded else { drop(id, "Page couldn't read that photo."); continue }
+                let budget = PhotoEncoder.budget(used: PhotoDraft.usedBytes(photos))
+                let result = await Task.detached(priority: .userInitiated) { PhotoEncoder.prepare(loaded, budget: budget) }.value
+                guard let i = photos.firstIndex(where: { $0.id == id }) else { continue }
+                switch result {
+                case .success(let photo): photos[i].phase = .ready(photo)
+                case .failure(let why): drop(id, why.message)
+                }
+            }
+        }
+    }
+
+    private func drop(_ id: String, _ why: String) {
+        photos.removeAll { $0.id == id }
+        composerProblem = why
     }
 
     // MARK: Placeholder

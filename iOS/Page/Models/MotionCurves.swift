@@ -60,6 +60,37 @@ enum MotionCurve {
     }
 }
 
+/// The clock as a shader takes it. The views run on reference-date seconds
+/// (about 8.2e8 now), and a 32-bit float that large moves only in 64 s
+/// steps: handed over as it is, the aurora, its stars and the pulse's ring
+/// wobble stand still. Wrapped to a day where it goes into the shader it
+/// moves in steps of about 8 ms, with one jump a day (at midnight UTC). The
+/// clock itself is never rebased: the Horizon measures its one-shots
+/// against it. The harness's small pinned times pass through unchanged.
+enum ShaderClock {
+    static let wrap: Double = 86_400
+
+    /// `t` seconds as the shader's `time` argument. Pure.
+    static func seconds(_ t: Double) -> Float {
+        let r = t.truncatingRemainder(dividingBy: wrap)
+        return Float(r < 0 ? r + wrap : r)
+    }
+}
+
+/// When each one-shot first started, by key: the first ask records `now`,
+/// every later ask gets that same moment back, so a motion keyed by it
+/// plays once however often its view is rebuilt (the Return Brief's sunrise,
+/// once per absence). Pure.
+struct OneShotBook: Equatable {
+    private(set) var starts: [String: Double] = [:]
+
+    mutating func start(_ key: String, now: Double) -> Double {
+        if let s = starts[key] { return s }
+        starts[key] = now
+        return now
+    }
+}
+
 /// Colour blends for the exhale, through OKLCH (lightness, chroma, hue) the
 /// shorter way round the hue wheel. A plain sRGB blend between two colours
 /// from opposite sides of the wheel, amber and teal, sinks through khaki and

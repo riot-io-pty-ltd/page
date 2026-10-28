@@ -32,6 +32,18 @@ struct NWAnimated<Content: View>: View {
     }
 }
 
+/// The curtains' phase at clock time `seconds`: the boards' u_speed (0.4 at a
+/// palette speed of 1) accumulated by the view's `AuroraPhaseClock`, so a
+/// time-of-day tick, a mood change or the exhale changes the pace without a
+/// jump. A still frame (the harness's pinned time, Reduce Motion) is the plain
+/// product, so a pinned frame is the same frame every time.
+enum NWAuroraPhase {
+    static func at(_ seconds: Double, palette: NightWatch.AuroraPalette, clock: AuroraPhaseClock, still: Bool) -> Double {
+        let rate = 0.4 * palette.speed
+        return still ? seconds * rate : clock.advance(to: seconds, rate: rate)
+    }
+}
+
 /// The aurora itself: a sky gradient, soft ribbons that drift, upward rays
 /// and a scatter of stars. `seconds` moves it; the palette's `intensity`
 /// scales it (0 draws only the sky, as at dusk).
@@ -40,8 +52,14 @@ struct NWAuroraCanvas: View {
     var seconds: Double
     /// How much of the star field is left: it fades with the dusk, as the shader's does.
     var starField: Double = 1
+    @Environment(\.nwFixedPhase) private var fixed
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The ribbons' phase, accumulated so a change of speed never jumps them.
+    @State private var clock = AuroraPhaseClock()
 
     var body: some View {
+        // Read once per draw, outside the Canvas closure.
+        let t = NWAuroraPhase.at(seconds, palette: palette, clock: clock, still: fixed != nil || reduceMotion)
         Canvas { ctx, size in
             let w = size.width, h = size.height
             ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .linearGradient(
@@ -49,7 +67,6 @@ struct NWAuroraCanvas: View {
                 startPoint: .zero, endPoint: CGPoint(x: 0, y: h)))
             guard palette.intensity > 0 else { stars(ctx, w, h, 0.3 * starField); return }
 
-            let t = seconds * 0.4 * palette.speed
             let k = palette.intensity
 
             // Ribbons: soft wavy bands across the header.

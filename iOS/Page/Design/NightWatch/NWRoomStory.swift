@@ -77,11 +77,16 @@ struct NWRoomStory: View {
         case .divider(_, let label):
             NWStoryDivider(label: label)
         case .user(let entry, let delivery):
-            NWUserBubble(text: entry.text, delivery: delivery, pending: false, agent: data.character.name,
+            NWUserBubble(text: entry.displayText, photos: entry.photoCount, delivery: delivery, pending: false, agent: data.character.name,
                          pageId: data.session.interventionId, onOpenDecision: actions.openDecision, onCopy: actions.copy)
         case .pending(let c):
-            NWUserBubble(text: c.text, delivery: c, pending: true, agent: data.character.name,
-                         pageId: data.session.interventionId, onOpenDecision: actions.openDecision, onCopy: actions.copy)
+            NWUserBubble(text: c.text, photos: c.photos?.count ?? 0, delivery: c, pending: true, agent: data.character.name,
+                         pageId: data.session.interventionId, onOpenDecision: actions.openDecision, onCopy: actions.copy,
+                         onPutBack: data.putBackId == c.clientId ? actions.putBackPhotos : nil,
+                         // The newest message's receipt (above the field) carries its own Delete: not twice.
+                         canDelete: data.canDeleteHeld && !c.state.isHeldTyping && data.receipt?.id != c.clientId, note: data.retractNotes[c.clientId],
+                         onDelete: actions.deleteHeld,
+                         canUndo: SendReceipt.bubbleOffersUndo(c, receiptId: data.receipt?.id), onUndo: actions.undoSend)
         case .assistant(let e):
             HStack(alignment: .top, spacing: 12) {
                 NWAgentGlyph(character: data.character, size: 34)
@@ -182,28 +187,44 @@ struct NWStoryDivider: View {
 /// refusal says why and, for a waiting prompt, offers the decision.
 struct NWUserBubble: View {
     var text: String
+    /// Photos the message carried (`images-v1`): a chip on the bubble.
+    var photos = 0
     var delivery: SentSessionCommand?
     var pending: Bool
     var agent: String
     var pageId: String?
     var onOpenDecision: (String) -> Void
     var onCopy: (String) -> Void
+    /// A refused photo message, back into the message box (its photos are still held).
+    var onPutBack: ((String) -> Void)? = nil
+    /// Delete, offered on a held message whose receipt isn't already carrying one (`retract-v1`).
+    var canDelete = false
+    var note: RetractNote? = nil
+    var onDelete: (String) -> Void = { _ in }
+    /// Undo, offered on any message still counting down whose receipt isn't carrying one: not just the newest.
+    var canUndo = false
+    var onUndo: (String) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 6) {
             HStack {
                 Spacer(minLength: 56)
-                Text(text)
-                    .font(.system(.body)).foregroundColor(NightWatch.Palette.textPrimary.color)
-                    .padding(.horizontal, 18).padding(.vertical, 14)
-                    .background(UnevenRoundedRectangle(topLeadingRadius: 24, bottomLeadingRadius: 24, bottomTrailingRadius: 8, topTrailingRadius: 24, style: .continuous)
-                        .fill(NightWatch.Palette.sky.mixed(with: NightWatch.Palette.backgroundDeep, pending ? 0.88 : 0.74).color))
-                    .textSelectionIfAvailable()
-                    .contextMenu { Button { onCopy(text) } label: { Label("Copy", systemImage: "doc.on.doc") } }
+                VStack(alignment: .leading, spacing: text.isEmpty ? 0 : 8) {
+                    if photos > 0 { NWPhotoChip(count: photos) }
+                    if !text.isEmpty {
+                        Text(text)
+                            .font(.system(.body)).foregroundColor(NightWatch.Palette.textPrimary.color)
+                            .textSelectionIfAvailable()
+                    }
+                }
+                .padding(.horizontal, 18).padding(.vertical, 14)
+                .background(UnevenRoundedRectangle(topLeadingRadius: 24, bottomLeadingRadius: 24, bottomTrailingRadius: 8, topTrailingRadius: 24, style: .continuous)
+                    .fill(NightWatch.Palette.sky.mixed(with: NightWatch.Palette.backgroundDeep, pending ? 0.88 : 0.74).color))
+                .contextMenu { if !text.isEmpty { Button { onCopy(text) } label: { Label("Copy", systemImage: "doc.on.doc") } } }
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel(Text("You: \(text)"))
-            .accessibilityValue(Text(delivery.map { $0.state.spokenBubbleStatus(.input, agent: agent) } ?? ""))
+            .accessibilityLabel(Text("You: \(text)" + (photos > 0 ? (text.isEmpty ? "" : ", ") + PhotoDraft.countLabel(photos) : "")))
+            .accessibilityValue(Text(delivery.map { $0.spokenStatus(agent: agent) } ?? ""))
             if let delivery { deliveryLine(delivery) }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -215,16 +236,20 @@ struct NWUserBubble: View {
         let icon: String?
         switch state {
         case .sending: color = NightWatch.Palette.textTertiary; icon = nil
+        case .counting: color = NightWatch.Palette.textTertiary; icon = "clock"
+        case .held: color = NightWatch.Palette.sky; icon = "clock"
+        case .deleted: color = NightWatch.Palette.textTertiary; icon = "trash"
+        case .unconfirmed: color = NightWatch.Palette.amber; icon = "questionmark.circle"
         case .typed: color = NightWatch.Palette.teal; icon = "checkmark"
         case .queued: color = NightWatch.Palette.textSecondary; icon = "clock"
         case .refused, .failed: color = NightWatch.Palette.amber; icon = "exclamationmark.triangle.fill"
         case .noAnswer: color = NightWatch.Palette.amber; icon = "questionmark.circle"
         }
-        let explanation = state.bubbleExplanation(.input, agent: agent)
+        let explanation = message.statusExplanation(agent: agent)
         return VStack(alignment: .trailing, spacing: 3) {
             HStack(spacing: 5) {
                 if let icon { Image(systemName: icon) } else { ProgressView().controlSize(.mini) }
-                Text(state.label(.input))
+                Text(message.statusLabel())
             }
             .font(.system(.caption2, weight: .semibold)).foregroundColor(color.color)
             .accessibilityHidden(true)
@@ -232,6 +257,29 @@ struct NWUserBubble: View {
                 Text(explanation).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
                     .multilineTextAlignment(.trailing).fixedSize(horizontal: false, vertical: true)
                     .accessibilityHidden(true)
+            }
+            if canUndo {
+                Button { onUndo(message.clientId) } label: {
+                    Text("Undo").font(NightWatch.Typo.captionStrong).foregroundColor(NightWatch.Palette.textPrimary.color)
+                        .padding(.horizontal, 10).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text("Nothing is sent and your message goes back in the message box."))
+            }
+            if case .held = state, canDelete || note != nil {
+                NWHeldActions(clientId: message.clientId, note: note, canDelete: canDelete, onDelete: onDelete)
+            }
+            if let onPutBack, message.photos != nil {
+                switch state {
+                case .refused, .failed:
+                    Button { onPutBack(message.clientId) } label: {
+                        Text("Put it back in the message box").font(NightWatch.Typo.captionStrong).foregroundColor(NightWatch.Palette.textPrimary.color)
+                            .padding(.horizontal, 6).frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(Text("Your photos and caption go back in the message box to send again."))
+                default: EmptyView()
+                }
             }
             if case .refused(let reason, _) = state, reason == "waiting", let pageId {
                 Button("Open decision") { onOpenDecision(pageId) }

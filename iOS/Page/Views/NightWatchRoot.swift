@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The root of the paired app: Now and Lanes, the capsule with the pulse, and
 /// every sheet. Two places and one verb; sessions are rooms and Settings is
@@ -19,7 +20,7 @@ struct NightWatchRoot: View {
         NWShell(destination: $router.destination,
                 decideCount: api.inbox.filter { NowRowBuilder.section(of: $0) == .decide }.count,
                 workingCount: sessions.hasList ? sessions.sessions.filter { $0.state == .active }.count : (api.macStatus?.working ?? 0),
-                pulseWaiting: pulse.waiting, pulseLongestWait: pulse.longestWait,
+                pulseWaiting: pulse.waiting, pulseLongestWait: PulseModel.pacedWait(pulse.longestWait),
                 stop: stop.phase, stopPlan: busy, biometry: BiometricGate.displayName, held: $held,
                 onPulseTap: { router.openDispatch() },
                 onPulseHold: { stop.holdCompleted(plan: busy) }) {
@@ -29,6 +30,7 @@ struct NightWatchRoot: View {
         }
         // Set on the shell only, so the sheet that covers it keeps animating.
         .environment(\.nwAnimationsPaused, router.sheets.current != nil)
+        .modifier(NWDaypartTicker())
         .preferredColorScheme(.dark)
         .ignoresSafeArea(.keyboard)
         .task {
@@ -51,6 +53,38 @@ struct NightWatchRoot: View {
         } message: {
             Text(UnpairCopy.message)
         }
+    }
+}
+
+/// The time of day for the Now and Lanes skies (`\.nwDaypart`): read off the
+/// local clock on launch and on every return to the foreground (drawn at
+/// once, no catch-up blend), then every two minutes on the wall-clock grid
+/// while the app is active, and again whenever the clock or the time zone
+/// changes. Outside a blend window the weights compare equal, so a tick
+/// redraws nothing. Reduce Motion keeps it: it is colour, not motion.
+struct NWDaypartTicker: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var weights = DaypartWeights.at(Date())
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.nwDaypart, weights)
+            .task(id: scenePhase) {
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    let now = Date()
+                    let w = DaypartWeights.at(now)
+                    if w != weights { weights = w }
+                    let wait = DaypartClock.nextTick(after: now).timeIntervalSince(now)
+                    try? await Task.sleep(nanoseconds: UInt64(max(1, wait) * 1_000_000_000))
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+                weights = .at(Date())
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+                weights = .at(Date())
+            }
     }
 }
 

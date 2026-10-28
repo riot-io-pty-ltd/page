@@ -388,7 +388,8 @@ struct NWAnswerCard: View {
                 .padding(.horizontal, 12).padding(.vertical, 10)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(amber.opacity(0.10).color))
                 .accessibilityElement(children: .combine)
-            case .typed, .queued:
+            // Answers are never counted down, held or taken back.
+            case .typed, .queued, .counting, .held, .deleted, .unconfirmed:
                 EmptyView()
             }
         }

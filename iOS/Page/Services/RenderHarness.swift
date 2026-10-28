@@ -13,13 +13,16 @@ import SwiftUI
 enum RenderHarness {
     /// Every screen name, in the order the render script captures them.
     static let screens = [
-        "now", "now-quiet", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
+        "now", "now-quiet", "now-still", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
         "now-receipt", "now-banner", "now-new",
         "now-inflight", "now-inflight-long", "now-tip-undoable", "now-tip-irreversible", "now-tip-inflight",
         "now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-flight-quiet",
         "decision-irreversible", "decision-hold", "decision-considered", "decision-undoable", "decision-question", "decision-stuck",
         "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
         "decision-failed", "decision-tip",
+        "decision-review-long", "decision-review-kb", "decision-composer-kb", "decision-review-sending", "decision-review-resolved", "decision-review-yesno", "decision-review-yesno-kb",
+        "decision-review-realkb", "decision-composer-realkb",
+        "decision-steer-busy", "decision-steer-undo", "decision-queued-relay", "decision-queued-held",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
         "lanes", "lanes-crowded", "lanes-empty", "lanes-problem", "lanes-standby", "lanes-paused",
         "tower", "tower-budget", "tower-glow", "tower-terminals", "tower-gestures",
@@ -27,7 +30,9 @@ enum RenderHarness {
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
-        "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
+        "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused", "room-yesno", "room-yesno-draft",
+        "room-yesno-arm", "room-queue-choice", "room-queue-undo", "room-queue-held", "room-queue-bubbles",
+        "room-photos-composer", "room-photos-path", "room-photos-busy", "room-photos-uploading", "room-photos-bubble",
         "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
         "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
         "widgets",
@@ -85,12 +90,40 @@ enum RenderFixtures {
             return open[2]
         case "decision-review":
             return open[3]
+        case "decision-queued-relay", "decision-queued-held":
+            // A short command, so the queue block sits in the pinned bottom area where it is in view.
+            return open[1]
+        case "decision-steer-busy", "decision-steer-undo":
+            return open[2]
+        case "decision-review-yesno", "decision-review-yesno-kb":
+            // A finished turn that ends on a plain-text yes/no question.
+            return iv("r2", "mac-on-claude-code", .idle,
+                      "Changed 3 files (+120 −14) · tests passed\n\nI sort by id as well now, and ran the suite five times: all green. The change is small and only touches the reply planner.\n\nShould I go ahead and commit?", ago: 120)
+        case "decision-review-long", "decision-review-kb", "decision-review-sending", "decision-review-resolved", "decision-review-realkb":
+            // A finished turn with the whole reply: the page Steer lives on, and the one that buried its composer.
+            return iv("r1", "mac-on-claude-code", .idle,
+                      "Changed 3 files (+120 −14) · tests passed\n\n" + longReply, ago: 120)
         case "decision-undoable":
             return open[1]
         default:
             return open[0]
         }
     }
+
+    /// A long finished-turn reply, as the Mac sends it (the end of the reply is kept).
+    static let longReply = """
+        I moved the relay's reply planner out of the router and into its own type, so the phone's custom text and the Mac's own replies go through one path.
+
+        What changed:
+        - Router.swift now only decides which session a reply belongs to.
+        - ReplyPlanner.swift builds the keystrokes: the text, then Return, with no Esc for an idle page.
+        - The sanitizer strips control characters and puts a space before a leading "!".
+        - Added tests for the planner, the sanitizer and the staleness check.
+
+        All 214 tests pass, and I ran the suite twice to be sure the ordering test is not flaky. The diff is small enough to read in one go, but it touches the hot path for every reply, so it is worth a look before it ships.
+
+        One thing I noticed while in there: the draft check for tmux panes reads the screen with colours, and a dim prompt suggestion is skipped. That is fine today, but it would be easy to break.
+        """
 
     private static func s(_ id: String, _ title: String, _ project: String, _ state: LiveSessionState, host: String = "cmux",
                           ago: TimeInterval, preview: String = "", iv: String? = nil, canType: Bool = true) -> LiveSession {
@@ -182,6 +215,7 @@ enum RenderFixtures {
         case "now-inflight-long": return pick(["sess-p2", "w1", "w2", "w3", "w5", "c2", "c3", "c5", "c7"], from: crowdedSessions)
         case "now-tip-undoable": return pick(["sess-p2"], from: sessions)
         case "now-tip-inflight": return pick(["w1", "w2"], from: sessions)
+        case "now-still": return sessions.filter { $0.state != .active && $0.state != .waitingOnApproval }
         default: return sessions
         }
     }
@@ -232,6 +266,10 @@ enum RenderFixtures {
         case "now-quiet", "now-brief-quiet":
             var st = status; st.working = 0; st.forecast = nil; st.usage = nil; st.onAC = true
             return NowModel.build(inputs(open: [], status: st, sessions: sessions.filter { $0.state != .waitingOnApproval }))
+        case "now-still":
+            // Truly quiet: nothing running and nothing waiting, so the Horizon draws the quiet sky.
+            var st = status; st.working = 0; st.forecast = nil; st.usage = nil; st.onAC = true
+            return NowModel.build(inputs(open: [], status: st, sessions: nowSessions(screen)))
         case "now-working":
             var st = status; st.onAC = true; st.forecast = nil
             return NowModel.build(inputs(open: [], status: st, sessions: sessions.filter { $0.state != .waitingOnApproval }))
@@ -311,7 +349,7 @@ enum RenderFixtures {
     static func nowData(_ screen: String) -> NowScreenData {
         let m = model(screen)
         var chipStatus = status
-        if screen == "now-quiet" || screen == "now-brief-quiet" || screen == "now-working" || screen == "now-flight-quiet" { chipStatus.onAC = true }
+        if ["now-quiet", "now-still", "now-brief-quiet", "now-working", "now-flight-quiet"].contains(screen) { chipStatus.onAC = true }
         var d = NowScreenData(model: m, log: log, chip: MacChipModel.build(macName: mac, status: chipStatus, now: now), now: now)
         d.inFlight = InFlightSection.build(sessions: nowSessions(screen), hasSessionList: true, now: now)
         // Only the tip screens show a tip, and the real picker chooses it: a fresh phone, the rows as staged.
@@ -353,6 +391,9 @@ enum RenderFixtures {
         return d
     }
 
+    /// The height of the keyboard the harness draws (an iPhone's, with its suggestions bar).
+    static let keyboardHeight: CGFloat = 336
+
     static func decision(_ screen: String) -> (state: DecisionScreenState, composer: Bool, draft: String) {
         let page = RenderFixtures.page(screen)
         let session = sessions.first { $0.id == page.sessionId }
@@ -365,6 +406,56 @@ enum RenderFixtures {
         case "decision-hold": st.fixedHold = 0.62
         case "decision-tip": st.tip = TipBook().decisionTip(hasPreview: row.focusPreview != nil)
         case "decision-composer": composer = true; draft = "Use the staging bucket instead"
+        case "decision-review-kb":
+            composer = true; draft = "Keep the sanitizer, but also add a test for a leading slash."
+            st.fixedKeyboard = keyboardHeight
+        case "decision-review-sending":
+            // The steer is arming (its 1.2 s ring): the composer stays, locked, with its progress and Cancel.
+            composer = true; draft = "Keep the sanitizer, but also add a test for a leading slash."
+            st.fixedKeyboard = keyboardHeight
+            st.pending = PendingAction(rowId: row.id, kind: .tellInstead, text: draft, commit: row.commit, startedAt: now.addingTimeInterval(-0.5),
+                                       armed: true, preview: row.action(.tellInstead)?.preview)
+            st.outcome = .arming(progress: 0.4)
+        case "decision-review-resolved":
+            // Answered at the Mac while this was being written: the sheet stays, with the message.
+            composer = true; draft = "Keep the sanitizer, but also add a test for a leading slash."
+            st.fixedKeyboard = keyboardHeight
+            st.phase = .resolved("This turn was answered at the Mac.")
+        case "decision-review-realkb":
+            composer = true; draft = "Keep the sanitizer, but also add a test for a leading slash."
+        case "decision-composer-realkb":
+            composer = true; draft = "Use the staging bucket instead"
+        case "decision-review-yesno":
+            st.fixedKeyboard = 0   // no keyboard: the sheet framed at its 0.92 detent, whatever the screen's height
+        case "decision-review-yesno-kb":
+            composer = true
+            st.fixedKeyboard = keyboardHeight
+        case "decision-composer-kb":
+            composer = true; draft = "Use the staging bucket instead"
+            st.fixedKeyboard = keyboardHeight
+        case "decision-steer-busy":
+            // A working session on a Mac that holds messages: Now or When it finishes, in front of the field.
+            composer = true; draft = "Check the retry count before you run it again."
+            st.sendChoice = SendChoicePlan.build(busy: true, canType: true, canHold: true, caps: ["hold-v1", "retract-v1"], last: nil)
+            st.explainChoice = true
+        case "decision-steer-undo":
+            // Send now was tapped 3 s ago: the message waits 10 s with Undo, and nothing has left the phone.
+            composer = true; draft = "Check the retry count before you run it again."
+            st.sendChoice = SendChoicePlan.build(busy: true, canType: true, canHold: true, caps: ["hold-v1", "retract-v1"], last: .now)
+            st.pending = PendingAction(rowId: row.id, kind: .tellInstead, text: draft, commit: row.commit, startedAt: now.addingTimeInterval(-3),
+                                       armed: true, preview: row.action(.tellInstead)?.preview, armDuration: SendCountdown.sendNow)
+            st.outcome = .arming(progress: 0.3)
+        case "decision-queued-relay":
+            // Sent while the Mac was offline: the relay holds it, and can give it back.
+            st.phase = .sent(queued: true, slow: false)
+            // (No thread strip in this frame, so the block and its Delete stay in view at the sim's height.)
+            st.queue = ReplyQueueStatus.build(.init(delivery: .sent(queued: true, at: now.addingTimeInterval(-90)), isHook: false,
+                                                    relayFeatures: ["sessions-v1", "reply-retract-v1"], macCaps: [], note: nil))
+        case "decision-queued-held":
+            // A reply to a rate-limit page, held on the Mac until the limit resets.
+            st.phase = .heldOnMac("Will send it when the limit resets at 3:00 PM")
+            st.queue = ReplyQueueStatus.build(.init(delivery: .heldOnMac(detail: "Will send it when the limit resets at 3:00 PM"), isHook: false,
+                                                    relayFeatures: ["sessions-v1", "reply-retract-v1"], macCaps: ["hold-v1", "retract-v1"], note: nil))
         case "decision-delivered":
             st.phase = .delivered(nil); st.outcome = .delivered("typed into cmux › page")
         case "decision-failed":
@@ -394,6 +485,10 @@ struct RenderHarnessRoot: View {
         .environment(\.nwFixedPhase, RenderHarnessMotion.phase(args))
         .environment(\.nwMotion, RenderHarnessMotion.pin(args))
         .environment(\.nwFixedNow, RenderHarness.now)
+        // A local minute of the day, never an instant: 01:12 unless pinned.
+        .environment(\.nwDaypart, .at(minuteOfDay: args.dayTime ?? Daypart.nighttime.coreMinute))
+        // `-NWGlass off`: the chrome as it is drawn without Liquid Glass.
+        .environment(\.nwLiquidGlass, args.glass)
         .environmentObject(glowStore)
         .preferredColorScheme(.dark)
     }
@@ -451,6 +546,7 @@ struct HarnessShell: View {
     let screen: String
     @State var destination: NWDestination
     @State private var held: TimeInterval?
+    @Environment(\.nwDaypart) private var daypart
 
     init(screen: String, destination: NWDestination) {
         self.screen = screen
@@ -492,6 +588,7 @@ struct HarnessShell: View {
         var d = LanesScreenData(fleet: fleet, lanes: LanesModel.build(sky: fleet, log: RenderFixtures.activity, now: RenderFixtures.now),
                                 now: RenderFixtures.now, standby: screen == "lanes-standby" ? RenderFixtures.macRows : [])
         if screen == "lanes-problem" { d.availability = SessionAvailabilityCopy(.needsRepair(keyMismatch: false)) }
+        d.daypart = daypart
         return d
     }
 }
@@ -511,14 +608,61 @@ struct HarnessDecision: View {
 
     var body: some View {
         let d = RenderFixtures.decision(screen)
-        VStack(spacing: 0) {
-            NWHorizon(palette: .needsYou, pulse: .needsYou, headline: "", subline: "", height: 230, topInset: 0).opacity(0.5)
-            Spacer(minLength: 0)
-            NWDecisionScreen(state: d.state, draft: $draft, composerOpen: $composer)
-                .background(NWDecisionBackground(tint: d.state.row.tint))
-                .frame(maxHeight: 650)
+        if let keyboard = d.state.fixedKeyboard {
+            // The sheet as it sits with the keyboard up: its 0.92 detent, with the keyboard covering the foot of it.
+            GeometryReader { geo in
+                VStack(spacing: 0) {
+                    NWHorizon(palette: .needsYou, pulse: .needsYou, headline: "", subline: "", height: 230, topInset: 0).opacity(0.5)
+                        .frame(height: geo.size.height * 0.08, alignment: .top).clipped()
+                    NWDecisionScreen(state: d.state, draft: $draft, composerOpen: $composer)
+                        .frame(height: geo.size.height * 0.92 - keyboard)
+                        .background(NWDecisionBackground(tint: d.state.row.tint))
+                    HarnessKeyboard().frame(height: keyboard)
+                }
+            }
+            .ignoresSafeArea()
+        } else if screen.hasSuffix("-realkb") {
+            // The real keyboard: the composer takes focus when it appears, the simulator raises its own keyboard, and it
+            // shrinks this view's safe area exactly as it shrinks a sheet's. Nothing here stands in for it.
+            ZStack(alignment: .top) {
+                NWHorizon(palette: .needsYou, pulse: .needsYou, headline: "", subline: "", height: 230, topInset: 0).opacity(0.5)
+                VStack(spacing: 0) {
+                    Color.clear.frame(height: UIScreen.main.bounds.height * 0.08)
+                    NWDecisionScreen(state: d.state, draft: $draft, composerOpen: $composer)
+                        .background(NWDecisionBackground(tint: d.state.row.tint))
+                }
+            }
+            .ignoresSafeArea(.container)
+        } else {
+            VStack(spacing: 0) {
+                NWHorizon(palette: .needsYou, pulse: .needsYou, headline: "", subline: "", height: 230, topInset: 0).opacity(0.5)
+                Spacer(minLength: 0)
+                NWDecisionScreen(state: d.state, draft: $draft, composerOpen: $composer)
+                    .background(NWDecisionBackground(tint: d.state.row.tint))
+                    .frame(maxHeight: 650)
+            }
+            // The keyboard (the composer's, when it is open) keeps its safe area, as it does under a real sheet.
+            .ignoresSafeArea(.container)
         }
-        .ignoresSafeArea()
+    }
+}
+
+/// A stand-in for the system keyboard. The harness cannot raise the real one (the simulator's software keyboard
+/// only shows when no hardware keyboard is attached), so this takes its place in the layout.
+struct HarnessKeyboard: View {
+    var body: some View {
+        ZStack {
+            Color(white: 0.16)
+            VStack(spacing: 10) {
+                ForEach(0..<4, id: \.self) { _ in
+                    HStack(spacing: 6) {
+                        ForEach(0..<10, id: \.self) { _ in RoundedRectangle(cornerRadius: 5).fill(Color(white: 0.30)).frame(height: 44) }
+                    }
+                }
+            }
+            .padding(.horizontal, 4).padding(.top, 16).frame(maxHeight: .infinity, alignment: .top)
+        }
+        .clipped()
     }
 }
 

@@ -62,32 +62,72 @@ enum NWSheet: Equatable, Identifiable {
     }
 }
 
+/// How a Decision sheet was asked to open: Steer on a card opens it with its
+/// message box up (one tap, not two). Asked once, and only briefly: a request
+/// older than `lifetime`, or for another page, is not this opening's. Pure.
+struct DecisionEntry: Equatable {
+    let id: String
+    let at: Date
+
+    static let lifetime: TimeInterval = 5
+
+    static func wantsComposer(_ entry: DecisionEntry?, for id: String, now: Date) -> Bool {
+        guard let entry, entry.id == id else { return false }
+        let age = now.timeIntervalSince(entry.at)
+        return age >= 0 && age < lifetime
+    }
+}
+
 /// One sheet at a time. Asking for another while one is up closes the first,
 /// and the new one appears once the first has finished dismissing (SwiftUI
 /// cannot present over a sheet that is still leaving). Pure.
 struct SheetQueue: Equatable {
     private(set) var current: NWSheet?
     private(set) var pending: NWSheet?
+    /// The sheet that is up holds a message its writer hasn't sent: another sheet asked for meanwhile
+    /// waits (`deferred`) for the person's answer, rather than closing the first over the text.
+    private(set) var draftHeld: NWSheet?
+    private(set) var deferred: NWSheet?
 
     init(current: NWSheet? = nil) { self.current = current }
 
-    /// Asks for a sheet. Asking for the one already up does nothing.
+    /// The open sheet reports whether it holds an unsent message.
+    mutating func setDraft(_ held: Bool) { draftHeld = held ? current : nil }
+
+    /// Asks for a sheet. Asking for the one already up does nothing. A sheet that holds an unsent message
+    /// is not closed by another request: that request waits for `resolveDeferred`.
     mutating func request(_ sheet: NWSheet) {
         if current == sheet { pending = nil; return }
+        if let cur = current, draftHeld == cur { deferred = sheet; return }
+        show(sheet)
+    }
+
+    private mutating func show(_ sheet: NWSheet) {
+        if current == sheet { pending = nil; return }
         if current != nil { pending = sheet; current = nil } else { current = sheet; pending = nil }
+    }
+
+    /// The person answered "Discard your message?": discard shows the sheet that asked, keep drops its request.
+    mutating func resolveDeferred(discard: Bool) {
+        let next = deferred
+        deferred = nil
+        guard discard, let next else { return }
+        draftHeld = nil
+        show(next)
     }
 
     /// The system finished dismissing a sheet: bring up whatever was waiting.
     mutating func dismissed() {
         if let next = pending { pending = nil; current = next }
+        if current != draftHeld { draftHeld = nil }
     }
 
     /// The user dismissed the sheet (a swipe down, a close button).
-    mutating func close() { current = nil; pending = nil }
+    mutating func close() { current = nil; pending = nil; draftHeld = nil; deferred = nil }
 
     /// Binds to `.sheet(item:)`: setting nil closes.
     mutating func set(_ sheet: NWSheet?) {
-        if let sheet { request(sheet) } else if pending == nil { current = nil }
+        if let sheet { request(sheet) } else if pending == nil { current = nil; draftHeld = nil; deferred = nil }
     }
 }
 

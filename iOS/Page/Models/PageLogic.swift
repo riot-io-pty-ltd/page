@@ -332,6 +332,11 @@ enum ReplyDelivery: Equatable {
     case failed(String)
     case alreadyReplied
     case gone
+    /// The Mac accepted it and holds it until a rate limit resets (`reply.injected` method `held_until_reset`).
+    /// Not typed yet, and it can be taken back while it waits.
+    case heldOnMac(detail: String?)
+    /// Taken back (a `retracted` result, or the page's own record): nothing was typed, and the page takes a new reply.
+    case retracted(String)
 
     /// State after the relay accepted our POST. Only a send still in
     /// progress becomes `.sent`: a `reply.result` that beat the HTTP response
@@ -347,23 +352,32 @@ enum ReplyDelivery: Equatable {
     /// `repliedAt`) into local state. The caller must skip ids whose local
     /// state changed after the fetch started, so a stale list can't undo a
     /// newer local event.
-    static func synced(local: ReplyDelivery?, deliveryStatus: String?, deliveryDetail: String?,
-                       repliedAt: Date?, now: Date) -> ReplyDelivery? {
+    ///
+    /// `forwardedAt` and `hookBlocking` tell a reply the relay is holding for an offline Mac from one
+    /// the Mac has: the relay doesn't store the queued flag (see `RelayQueue.isQueued`).
+    static func synced(local: ReplyDelivery?, deliveryStatus: String?, deliveryDetail: String?, deliveryMethod: String?,
+                       repliedAt: Date?, forwardedAt: Date?, hookBlocking: Bool, now: Date) -> ReplyDelivery? {
         switch deliveryStatus {
         case "failed":
             if local == .sending { return local }
+            if deliveryMethod == RetractedReply.method { return .retracted(deliveryDetail ?? SessionDeliveryState.deletedCopy) }
             return .failed(deliveryDetail ?? "Your Mac couldn't deliver the reply.")
         case "delivered":
+            if deliveryMethod == HeldUntilReset.method { return .heldOnMac(detail: deliveryDetail) }
             return .delivered(detail: deliveryDetail)
         case "pending":
+            let queued = RelayQueue.isQueued(deliveryStatus: deliveryStatus, forwardedAt: forwardedAt, hookBlocking: hookBlocking)
             switch local {
             // The Worker clears repliedAt when a delivery fails, so
             // "pending" means a reply newer than any local failure exists
             // (a retry from another device, or a POST whose response we
             // lost). A local "already answered" is likewise just a reply in
             // flight, and must not stay terminal on a page that's still open.
-            case nil, .failed?, .alreadyReplied?:
-                return .sent(queued: false, at: repliedAt ?? now)
+            case nil, .failed?, .alreadyReplied?, .retracted?:
+                return .sent(queued: queued, at: repliedAt ?? now)
+            // Queued or forwarded, whichever the relay says now: the queue flushing takes Delete away.
+            case .sent(let wasQueued, let at)?:
+                return wasQueued == queued ? local : .sent(queued: queued, at: at)
             default:
                 return local
             }
@@ -372,6 +386,11 @@ enum ReplyDelivery: Equatable {
             return local
         }
     }
+}
+
+enum RetractedReply {
+    /// `deliveryMethod` / `reply.result` method of a reply that was taken back.
+    static let method = "retracted"
 }
 
 /// When a reply the relay accepted but the Mac never confirmed may be

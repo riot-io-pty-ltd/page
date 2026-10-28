@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 // The Session Room: one session, four lenses (Story, Screen, Changes,
 // Workflows), a composer that follows the trust model, and Stop as a 0.6 s
@@ -58,6 +59,9 @@ struct SessionRoomData {
     var pageRow: NowRow? = nil
     var pageOutcome: CardOutcome = .none
     var pagePending: PendingAction? = nil
+    /// A plain-text yes/no question Claude's last message ends on, for an idle session that takes a message:
+    /// the composer offers "Yes" and "No" (`YesNoReply.roomOffer`).
+    var yesNo: String? = nil
     /// The question this session is blocked on, when it can be answered from the phone (picker).
     var ask: SessionAsk? = nil
     /// Where the newest answers for that question stand.
@@ -87,6 +91,21 @@ struct SessionRoomData {
     var receipt: SendReceipt? = nil
     /// A line above the composer: the Stop receipt, for instance.
     var stopNote: (text: String, tone: StopNoteTone)? = nil
+    /// How a message to a busy session goes: the "Now" / "When it finishes" choice, or one fixed way.
+    var choice = SendChoicePlan(mode: .none, selected: .now)
+    /// Say what each way means (once, until a message has gone out with the choice shown).
+    var explainChoice = false
+    /// The Mac takes held messages back (`retract-v1`): a Delete on each held bubble.
+    var canDeleteHeld = false
+    /// Where each Delete stands, by the held message's clientId.
+    var retractNotes: [String: RetractNote] = [:]
+    /// A Yes or No in its arm ring.
+    var yesNoArm: YesNoArm? = nil
+    /// The photo button (`images-v1`), and the photos waiting in the composer.
+    var photoOffer = PhotoOffer.hidden
+    var photos: [PhotoDraftItem] = []
+    /// The refused photo message (clientId) that can be put back in the composer (its bytes are still held).
+    var putBackId: String? = nil
 
     // Stop
     var stop: SessionStopPlan
@@ -118,8 +137,25 @@ struct SessionRoomActions {
     var refreshChanges: () -> Void = {}
     var copy: (String) -> Void = { _ in }
     var dismissReceipt: (String) -> Void = { _ in }
+    /// "Now" / "When it finishes" chosen.
+    var setChoice: (SendChoice) -> Void = { _ in }
+    /// Undo, by the message's clientId: nothing was sent, the text goes back to the composer.
+    var undoSend: (String) -> Void = { _ in }
+    /// Delete a held message, by its clientId.
+    var deleteHeld: (String) -> Void = { _ in }
+    /// A Yes or No tapped: arm it. `cancelArm` puts it away before anything is sent.
+    var armReply: (String) -> Void = { _ in }
+    var cancelArm: () -> Void = {}
     /// "Submit all": the draft's answers, for the container to send.
     var submitAnswers: (AnswerSheet) -> Void = { _ in }
+    /// Photos picked (`images-v1`); the container loads and re-encodes them.
+    var pickPhotos: ([PhotosPickerItem]) -> Void = { _ in }
+    /// A thumbnail's ×, by the draft item's id.
+    var removePhoto: (String) -> Void = { _ in }
+    /// The dimmed photo button tapped: the container says why it can't be used now.
+    var photoBlocked: (String) -> Void = { _ in }
+    /// A refused photo message back into the composer, by its clientId.
+    var putBackPhotos: (String) -> Void = { _ in }
 }
 
 // MARK: - The room
@@ -138,6 +174,10 @@ struct NWSessionRoom: View {
     @Environment(\.nwTopInset) private var topInsetOverride
     /// Seconds the Stop button has been held, nil when it is not pressed.
     @State private var stopHeld: TimeInterval?
+    @Environment(\.nwChromeGlassOn) private var glass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The top bar's glass: the Stop button and the words of its hold.
+    @Namespace private var glassSpace
 
     private var stopShown: Bool { stopHeld != nil || data.fixedStop != nil || stopHint }
 
@@ -146,12 +186,19 @@ struct NWSessionRoom: View {
             NWBackdrop()
             aurora
             VStack(spacing: 0) {
-                topBar
-                if stopShown { stopPreview }
+                // One glass group: what the hold will do comes out of the Stop button and goes back into it.
+                NWChromeGlassGroup {
+                    VStack(spacing: 0) {
+                        topBar
+                        if stopShown { stopPreview }
+                    }
+                }
                 chips
                 lensBar
                 lensContent
             }
+            // Only glass morphs; without it the words come and go at once, as they always have.
+            .animation(glass && !reduceMotion ? .smooth(duration: 0.3) : nil, value: stopShown)
             .padding(.top, topInsetOverride ?? 0)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -190,7 +237,7 @@ struct NWSessionRoom: View {
                 Image(systemName: "chevron.down").font(.system(.body, weight: .semibold))
                     .foregroundColor(NightWatch.Palette.textPrimary.color)
                     .frame(width: 48, height: 48)
-                    .background(Circle().fill(Color.white.opacity(0.09)))
+                    .nwChromeGlass(in: Circle()) { Circle().fill(Color.white.opacity(0.09)) }
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
@@ -216,6 +263,7 @@ struct NWSessionRoom: View {
             Spacer(minLength: 4)
             NWRoomStopButton(plan: data.stop, stopping: data.stopping, agent: data.character.name,
                              fixedProgress: data.fixedStop, held: $stopHeld, onComplete: actions.stopCompleted)
+                .nwChromeGlassID("stop", in: glassSpace)
         }
         .padding(.horizontal, NightWatch.Space.lg)
         .padding(.top, 14)
@@ -231,7 +279,10 @@ struct NWSessionRoom: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35)))
+        .nwChromeGlass(in: RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false) {
+            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.black.opacity(0.35))
+        }
+        .nwChromeGlassID("stop-preview", in: glassSpace)
         .padding(.horizontal, NightWatch.Space.lg).padding(.top, 10)
         .accessibilityElement(children: .combine)
     }
@@ -248,37 +299,64 @@ struct NWSessionRoom: View {
 
     // MARK: Lenses
 
+    /// Every lens title in one size. Equal widths when they all fit, then all
+    /// one step smaller together; past that (large Dynamic Type) each takes its
+    /// own width and the bar scrolls, as Android's does. A title never shrinks
+    /// on its own, so Story and Workflows never differ in size.
     private var lensBar: some View {
-        HStack(spacing: 2) {
-            ForEach(data.lenses) { l in
-                let on = l == lens
-                Button { lens = l } label: {
-                    HStack(spacing: 6) {
-                        Text(l.title)
-                            .font(.system(.subheadline, weight: on ? .semibold : .medium))
-                            .foregroundColor((on ? NightWatch.Palette.textPrimary : NightWatch.Palette.textTertiary).color)
-                            .lineLimit(1).minimumScaleFactor(0.75)
-                        if let n = data.badges[l] {
-                            Text("\(n)").font(.system(.caption2, weight: .bold))
-                                .foregroundColor(NightWatch.Palette.teal.color)
-                                .padding(.horizontal, 6).padding(.vertical, 2)
-                                .background(Capsule().fill(NightWatch.Palette.teal.opacity(0.18).color))
-                        }
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(on ? Color.white.opacity(0.13) : .clear))
-                    .contentShape(Rectangle())
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 2) { lensButtons(equal: true, style: .subheadline) }
+            // A narrow phone: every title one step smaller, together.
+            HStack(spacing: 2) { lensButtons(equal: true, style: .footnote) }
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) { lensButtons(equal: false, style: .subheadline) }
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
-                .accessibilityLabel(Text(l.title + (data.badges[l].map { ", \($0)" } ?? "")))
+                // The lens in use is always in view, whichever way it was chosen.
+                .onAppear { proxy.scrollTo(lens, anchor: .center) }
+                .onChange(of: lens) { _, l in withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(l, anchor: .center) } }
             }
         }
         .padding(4)
-        .background(NWGlassBackground(radius: 22, fill: NightWatch.Palette.surface.opacity(0.9)))
+        // The lenses are the room's tabs: chrome, so glass where there is glass.
+        .nwChromeGlass(in: RoundedRectangle(cornerRadius: 22, style: .continuous)) {
+            NWGlassBackground(radius: 22, fill: NightWatch.Palette.surface.opacity(0.9))
+        }
         .padding(.horizontal, NightWatch.Space.lg)
         .padding(.top, 18)
         .padding(.bottom, 6)
+    }
+
+    private func lensButtons(equal: Bool, style: Font.TextStyle) -> some View {
+        ForEach(data.lenses) { l in
+            let on = l == lens
+            Button { lens = l } label: {
+                HStack(spacing: 6) {
+                    // Semibold is reserved underneath the medium title, so selecting a lens never changes its width.
+                    Text(l.title)
+                        .font(.system(style, weight: .semibold)).hidden()
+                        .overlay(Text(l.title)
+                            .font(.system(style, weight: on ? .semibold : .medium))
+                            .foregroundColor((on ? NightWatch.Palette.textPrimary : NightWatch.Palette.textTertiary).color))
+                        .lineLimit(1).fixedSize()
+                    if let n = data.badges[l] {
+                        Text("\(n)").font(.system(.caption2, weight: .bold))
+                            .foregroundColor(NightWatch.Palette.teal.color)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(NightWatch.Palette.teal.opacity(0.18).color))
+                            .fixedSize()
+                    }
+                }
+                .padding(.horizontal, equal ? 8 : 12)
+                .frame(maxWidth: equal ? .infinity : nil, minHeight: 44)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(on ? Color.white.opacity(0.13) : .clear))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .id(l)
+            .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+            .accessibilityLabel(Text(l.title + (data.badges[l].map { ", \($0)" } ?? "")))
+        }
     }
 
     @ViewBuilder private var lensContent: some View {
@@ -358,7 +436,6 @@ struct NWRoomStopButton: View {
             NWHoldSurface(spec: SessionStopPlan.spec, fixedProgress: fixedProgress, held: held, onComplete: onComplete) { p in
                 let tone = NightWatch.Palette.amber.mixed(with: NightWatch.Palette.red, HoldRingSpec.warmth(progress: p))
                 ZStack {
-                    Circle().fill(NightWatch.Palette.red.opacity(0.14 + 0.08 * p).color)
                     Circle().stroke(NightWatch.Palette.red.opacity(0.30).color, lineWidth: 2)
                     Circle().trim(from: 0, to: CGFloat(p))
                         .stroke(tone.color, style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -368,11 +445,16 @@ struct NWRoomStopButton: View {
                         .frame(width: 16, height: 16)
                 }
                 .frame(width: 52, height: 52)
+                // Red glass, warming as the hold goes on. Not interactive: the ring is the feedback.
+                .nwChromeGlass(in: Circle(), tint: NightWatch.Palette.chromeGlass.mixed(with: NightWatch.Palette.red.opacity(0.6), 0.3 + 0.12 * p),
+                               interactive: false) {
+                    Circle().fill(NightWatch.Palette.red.opacity(0.14 + 0.08 * p).color)
+                }
             }
             .frame(width: 52, height: 52)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Stop \(agent)"))
-            .accessibilityHint(Text("Hold for a moment. \(plan.preview)"))
+            .accessibilityHint(Text("Hold for 10 seconds. \(plan.preview)"))
             .accessibilityAddTraits(.isButton)
             .accessibilityAction(named: Text("Stop")) { onComplete() }
         } else {
@@ -424,17 +506,26 @@ struct NWRoomComposer: View {
     @FocusState private var focused: Bool
     @State private var didFocus = false
 
-    private var hasText: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    /// Words or photos, and every photo encoded.
+    private var canSend: Bool { PhotoDraft.canSend(text: draft, items: data.photos) }
 
     var body: some View {
         VStack(spacing: 8) {
             if let n = data.stopNote { stopNote(n) }
-            if let r = data.receipt { receiptView(r) }
+            if let r = data.receipt {
+                NWSendReceiptView(receipt: r, onUndo: actions.undoSend, onDelete: actions.deleteHeld, onDismiss: actions.dismissReceipt)
+            }
             if let p = data.composerProblem {
                 Text(p).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.amber.color)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
             }
-            if data.composer.offersQuickReplies, data.character.kind != .local, draft.isEmpty { quickReplies }
+            if let arm = data.yesNoArm {
+                // Tapped: the 1.2 s ring runs and Cancel works, so a mis-tap on "Should I deploy?" is not final.
+                NWArmedReply(arm: arm, onCancel: actions.cancelArm)
+            } else if draft.isEmpty, let question = data.yesNo {
+                // Primary pair, in place of the generic replies, until the person types, sends, or the session moves on.
+                NWYesNoReplies(question: question, agent: data.character.name, onReply: { actions.armReply($0) })
+            } else if data.composer.offersQuickReplies, data.character.kind != .local, draft.isEmpty { quickReplies }
             switch data.composer {
             case .locked(let why), .disabled(let why):
                 lockedBlock(symbol: data.composer.routesThroughPage ? "keyboard" : "lock", title: data.composerCopy.placeholder, text: why)
@@ -442,6 +533,10 @@ struct NWRoomComposer: View {
                 lockedBlock(symbol: "keyboard.badge.ellipsis", title: why,
                             text: "You can still follow along here, and answer pages from Now.")
             default:
+                // Mid-turn: Now or When it finishes, in front of the field it applies to.
+                NWSendChoiceControl(plan: data.choice, agent: data.character.name, explain: data.explainChoice,
+                                    onChoose: actions.setChoice)
+                if !data.photos.isEmpty { NWPhotoStrip(items: data.photos, onRemove: actions.removePhoto) }
                 field
             }
         }
@@ -469,8 +564,9 @@ struct NWRoomComposer: View {
 
     private var field: some View {
         HStack(alignment: .bottom, spacing: 8) {
+            NWPhotoButton(offer: data.photoOffer, slots: PhotoDraft.slots(data.photos), onPick: actions.pickPhotos, onBlocked: actions.photoBlocked)
             VStack(alignment: .leading, spacing: 4) {
-                TextField(data.composerCopy.placeholder, text: $draft, axis: .vertical)
+                TextField(data.photos.isEmpty ? data.composerCopy.placeholder : "Add a caption…", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .font(.system(.body))
                     .foregroundColor(NightWatch.Palette.textPrimary.color)
@@ -486,6 +582,11 @@ struct NWRoomComposer: View {
                     .font(NightWatch.Typo.monoMicro)
                     .foregroundColor(NightWatch.Palette.textQuiet.color)
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                // The path route's one line, or why this row takes no photos.
+                if let note = data.photoOffer.note {
+                    Text(note).font(NightWatch.Typo.caption).foregroundColor(NightWatch.Palette.textTertiary.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if draft.count >= SessionComposer.counterFrom {
                     Text("\(draft.count) / \(SessionComposer.maxCharacters)")
                         .font(NightWatch.Typo.monoMicro).monospacedDigit()
@@ -499,51 +600,28 @@ struct NWRoomComposer: View {
                 Image(systemName: "arrow.up").font(.system(.body, weight: .bold))
                     .foregroundColor(NightWatch.Palette.onBright.color)
                     .frame(width: 48, height: 48)
-                    .background(Circle().fill(hasText
+                    .background(Circle().fill(canSend
                         ? AnyShapeStyle(LinearGradient(colors: [NightWatch.Palette.teal.color, NightWatch.Palette.sky.color],
                                                        startPoint: .topLeading, endPoint: .bottomTrailing))
                         : AnyShapeStyle(Color.white.opacity(0.14))))
             }
             .buttonStyle(.plain)
-            .disabled(!hasText)
-            .accessibilityLabel(Text(data.composerCopy.sendLabel))
+            .disabled(!canSend)
+            .accessibilityLabel(Text(data.choice.holds ? "Send when it finishes" : data.composerCopy.sendLabel))
             .accessibilityHint(Text(data.preview ?? data.composerCopy.hint))
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(NWGlassBackground(radius: 30, fill: NightWatch.Palette.surface.opacity(0.95)))
+        // Glass on the page colour (the composer's own solid ground keeps the receipts and notes above it legible).
+        .nwChromeGlass(in: RoundedRectangle(cornerRadius: 30, style: .continuous)) {
+            NWGlassBackground(radius: 30, fill: NightWatch.Palette.surface.opacity(0.95))
+        }
     }
 
     /// Send, from the button or the keyboard. An empty draft sends nothing: the button is greyed for the same reason.
     private func submit(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard PhotoDraft.canSend(text: text, items: data.photos) else { return }
         actions.send(text)
-    }
-
-    private func receiptView(_ r: SendReceipt) -> some View {
-        let tone: NightWatch.RGBA = r.tone == .good ? NightWatch.Palette.teal : (r.tone == .problem ? NightWatch.Palette.amber : NightWatch.Palette.textSecondary)
-        return HStack(alignment: .top, spacing: 8) {
-            if r.tone == .working { ProgressView().controlSize(.small).tint(tone.color) }
-            else { Image(systemName: r.tone == .good ? "checkmark.circle" : "exclamationmark.triangle").foregroundColor(tone.color) }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(r.headline).font(NightWatch.Typo.captionStrong).foregroundColor(tone.color).fixedSize(horizontal: false, vertical: true)
-                if let d = r.detail {
-                    Text(d).font(NightWatch.Typo.monoMicro).foregroundColor(NightWatch.Palette.textTertiary.color).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 0)
-            if r.tone == .problem {
-                Button { actions.dismissReceipt(r.id) } label: {
-                    Image(systemName: "xmark").font(.system(.caption, weight: .bold)).foregroundColor(NightWatch.Palette.textTertiary.color)
-                        .frame(width: 32, height: 32).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text("Dismiss"))
-            }
-        }
-        .padding(.horizontal, 14).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(tone.opacity(0.09).color))
-        .accessibilityElement(children: .combine)
     }
 
     private var quickReplies: some View {
@@ -554,8 +632,10 @@ struct NWRoomComposer: View {
                         Text(q).font(NightWatch.Typo.captionStrong)
                             .foregroundColor(NightWatch.Palette.textSecondary.color)
                             .padding(.horizontal, 14).frame(minHeight: 36)
-                            .background(Capsule().fill(Color.white.opacity(0.07)))
-                            .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                            .nwChromeGlass(in: Capsule()) {
+                                Capsule().fill(Color.white.opacity(0.07))
+                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+                            }
                     }
                     .buttonStyle(.plain)
                     .accessibilityHint(Text("Puts this in the message box. Nothing is sent until you send it."))

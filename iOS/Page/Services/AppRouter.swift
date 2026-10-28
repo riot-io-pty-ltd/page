@@ -36,10 +36,21 @@ final class AppRouter: ObservableObject {
         Binding(get: { self.sheets.current }, set: { self.sheets.set($0) })
     }
 
-    /// Opens a page's Decision sheet over Now.
-    func open(interventionId: String, switchTab: Bool = true) {
+    /// Opens a page's Decision sheet over Now. `composer` is Steer: the sheet comes up with its message box open.
+    func open(interventionId: String, switchTab: Bool = true, composer: Bool = false) {
         if switchTab { destination = .now }
+        composerEntry = composer ? DecisionEntry(id: interventionId, at: Date()) : nil
         sheets.request(.decision(interventionId))
+    }
+
+    /// Which page's sheet was asked to open with its composer, read once by that sheet.
+    private var composerEntry: DecisionEntry?
+
+    /// Whether this page's sheet should open with its composer up, once: a request older than a few
+    /// seconds belongs to an earlier opening and is dropped.
+    func takeComposerEntry(for interventionId: String, now: Date = Date()) -> Bool {
+        defer { composerEntry = nil }
+        return DecisionEntry.wantsComposer(composerEntry, for: interventionId, now: now)
     }
 
     /// How the next room opens (Screen, Type, Stop), read once by that room.
@@ -68,6 +79,16 @@ final class AppRouter: ObservableObject {
     /// A sheet finished dismissing: present whatever was waiting.
     func sheetDismissed() { sheets.dismissed() }
 
+    /// The open sheet holds a message its writer hasn't sent. A deep link, a notification tap or any other
+    /// request for a sheet then waits for the person's answer instead of closing it over the text.
+    func setSheetDraft(_ held: Bool) {
+        guard sheets.draftHeld != nil || held else { return }
+        sheets.setDraft(held)
+    }
+
+    /// The answer to "Discard your message?" for a sheet asked for meanwhile.
+    func resolveDeferredSheet(discard: Bool) { sheets.resolveDeferred(discard: discard) }
+
     /// Handles `page://intervention/<id>`, `page://sessions` (the widget),
     /// `page://now`, `page://lanes` (and its old name `page://sky`) and
     /// `page://tower`. Returns false for
@@ -87,6 +108,7 @@ final class AppRouter: ObservableObject {
     func reset() {
         destination = .now
         roomEntry = nil
+        composerEntry = nil
         sheets.close()
         confirmingUnpair = false
     }

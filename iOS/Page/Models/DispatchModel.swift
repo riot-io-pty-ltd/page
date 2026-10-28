@@ -146,6 +146,9 @@ struct DispatchStatus: Equatable {
             return DispatchStatus(text: message, tone: .problem, waiting: false)
         case .noAnswer:
             return DispatchStatus(text: "No answer from your Mac", tone: .warn, waiting: false)
+        // A start is never counted down, held or taken back.
+        case .counting, .held, .deleted, .unconfirmed:
+            return DispatchStatus(text: "Asking your Mac to start it…", tone: .working, waiting: true)
         }
     }
 }

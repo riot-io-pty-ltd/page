@@ -21,16 +21,23 @@ struct NWNavCapsule: View {
     var onPulseTap: () -> Void = {}
     var onPulseHold: () -> Void = {}
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nwChromeGlassOn) private var glass
 
     var body: some View {
-        HStack(spacing: 0) {
-            side(.now, "Now", decideCount, NightWatch.Palette.amber)
-            pulse
-            side(.lanes, "Lanes", workingCount, NightWatch.Palette.teal)
+        // One container: the pulse's glass sits in the capsule's, refracting the same sky.
+        NWChromeGlassGroup {
+            HStack(spacing: 0) {
+                side(.now, "Now", decideCount, NightWatch.Palette.amber)
+                pulse
+                side(.lanes, "Lanes", workingCount, NightWatch.Palette.teal)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 68)
+            // Not interactive: the pulse in the middle is a hold, and its ring is the feedback.
+            .nwChromeGlass(in: RoundedRectangle(cornerRadius: NightWatch.Radius.capsule, style: .continuous), interactive: false) {
+                NWGlassBackground(radius: NightWatch.Radius.capsule, fill: NightWatch.Palette.surface.opacity(0.94))
+            }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 68)
-        .background(NWGlassBackground(radius: NightWatch.Radius.capsule, fill: NightWatch.Palette.surface.opacity(0.94)))
     }
 
     /// A horizontal drag on either side of the capsule switches place. The
@@ -58,9 +65,18 @@ struct NWNavCapsule: View {
                 Image(systemName: "plus").font(.system(size: 24, weight: .regular))
                     .foregroundColor(NightWatch.Palette.onBright.color)
                     .frame(width: 56, height: 56)
-                    .background(Circle().fill(RadialGradient(
-                        colors: [NightWatch.Palette.teal.color, NightWatch.Palette.sky.color],
-                        center: .topLeading, startRadius: 2, endRadius: 56)))
+                    // Teal glass, running to sky at the lower edge as the fill does.
+                    .background {
+                        if glass {
+                            Circle().fill(RadialGradient(colors: [NightWatch.Palette.sky.opacity(0).color, NightWatch.Palette.sky.opacity(0.75).color],
+                                                         center: .topLeading, startRadius: 2, endRadius: 56))
+                        }
+                    }
+                    .nwChromeGlass(in: Circle(), tint: NightWatch.Palette.teal, interactive: false) {
+                        Circle().fill(RadialGradient(
+                            colors: [NightWatch.Palette.teal.color, NightWatch.Palette.sky.color],
+                            center: .topLeading, startRadius: 2, endRadius: 56))
+                    }
                     .scaleEffect(1 - 0.06 * p)
             }
             .frame(width: 72, height: 68)
@@ -68,7 +84,7 @@ struct NWNavCapsule: View {
         .frame(width: 72, height: 68)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Start new work"))
-        .accessibilityHint(Text("Hold to stop everything"))
+        .accessibilityHint(Text("Hold for 10 seconds to stop everything"))
         .accessibilityAddTraits(.isButton)
         .accessibilityAction { onPulseTap() }
         .accessibilityAction(named: Text("Stop all agents")) { onPulseHold() }

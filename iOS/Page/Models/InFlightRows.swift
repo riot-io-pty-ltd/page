@@ -6,7 +6,7 @@ import Foundation
 
 /// How a session's room opens. A tap on the card is Story; its two buttons
 /// say "Open" (the Screen lens) and "Steer" (the composer); the long-press
-/// menu's Stop opens the room where the existing 0.6 s hold-to-stop lives.
+/// menu's Stop opens the room where the existing 10 s hold-to-stop lives.
 /// Nothing here sends anything: Steer only brings up the composer, and Return
 /// still goes through `RoomSend`.
 enum RoomEntry: String, Equatable, CaseIterable {

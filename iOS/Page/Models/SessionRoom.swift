@@ -180,8 +180,10 @@ enum RoomHeader {
             switch session.state {
             case .active:
                 let word = character.kind == .local ? "GENERATING" : "WORKING"
+                // Busy, but nothing new for a while: say when its last step was. (The Mac
+                // sends no start time, so this is never how long it has been working.)
                 if let s = since, s >= 30 {
-                    out.append(RoomChip(text: "\(word) · quiet \(RelativeTime.compact(seconds: s))", tone: .working, symbol: nil))
+                    out.append(RoomChip(text: "\(word) · last step \(RelativeTime.compact(seconds: s)) ago", tone: .working, symbol: nil))
                 } else {
                     out.append(RoomChip(text: word, tone: .working, symbol: nil))
                 }
@@ -243,12 +245,16 @@ enum RoomComposerMode: Equatable {
         var ended: Bool
         /// Live sessions are available (the Mac is connected and sending).
         var ready: Bool
+        /// Page can't type here now (`canType` false) but can hold a message until the turn ends
+        /// (`hold-v1` with `canHold`): a busy Codex thread outside cmux. The composer takes the text and
+        /// it goes as "When it finishes", never typed mid-turn.
+        var holdOnly: Bool
 
         init(state: LiveSessionState, canType: Bool, typeBlocker: String? = nil, pageId: String? = nil, pageIsDecide: Bool = false,
-             pageAcceptsReply: Bool = true, pageArriving: Bool = false, ended: Bool = false, ready: Bool = true) {
+             pageAcceptsReply: Bool = true, pageArriving: Bool = false, ended: Bool = false, ready: Bool = true, holdOnly: Bool = false) {
             self.state = state; self.canType = canType; self.typeBlocker = typeBlocker; self.pageId = pageId
             self.pageIsDecide = pageIsDecide; self.pageAcceptsReply = pageAcceptsReply; self.pageArriving = pageArriving
-            self.ended = ended; self.ready = ready
+            self.ended = ended; self.ready = ready; self.holdOnly = holdOnly
         }
     }
 
@@ -264,7 +270,10 @@ enum RoomComposerMode: Equatable {
             if i.pageArriving { return .locked("Its decision is still arriving. Answer on your Mac, or wait a moment.") }
             return .locked("Answer the prompt on your Mac. Page won't type over a prompt.")
         }
-        if !i.canType { return .blocked(i.typeBlocker ?? LiveSession.defaultBlocker) }
+        if !i.canType {
+            if i.holdOnly && i.state == .active { return .steer }
+            return .blocked(i.typeBlocker ?? LiveSession.defaultBlocker)
+        }
         return i.state == .active ? .steer : .nextTask
     }
 
@@ -314,12 +323,14 @@ enum RoomComposerMode: Equatable {
 
     /// The delivery preview: what will be typed, where, on which Mac. nil
     /// when nothing would be sent. Pure.
-    func preview(character: AgentCharacter, route: String?, mac: String, pagePreview: String? = nil) -> String? {
+    func preview(character: AgentCharacter, route: String?, mac: String, pagePreview: String? = nil, holds: Bool = false) -> String? {
         switch self {
         case .tellInstead:
             // The page knows how its answer is delivered: through a hook, or Esc then your words.
             return pagePreview ?? DeliveryPreview.tellInstead(route: route, mac: mac)
         case .steer:
+            // Held on the Mac: typed once the turn ends, and deletable until then.
+            if holds { return DeliveryPreview.line("Your message, then Return · held until this turn ends", route: route, mac: mac) }
             let tail: String
             switch character.kind {
             case .codex: tail = "delivered when this turn ends"
@@ -355,7 +366,7 @@ enum RoomComposerMode: Equatable {
 
 // MARK: - Stop
 
-/// Stop in the room: a 0.6 s hold, because Esc interrupts the turn. No
+/// Stop in the room: a 10 s hold, because Esc interrupts the turn. No
 /// biometrics (this is one session's Esc, not Stop-all), and a mis-hold is
 /// undone by letting go early.
 struct SessionStopPlan: Equatable {
@@ -364,7 +375,7 @@ struct SessionStopPlan: Equatable {
     let preview: String
 
     /// The hold that confirms a Stop.
-    static let spec = HoldRingSpec(deadZone: 0, fill: 0.6)
+    static let spec = HoldRingSpec(deadZone: 0, fill: 10)
 
     /// Offered only mid-turn, where the Mac says Esc works, with the relay ready.
     static func build(session: LiveSession, ready: Bool, ended: Bool, macName: String) -> SessionStopPlan {
@@ -389,6 +400,10 @@ struct RoomPlan: Equatable {
     let review: NowRow?
     let mode: RoomComposerMode
     let preview: String?
+    /// How a message to a busy session goes: the choice offered, or the way it goes without one.
+    let choice: SendChoicePlan
+    /// The photo button (`images-v1`): shown, dimmed with its reason, or not at all.
+    let photos: PhotoOffer
 
     struct Inputs {
         var session: LiveSession
@@ -397,22 +412,31 @@ struct RoomPlan: Equatable {
         var ended: Bool
         var ready: Bool
         var macName: String
+        /// What the Mac accepts (`list` `caps`); none from an older Mac.
+        var caps: Set<String> = []
+        /// The choice made last time, kept per device.
+        var lastChoice: SendChoice? = nil
+        /// Photos already in the composer (a Mac that stopped offering them is said out loud).
+        var stagedPhotos = 0
     }
 
     static func build(_ i: Inputs) -> RoomPlan {
         let s = i.session
         let pinned = i.pageRow.flatMap { $0.section == .review ? nil : $0 }
         let review = i.pageRow.flatMap { $0.section == .review ? $0 : nil }
+        let busy = s.state == .active && !i.ended
+        let choice = SendChoicePlan.build(busy: busy, canType: s.canType, canHold: s.canHold, caps: i.caps, last: i.lastChoice)
         let mode = RoomComposerMode.resolve(.init(
             state: s.state, canType: s.canType, typeBlocker: s.typeBlocker,
             pageId: pinned?.id, pageIsDecide: pinned?.section == .decide,
             pageAcceptsReply: pinned?.action(.tellInstead) != nil,
             pageArriving: s.interventionId != nil && pinned == nil,
-            ended: i.ended, ready: i.ready))
+            ended: i.ended, ready: i.ready, holdOnly: choice.mode == .holdOnly))
         let route = DeliveryPreview.route(host: s.host, project: SessionTarget(session: s, macName: i.macName).project)
         let preview = mode.preview(character: i.character, route: route, mac: i.macName,
-                                   pagePreview: pinned?.action(.tellInstead)?.preview)
-        return RoomPlan(pinned: pinned, review: review, mode: mode, preview: preview)
+                                   pagePreview: pinned?.action(.tellInstead)?.preview, holds: choice.holds && mode == .steer)
+        let photos = PhotoOffer.build(caps: i.caps, attach: s.attach, attachBlocker: s.attachBlocker, composer: mode, ended: i.ended, staged: i.stagedPhotos)
+        return RoomPlan(pinned: pinned, review: review, mode: mode, preview: preview, choice: choice, photos: photos)
     }
 }
 

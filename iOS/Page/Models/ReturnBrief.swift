@@ -101,6 +101,10 @@ struct ReturnBrief: Equatable {
     /// A short line for the collapsed form: "While you were away · 1h 52m ›".
     var collapsedTitle: String { title }
 
+    /// The absence this Brief is about, for its sunrise, which plays once per
+    /// absence (Android's key).
+    var sunriseKey: String { "\(window) \(awayText)" }
+
     /// The Brief's content. `history` is the resolved pages; `open` the
     /// pages still waiting. Pure.
     static func build(since: Date, now: Date, history: [Intervention], open: [Intervention], sessions: [LiveSession],

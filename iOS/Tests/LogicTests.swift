@@ -3,6 +3,8 @@
 // presence, stats). No simulator or XCTest needed: run ./Tests/run-logic-tests.sh
 
 import Foundation
+import CoreGraphics
+import ImageIO
 
 var failures = 0
 var passes = 0
@@ -176,15 +178,15 @@ check(ReplyDelivery.afterAccepted(.sending, queued: true, at: sentAt) == .sent(q
 check(ReplyDelivery.afterAccepted(.failed("The prompt is no longer showing"), queued: false, at: sentAt) == .failed("The prompt is no longer showing"), "fast failure survives POST response")
 check(ReplyDelivery.afterAccepted(.delivered(detail: "x"), queued: false, at: sentAt) == .delivered(detail: "x"), "fast success survives POST response")
 let repAt = Date(timeIntervalSince1970: 60_000)
-check(ReplyDelivery.synced(local: .failed("Couldn't reach your relay"), deliveryStatus: "pending", deliveryDetail: nil, repliedAt: repAt, now: now) == .sent(queued: false, at: repAt), "pending replaces stale local failure")
-check(ReplyDelivery.synced(local: .alreadyReplied, deliveryStatus: "pending", deliveryDetail: nil, repliedAt: repAt, now: now) == .sent(queued: false, at: repAt), "pending un-sticks alreadyReplied")
-check(ReplyDelivery.synced(local: .sent(queued: true, at: sentAt), deliveryStatus: "pending", deliveryDetail: nil, repliedAt: repAt, now: now) == .sent(queued: true, at: sentAt), "pending keeps local sent")
-check(ReplyDelivery.synced(local: nil, deliveryStatus: "pending", deliveryDetail: nil, repliedAt: nil, now: now) == .sent(queued: false, at: now), "pending seeds")
-check(ReplyDelivery.synced(local: .sending, deliveryStatus: "failed", deliveryDetail: "no", repliedAt: nil, now: now) == .sending, "failed never clobbers an in-progress send")
-check(ReplyDelivery.synced(local: .sent(queued: false, at: sentAt), deliveryStatus: "failed", deliveryDetail: nil, repliedAt: nil, now: now) == .failed("Your Mac couldn't deliver the reply."), "failed default detail")
-check(ReplyDelivery.synced(local: .sent(queued: false, at: sentAt), deliveryStatus: "delivered", deliveryDetail: "Typed", repliedAt: repAt, now: now) == .delivered(detail: "Typed"), "delivered")
-check(ReplyDelivery.synced(local: nil, deliveryStatus: nil, deliveryDetail: nil, repliedAt: nil, now: now) == nil, "v1 no reply")
-check(ReplyDelivery.synced(local: nil, deliveryStatus: nil, deliveryDetail: nil, repliedAt: repAt, now: now) == .sent(queued: false, at: repAt), "v1 repliedAt seeds")
+check(ReplyDelivery.synced(local: .failed("Couldn't reach your relay"), deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: repAt, forwardedAt: repAt, hookBlocking: false, now: now) == .sent(queued: false, at: repAt), "pending replaces stale local failure")
+check(ReplyDelivery.synced(local: .alreadyReplied, deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: repAt, forwardedAt: repAt, hookBlocking: false, now: now) == .sent(queued: false, at: repAt), "pending un-sticks alreadyReplied")
+check(ReplyDelivery.synced(local: .sent(queued: true, at: sentAt), deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: repAt, forwardedAt: nil, hookBlocking: false, now: now) == .sent(queued: true, at: sentAt), "pending keeps local sent")
+check(ReplyDelivery.synced(local: nil, deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: nil, forwardedAt: now, hookBlocking: false, now: now) == .sent(queued: false, at: now), "pending seeds")
+check(ReplyDelivery.synced(local: .sending, deliveryStatus: "failed", deliveryDetail: "no", deliveryMethod: nil, repliedAt: nil, forwardedAt: nil, hookBlocking: false, now: now) == .sending, "failed never clobbers an in-progress send")
+check(ReplyDelivery.synced(local: .sent(queued: false, at: sentAt), deliveryStatus: "failed", deliveryDetail: nil, deliveryMethod: nil, repliedAt: nil, forwardedAt: nil, hookBlocking: false, now: now) == .failed("Your Mac couldn't deliver the reply."), "failed default detail")
+check(ReplyDelivery.synced(local: .sent(queued: false, at: sentAt), deliveryStatus: "delivered", deliveryDetail: "Typed", deliveryMethod: nil, repliedAt: repAt, forwardedAt: nil, hookBlocking: false, now: now) == .delivered(detail: "Typed"), "delivered")
+check(ReplyDelivery.synced(local: nil, deliveryStatus: nil, deliveryDetail: nil, deliveryMethod: nil, repliedAt: nil, forwardedAt: nil, hookBlocking: false, now: now) == nil, "v1 no reply")
+check(ReplyDelivery.synced(local: nil, deliveryStatus: nil, deliveryDetail: nil, deliveryMethod: nil, repliedAt: repAt, forwardedAt: nil, hookBlocking: false, now: now) == .sent(queued: false, at: repAt), "v1 repliedAt seeds")
 
 // Closed reply screen (IOS-5): an unknown reason after our own reply is looked up, not invented.
 check(ClosedReplyPhase.decide(reason: nil, hadOwnReply: true, lookupFinished: false) == .checking, "unknown close after reply -> check")
@@ -570,7 +572,7 @@ check(d.timedOut(sentAt: cmdSentAt, now: cmdSentAt.addingTimeInterval(19.9)) == 
 check(d.timedOut(sentAt: cmdSentAt, now: cmdSentAt.addingTimeInterval(20)) == .noAnswer, "no answer after 20 s")
 check(d.applying(result(.delivered, detail: "Typed into cmux"), agent: "Claude") == .typed("Typed into cmux"), "delivered -> typed")
 check(d.applying(result(.queued), agent: "Claude") == .queued(nil), "queued")
-check(SessionDeliveryState.queued(nil).explanation(.input, agent: "Claude") == "Queued — Claude reads it after the current step.", "queued copy")
+check(SessionDeliveryState.queued(nil).explanation(.input, agent: "Claude") == "Already with Claude — it reads it after this step.", "queued copy: already in the agent's queue, said plainly")
 if case .refused(let reason, let message) = d.applying(result(.refused, reason: "digit_while_busy"), agent: "Claude") {
     check(reason == "digit_while_busy" && message == "Starts with a number: wait for Claude to finish, or add a word first.", "digit refusal copy")
 } else { check(false, "refused") }
@@ -1590,6 +1592,33 @@ do {
           && RenderArguments.parse(["-NWRender", "now", "-NWTime", "soon"])?.time == nil, "a negative or unreadable time is ignored")
 }
 
+// Liquid Glass: the harness can draw the chrome without it, and every glass call sits behind the one gate.
+do {
+    check(RenderArguments.parse(["-NWRender", "now"])?.glass == true, "the chrome is on glass unless told otherwise")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWGlass", "off"])?.glass == false, "-NWGlass off draws the fallback")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWGlass", "on"])?.glass == true
+          && RenderArguments.parse(["-NWRender", "now", "-NWGlass"])?.glass == true, "anything but off leaves the glass on")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWGlow", "full"]) == RenderArguments(screen: "now", glow: .full),
+          "a frame without the flag is unchanged")
+    if let root = ProcessInfo.processInfo.environment["PAGE_IOS_ROOT"] {
+        // NWChromeGlass checks iOS 26, Reduce Transparency and the harness before any glass is drawn, so no
+        // other file may call the glass APIs itself: one that did would skip the fallback.
+        let fm = FileManager.default
+        var callers: [String] = []
+        var files = 0
+        for dir in ["Page", "PageWidget"] {
+            guard let en = fm.enumerator(atPath: root + "/" + dir) else { continue }
+            for case let rel as String in en where rel.hasSuffix(".swift") {
+                files += 1
+                let src = (try? String(contentsOfFile: root + "/" + dir + "/" + rel, encoding: .utf8)) ?? ""
+                if [".glassEffect(", "GlassEffectContainer", ".glassEffectID(", ".buttonStyle(.glass"].contains(where: src.contains),
+                   !rel.hasSuffix("Design/NightWatch/NWGlass.swift") { callers.append(rel) }
+            }
+        }
+        check(files > 100 && callers.isEmpty, "only NWGlass.swift calls the Liquid Glass APIs: \(callers)")
+    }
+}
+
 do {
     let s = TurnSummaryChips.parse("Changed 3 files (+120 −14) · tests passed")
     check(s.map(\.text) == ["3 files", "+120", "−14", "tests ✓"], "turn chips text \(s.map(\.text))")
@@ -1604,8 +1633,8 @@ do {
 do {
     let stop = HoldRingSpec.stopAll
     check(stop.progress(elapsed: 0.3) == 0 && !stop.isVisible(elapsed: 0.3), "pulse ring hidden at 300 ms")
-    check(nwNear(stop.progress(elapsed: 0.9), 0.5), "pulse ring half at 900 ms")
-    check(stop.isComplete(elapsed: 1.5) && !stop.isComplete(elapsed: 1.49), "pulse ring completes at 1.5 s (board 07)")
+    check(nwNear(stop.progress(elapsed: 5.15), 0.5), "pulse ring half at 5.15 s")
+    check(stop.isComplete(elapsed: 10) && !stop.isComplete(elapsed: 9.99), "Stop-all completes only after a 10 s hold")
     let irr = HoldRingSpec.irreversible
     check(irr.progress(elapsed: 0.3) == 0 && !irr.isVisible(elapsed: 0.3), "irreversible ring hidden for 300 ms")
     check(nwNear(irr.progress(elapsed: 0.9), 0.5) && irr.isComplete(elapsed: 1.5), "irreversible ring fills over 1.2 s after the dead zone")
@@ -1616,7 +1645,8 @@ do {
     check(nwNear(HoldRingSpec.warmth(progress: 2.0 / 3), 0), "amber until two thirds")
     check(nwNear(HoldRingSpec.warmth(progress: 1), 1), "red at full")
     check(nwNear(HoldRingSpec.warmth(progress: 5.0 / 6), 0.5), "halfway warm at five sixths")
-    check(nwNear(stop.unwound(from: 1, since: 0.6), 0.5), "unwinds at the fill speed")
+    check(nwNear(stop.unwound(from: 1, since: 0.6), 0.5), "a 10 s Stop ring unwinds as fast as a 1.2 s one")
+    check(nwNear(HoldRingSpec.irreversible.unwound(from: 1, since: 0.6), 0.5), "the irreversible ring unwinds at its fill speed")
     check(stop.unwound(from: 0.2, since: 5) == 0, "unwound is floored at zero")
     check(HoldRingSpec.stopScope(busy: 4) == "Press Esc in 4 busy sessions", "scope plural")
     check(HoldRingSpec.stopScope(busy: 1) == "Press Esc in 1 busy session", "scope singular")
@@ -1682,8 +1712,8 @@ do {
     check(PulsePress.onRelease(held: 0.1) == .tap, "short press is a tap")
     check(PulsePress.onRelease(held: 0.3) == .tap, "dead zone is exclusive")
     check(PulsePress.onRelease(held: 0.31) == .abandonedHold, "just past the dead zone abandons")
-    check(PulsePress.onRelease(held: 1.49) == .abandonedHold, "released just before full abandons")
-    check(PulsePress.onRelease(held: 1.5) == .completedHold, "full ring completes")
+    check(PulsePress.onRelease(held: 9.99) == .abandonedHold, "released just before full abandons")
+    check(PulsePress.onRelease(held: 10) == .completedHold, "full ring completes (a 10 s hold)")
 
     let nine = (1...9).map { i in
         nwSession("p\(i)", title: i <= 4 ? "t\(i)" : "idle\(i)", state: i <= 4 ? "active" : "idle", canInterrupt: true)
@@ -1792,6 +1822,13 @@ do {
     check(rmC.blurb == "Claude wants to do this. It can't be undone from your phone.", "irreversible blurb")
     check(rmC.undoNote == "No undo from your phone." && rmC.chip == .irreversible, "irreversible undo note and chip")
     check(rmC.footer.contains(mac), "footer names the Mac")
+    check(rmC.yesNo == nil, "a command page has no yes/no question")
+    // A finished turn that ends on a yes/no question carries it for the sheet; a quiet one, and a decision, do not.
+    let asks = nwIv("ya", .idle, "Changed 2 files (+9 −1) · tests passed\n\nThe fix is in. Should I go ahead and commit?", session: "s1")
+    let asksC = DecisionContent.build(iv: asks, row: NowRowBuilder.row(for: asks, session: term, macName: mac), session: term, macName: mac)
+    check(asksC.section == .review && asksC.yesNo == "Should I go ahead and commit?", "a finished turn that asks carries its yes/no question: \(asksC.yesNo ?? "nil")")
+    let quiet = nwIv("yb", .idle, "Changed 2 files (+9 −1) · tests passed\n\nThe fix is in.", session: "s1")
+    check(DecisionContent.build(iv: quiet, row: NowRowBuilder.row(for: quiet, session: term, macName: mac), session: term, macName: mac).yesNo == nil, "a finished turn that does not ask carries none")
 
     let gem = try! JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"g2","sessionId":"s9","kind":"approval","openedAt":"2027-01-15T08:00:00Z","context":"[Bash] ls","backend":"gemini"}"#.utf8))
     let gemC = DecisionContent.build(iv: gem, row: NowRowBuilder.row(for: gem, session: nil, macName: mac), session: nil, macName: mac)
@@ -2609,8 +2646,8 @@ do {
 
     let fresh = nwSession("r1", title: "page", state: "active", cwd: "~/projects/page", activeAt: nwT0 - 45)
     let chips = RoomHeader.chips(session: fresh, character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: 62, now: nwNow)
-    check(chips.map(\.text) == ["WORKING · quiet 45s", "5h 62%"], "working chips \(chips.map(\.text))")
-    check(RoomHeader.chips(session: nwSession("r1", state: "active", activeAt: nwT0 - 45), character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "WORKING · quiet 45s", "quiet while working")
+    check(chips.map(\.text) == ["WORKING · last step 45s ago", "5h 62%"], "working chips \(chips.map(\.text))")
+    check(RoomHeader.chips(session: nwSession("r1", state: "active", activeAt: nwT0 - 45), character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "WORKING · last step 45s ago", "busy with no new step says when the last one was")
     check(RoomHeader.chips(session: fresh, character: claude, ended: false, waitingSince: nil, hasReviewPage: false, fiveHourPct: 85, now: nwNow).last?.tone == .warm, "5-hour use at 80 is warm")
     let waitingS = nwSession("r2", state: "waitingOnApproval", activeAt: nwT0 - 600)
     check(RoomHeader.chips(session: waitingS, character: claude, ended: false, waitingSince: nwNow.addingTimeInterval(-60), hasReviewPage: false, fiveHourPct: nil, now: nwNow).first?.text == "NEEDS YOU · 1m", "needs you with the wait")
@@ -2685,7 +2722,7 @@ do {
     check(!SessionStopPlan.build(session: stopS, ready: true, ended: true, macName: "M").canStop, "ended cannot stop")
     check(!SessionStopPlan.build(session: nwSession("q2", state: "active", canInterrupt: false), ready: true, ended: false, macName: "M").canStop, "cannot interrupt, cannot stop")
     check(!SessionStopPlan.build(session: nwSession("q3", state: "idle", canInterrupt: true), ready: true, ended: false, macName: "M").canStop, "only mid-turn stops")
-    check(SessionStopPlan.spec == HoldRingSpec(deadZone: 0, fill: 0.6), "room stop holds for 0.6 s")
+    check(SessionStopPlan.spec == HoldRingSpec(deadZone: 0, fill: 10), "room stop holds for 10 s")
 
     let bannerEnded = RoomBanner.build(ended: true, availability: .ready, session: fresh, agent: "Claude", pageShownInStory: false)
     check(bannerEnded.map(\.title) == ["This session has ended"], "ended banner")
@@ -2917,7 +2954,7 @@ do {
     let r = { (c: SentSessionCommand?, at: TimeInterval) in SendReceipt.build(c, agent: "Claude", now: nwNow.addingTimeInterval(at)) }
     check(r(cmd(.sending), 1)?.headline == "Sending to riot-io-teltonika · cmux · Studio MBP…" && r(cmd(.sending), 1)?.tone == .working, "sending names the target")
     check(r(cmd(.typed(nil)), 2)?.headline == "Typed into riot-io-teltonika · cmux · Studio MBP" && r(cmd(.typed(nil)), 2)?.tone == .good, "typed names the target")
-    check(r(cmd(.queued(nil)), 2)?.headline == "Queued — Claude reads it after this step" && r(cmd(.queued(nil)), 2)?.detail == "riot-io-teltonika · cmux · Studio MBP", "queued says when, and where")
+    check(r(cmd(.queued(nil)), 2)?.headline == "Already with Claude — it reads it after this step." && r(cmd(.queued(nil)), 2)?.detail == "riot-io-teltonika · cmux · Studio MBP", "queued says when, and where")
     let refused = r(cmd(.refused(reason: "target_mismatch", message: "Nothing was typed.")), 2)
     check(refused?.headline == "Refused: Nothing was typed." && refused?.tone == .problem && refused?.detail == "Target: riot-io-teltonika · cmux · Studio MBP", "refused says why and which target it was for")
     check(r(cmd(.failed("Your Mac is offline.")), 2)?.headline == "Not sent: Your Mac is offline." && r(cmd(.failed("x")), 2)?.tone == .problem, "failed says why")
@@ -3148,6 +3185,199 @@ do {
           "no time, no motion; a zero period is at once")
     check(nwNear(MotionCurve.shake(0.0525), 0.7656, 1e-3) && nwNear(MotionCurve.shake(0.105), 0, 1e-9)
           && MotionCurve.shake(0) == 0 && MotionCurve.shake(0.5) == 0, "one soft shake, nothing before or after it")
+}
+
+// Motion parity: the shader clock moves at wall-clock time, the ripple re-paces in steps, the Brief's sunrise plays once.
+do {
+    // A reference-date clock (about 8.15e8 s) as a raw Float only moves in 64 s steps: the sky froze on a phone.
+    let wall = 815_000_000.0
+    check(Float(wall + 0.5) - Float(wall) == 0, "raw: half a second is lost at reference-date time (the frozen sky)")
+    let step = ShaderClock.seconds(wall + 0.5) - ShaderClock.seconds(wall)
+    check(abs(step - 0.5) < 0.01, "wrapped: half a second later the shader's time is half a second on (\(step))")
+    check(abs((ShaderClock.seconds(wall + 1.0 / 30) - ShaderClock.seconds(wall)) - Float(1.0 / 30)) < 0.01,
+          "wrapped: one 30 fps frame later it has moved by one frame")
+    check(ShaderClock.seconds(2) == 2 && ShaderClock.seconds(0) == 0, "the harness's pinned t=2 and Reduce Motion's still frame are unchanged")
+    check(ShaderClock.seconds(Date().timeIntervalSinceReferenceDate) < Float(ShaderClock.wrap)
+          && ShaderClock.seconds(ShaderClock.wrap + 3) == 3 && ShaderClock.seconds(-1) == Float(ShaderClock.wrap - 1),
+          "the clock wraps once a day and stays in range")
+
+    check(PulseModel.pacedWait(0) == 0 && PulseModel.pacedWait(14.9) == 0 && PulseModel.pacedWait(15) == 15
+          && PulseModel.pacedWait(100) == 90 && PulseModel.pacedWait(-5) == 0, "the ripple's wait counts in whole 15 s steps")
+    // Rebuilt every 5 s, the rings keep their phase until a 15 s step is crossed.
+    let rebuilt = [61.0, 66, 71, 74.9].map { PulseModel(working: 0, waiting: 1, longestWait: PulseModel.pacedWait($0)).ripples(at: wall) }
+    check(Set(rebuilt.map { $0[0].progress }).count == 1, "a rebuild inside one 15 s step does not move the rings")
+    check(PulseModel(working: 0, waiting: 1, longestWait: PulseModel.pacedWait(300)).rippleInterval == PulseModel(working: 0, waiting: 1, longestWait: 300).rippleInterval,
+          "on a step the pace is the table's")
+
+    var book = OneShotBook()
+    let first = book.start("23:20 to 01:12 1h 52m", now: 100)
+    check(first == 100 && book.start("23:20 to 01:12 1h 52m", now: 250) == 100, "the Brief's sunrise keeps its first start: it plays once per absence")
+    check(book.start("02:00 to 03:00 1h", now: 400) == 400, "a new absence gets its own sunrise")
+}
+
+// The time of day: four phases across the local day, blended through windows; nighttime is today's aurora exactly.
+do {
+    func dw(_ m: Double) -> DaypartWeights { DaypartWeights.at(minuteOfDay: m) }
+    func hex(_ h: UInt32) -> DaypartTone.Colour { DaypartTone.Colour(hex: h) }
+    func luminance(_ c: DaypartTone.Colour) -> Double {
+        func lin(_ x: Double) -> Double { x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4) }
+        return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+    }
+    func whiteContrast(_ c: DaypartTone.Colour) -> Double { 1.05 / (luminance(c) + 0.05) }
+    func hue(_ c: DaypartTone.Colour) -> Double {
+        let o = PerceptualMix.oklab(c.rgb)
+        let h = atan2(o.b, o.a) * 180 / .pi
+        return h < 0 ? h + 360 : h
+    }
+
+    // Weights: never more than two phases, always summing to 1, never jumping (every quarter minute).
+    var weightsOK = true, maxStep = 0.0
+    var prev = dw(0)
+    for i in 1...(1440 * 4) {
+        let w = dw(Double(i) / 4)
+        let ws = Daypart.allCases.map { w.weight($0) }
+        if abs(ws.reduce(0, +) - 1) > 1e-9 || ws.filter({ $0 > 0 }).count > 2 || ws.contains(where: { $0 < 0 || $0 > 1 }) { weightsOK = false }
+        for p in Daypart.allCases { maxStep = max(maxStep, abs(w.weight(p) - prev.weight(p))) }
+        prev = w
+    }
+    check(weightsOK, "at most two phases have weight, and the weights sum to 1, at every minute")
+    check(maxStep < 0.01, "the weights glide: no quarter minute moves one by 0.01 or more (\(maxStep)), across midnight too")
+
+    // The windows: 04:00-05:00, 06:30-07:30, 11:30-12:30, and the two-hour sunset 18:00-20:00.
+    check(dw(72) == .nighttime && DaypartWeights.nighttime.only == .nighttime, "01:12, the harness's clock, is nighttime's core")
+    check(dw(239.9).only == .nighttime && dw(240).only == .nighttime && dw(241).only == nil, "nighttime holds until 04:00, then blends")
+    check(nwNear(dw(270).weight(.nighttime), 0.5) && nwNear(dw(270).weight(.earlyMorning), 0.5), "04:30 is half night, half early morning")
+    check(dw(300).only == .earlyMorning && dw(389.9).only == .earlyMorning, "early morning's core is 05:00-06:30")
+    check(nwNear(dw(420).weight(.earlyMorning), 0.5) && nwNear(dw(420).weight(.morning), 0.5), "07:00 is half way to morning")
+    check(dw(450).only == .morning && dw(689.9).only == .morning, "morning's core is 07:30-11:30")
+    check(nwNear(dw(720).weight(.morning), 0.5) && nwNear(dw(720).weight(.afternoon), 0.5), "12:00 is half way to afternoon")
+    check(dw(750).only == .afternoon && dw(1079.9).only == .afternoon, "afternoon's core is 12:30-18:00")
+    check(nwNear(dw(1095).weight(.nighttime), MotionCurve.smooth(0.125)) && nwNear(dw(1140).weight(.nighttime), 0.5),
+          "the sunset runs a smoothstep over two hours: 18:15 has barely begun, 19:00 is half way")
+    check(dw(1200).only == .nighttime && dw(1439.99).only == .nighttime && dw(0).only == .nighttime, "nighttime from 20:00, across midnight")
+    check(dw(1440) == dw(0) && dw(-30) == dw(1410) && dw(1440 + 270) == dw(270), "the minute wraps round the day")
+    check(Daypart.allCases.allSatisfy { dw($0.coreMinute).only == $0 }, "each phase's harness minute is in its own core")
+
+    // DST and time zones: the minute is the wall clock's, read off the calendar.
+    var ny = Calendar(identifier: .gregorian)
+    ny.timeZone = TimeZone(identifier: "America/New_York")!
+    let spring = ny.date(from: DateComponents(year: 2026, month: 3, day: 8))!
+    check(DaypartWeights.at(spring.addingTimeInterval(4.5 * 3600), calendar: ny) == dw(330),
+          "spring forward: 4.5 hours after midnight the wall says 05:30, early morning, not 04:30")
+    let fall = ny.date(from: DateComponents(year: 2026, month: 11, day: 1))!
+    check(DaypartWeights.at(fall.addingTimeInterval(5.5 * 3600), calendar: ny) == dw(270),
+          "fall back: 5.5 hours after midnight the wall says 04:30, the pre-dawn blend")
+    var tokyo = Calendar(identifier: .gregorian)
+    tokyo.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    let instant = Date(timeIntervalSince1970: 1_790_000_000)   // 14:13:20 UTC: 23:13 in Tokyo, 10:13 in New York
+    check(DaypartWeights.at(instant, calendar: tokyo).only == .nighttime && DaypartWeights.at(instant, calendar: ny).only == .morning,
+          "one instant is nighttime in Tokyo and morning in New York")
+
+    // Nighttime is today's aurora, byte for byte.
+    let night = DaypartTone.blended(.nighttime)
+    check(night == DaypartTone.nighttime, "at a core the table row comes back untouched")
+    check(night.working == DaypartTone.Aurora(c1: hex(0x5EEAD4), c2: hex(0x38BDF8), c3: hex(0x6D5BD0), skyTop: hex(0x0B1B24), skyBottom: hex(0x05070D),
+                                              intensity: 0.5, speed: 0.4), "nighttime working is today's working")
+    check(night.quiet == DaypartTone.Aurora(c1: hex(0x5EEAD4), c2: hex(0x38BDF8), c3: hex(0x6D5BD0), skyTop: hex(0x0A141C), skyBottom: hex(0x05070D),
+                                            intensity: 0.3, speed: 0.3), "nighttime quiet is today's quiet")
+    check(night.needsYou == DaypartTone.Aurora(c1: hex(0xF5B14C), c2: hex(0xF2C94C), c3: hex(0xB45309), skyTop: hex(0x1A1306), skyBottom: hex(0x05070D),
+                                               intensity: 1, speed: 1), "nighttime needs-you is today's needs-you")
+    check(DaypartWeights.nighttime.stars == 1 && dw(330).stars == 0.55 && dw(570).stars == 0.2 && dw(900).stars == 0
+          && nwNear(dw(270).stars, 0.775), "the stars are the clock's: all at night, thinning through the morning, none in the afternoon")
+
+    // Every minute of the day: needs-you still wins, white text stays legible, amber never flashes red in the exhale.
+    var moodsOK = true, minTop = 99.0, minQuiet = 99.0, maxNeedsLum = 0.0, huesOK = true
+    for m in 0..<1440 {
+        let t = DaypartTone.blended(dw(Double(m)))
+        let w = t.working, q = t.quiet, n = t.needsYou
+        if !(n.intensity > w.intensity && nwNear(q.intensity / w.intensity, 0.6) && q.c1 == w.c1 && q.c3 == w.c3
+             && n.c1 == hex(0xF5B14C) && n.speed == 1) { moodsOK = false }
+        minTop = min(minTop, whiteContrast(w.skyTop))
+        minQuiet = min(minQuiet, whiteContrast(q.skyTop))
+        maxNeedsLum = max(maxNeedsLum, luminance(n.skyTop))
+        let h1 = hue(w.c1), h2 = hue(w.c2)
+        if !(h1 > 89 && h1 <= 250 && h2 > 105 && h2 <= 266) { huesOK = false; print("exhale hue rule broken at minute \(m): c1 \(h1) c2 \(h2)") }
+    }
+    check(moodsOK, "needs-you is the strongest sky at every hour; quiet is three fifths of working; amber's curtains never change")
+    check(minTop >= 12.5, "white on the working sky's top is at least 12.5:1 at every minute (\(minTop))")
+    check(minQuiet >= 12.5 && minQuiet >= minTop, "the quiet sky is never brighter than working's (\(minQuiet))")
+    check(maxNeedsLum < 0.00725 && luminance(DaypartTone.nighttime.nyTop) < 0.0071,
+          "needs-you's sky takes the hour's hue, never its light: luminance 0.0072 at most, 0.0070 at night (\(maxNeedsLum))")
+    check(huesOK, "c1 hue stays in (89, 250] and c2 in (105, 266]: the exhale's amber turns away from red at every hour")
+    check(whiteContrast(DaypartTone.afternoon.skyTop) < whiteContrast(DaypartTone.nighttime.skyTop), "the afternoon sky is brighter than the night's")
+
+    // The blend midpoints, as the spec draws them.
+    let predawn = DaypartTone.blended(dw(270)), sunset = DaypartTone.blended(dw(1140))
+    check(predawn.c1.hexString == "#5FCEE5" && predawn.c3.hexString == "#917CE8" && predawn.skyBottom.hexString == "#1B0F1D",
+          "04:30: a teal-azure veil over violet, a plum haze rising")
+    check(sunset.skyBottom.hexString == "#1E1712" && sunset.c3.hexString == "#6391BC", "19:00: the gold haze sinks, c3 turns steel blue")
+
+    // The ticker's grid: whole two-minute steps of the wall clock.
+    check(DaypartClock.nextTick(after: Date(timeIntervalSince1970: 1000)) == Date(timeIntervalSince1970: 1080)
+          && DaypartClock.nextTick(after: Date(timeIntervalSince1970: 1080)) == Date(timeIntervalSince1970: 1200), "the next tick is the next whole 120 s")
+
+    // The curtain phase accumulates: a change of speed changes the pace, never the place.
+    let wall = 815_000_000.5
+    let pc = AuroraPhaseClock()
+    let seed = pc.advance(to: wall, rate: 0.4)
+    check(nwNear(seed, (wall.truncatingRemainder(dividingBy: 3600)) * 0.4), "the first call seeds from the clock")
+    let a1 = pc.advance(to: wall + 1.0 / 30, rate: 0.4)
+    let a2 = pc.advance(to: wall + 2.0 / 30, rate: 0.44)
+    check(nwNear(a1 - seed, 0.4 / 30) && nwNear(a2 - a1, 0.44 / 30), "a time-of-day tick moves the curtains one frame at the new pace, no jump")
+    check(abs((wall + 2.0 / 30) * 0.44 - a1) > 1000, "(the old product would have jumped them by thousands)")
+    let afterPause = pc.advance(to: wall + 600, rate: 0.4)
+    check(nwNear(afterPause - a2, AuroraPhaseClock.maxStep * 0.4) && pc.advance(to: wall, rate: 0.4) == afterPause,
+          "after a pause or a sheet it resumes where it left off, and a clock going back holds still")
+    check(AuroraPhaseClock.shaderPhase(3) == 3 && AuroraPhaseClock.shaderPhase(16_384 + 3) == 3, "the shader's phase wraps, small values unchanged")
+
+    // The harness pin: a local minute of the day.
+    check(RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "afternoon"])?.dayTime == 900, "-NWDaypart takes a phase name")
+    check(RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "19:00"])?.dayTime == 1140
+          && RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "270"])?.dayTime == 270
+          && RenderArguments.parse(["-NWRender", "lanes", "-NWDayTime", "05:30"])?.dayTime == 330, "or HH:MM, or a minute; -NWDayTime takes HH:MM")
+    check(RenderArguments.parse(["-NWRender", "now"])?.dayTime == nil && RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "24:00"])?.dayTime == nil
+          && RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "dusk"])?.dayTime == nil
+          && RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "1440"])?.dayTime == nil
+          && RenderArguments.parse(["-NWRender", "now", "-NWDaypart", "7:5"])?.dayTime == nil, "anything else is ignored: the frame stays at 01:12")
+
+    // The golden the Android test reads is this model's output (android/tools/daypart-golden.sh regenerates it).
+    if let root = ProcessInfo.processInfo.environment["PAGE_IOS_ROOT"],
+       let tsv = try? String(contentsOfFile: root + "/../android/app/src/test/resources/daypart-golden.tsv", encoding: .utf8) {
+        let rows = tsv.split(separator: "\n").filter { !$0.hasPrefix("#") }.map { $0.split(separator: "\t").map(String.init) }
+        var goldenOK = rows.count == 306
+        func hexNear(_ s: String, _ c: DaypartTone.Colour) -> Bool {
+            guard s.count == 7, let v = UInt32(s.dropFirst(), radix: 16) else { return false }
+            let g = hex(v)
+            return abs(g.r - c.r) * 255 <= 1.01 && abs(g.g - c.g) * 255 <= 1.01 && abs(g.b - c.b) * 255 <= 1.01
+        }
+        for r in rows {
+            guard r.count == 18, let hh = Int(r[0].prefix(2)), let mm = Int(r[0].suffix(2)) else { goldenOK = false; continue }
+            let w = dw(Double(hh * 60 + mm)), t = DaypartTone.blended(w)
+            let nums = Daypart.allCases.map { w.weight($0) } + [t.working.intensity, t.working.speed, t.quiet.intensity, t.quiet.speed, w.stars]
+            let cells = Array(r[1...4]) + Array(r[13...17])
+            let colours = [t.working.c1, t.working.c2, t.working.c3, t.working.skyTop, t.working.skyBottom, t.quiet.skyTop, t.needsYou.skyTop, t.needsYou.skyBottom]
+            if !zip(cells, nums).allSatisfy({ cell, want in Double(cell).map { abs($0 - want) <= 1e-4 } ?? false })
+                || !zip(Array(r[5...12]), colours).allSatisfy({ hexNear($0, $1) }) {
+                goldenOK = false
+                print("daypart golden differs at \(r[0])")
+            }
+        }
+        check(goldenOK, "android/app/src/test/resources/daypart-golden.tsv matches Daypart.swift (rerun android/tools/daypart-golden.sh)")
+    } else {
+        check(false, "daypart-golden.tsv not found: run through iOS/Tests/run-logic-tests.sh, after android/tools/daypart-golden.sh")
+    }
+
+    // Widgets stay at nighttime: their faces take a palette, never the clock.
+    if let root = ProcessInfo.processInfo.environment["PAGE_IOS_ROOT"] {
+        let fm = FileManager.default
+        var faces = ["Page/Design/NightWatch/NWWidgetFaces.swift"]
+        faces += ((try? fm.contentsOfDirectory(atPath: root + "/PageWidget")) ?? []).filter { $0.hasSuffix(".swift") }.map { "PageWidget/" + $0 }
+        let readers = faces.filter { f in
+            let src = (try? String(contentsOfFile: root + "/" + f, encoding: .utf8)) ?? ""
+            return src.contains("nwDaypart") || src.contains("DaypartWeights.at(")
+        }
+        check(faces.count > 1 && readers.isEmpty, "no widget reads the time of day: \(readers)")
+    }
 }
 
 // The pulse: quiet is still, working breathes, waiting rings, a battery pause dims.
@@ -3451,7 +3681,8 @@ do {
     check(nwNear(b15.scale, 1.2602, 1e-3) && nwNear(b15.opacity, 0.8859, 1e-3) && nwNear(b15.flash, 1), "the core flashes a quarter of the way through")
     let bEnd = HoldRingSpec.burst(elapsed: 0.6)
     check(nwNear(bEnd.scale, 1) && nwNear(bEnd.opacity, 0) && nwNear(bEnd.flash, 0), "and is gone by 600 ms")
-    check(HoldRingSpec.stopAll == HoldRingSpec.irreversible, "Stop-all and Irreversible share one ring")
+    check(HoldRingSpec.stopAll.deadZone == HoldRingSpec.irreversible.deadZone, "Stop-all and Irreversible share the dead zone")
+    check(HoldRingSpec.stopAll.deadZone + HoldRingSpec.stopAll.fill == 10, "Stop-all is a 10 s hold; Irreversible stays 1.5 s")
 }
 
 // The phone's read-only "Works with" list mirrors the Mac's TerminalCatalog:
@@ -3849,6 +4080,997 @@ do {
 
     // Stated clock difference, not a bug: the Mac says "72h" for three days, the phone says "3d".
     check(FlightClock.duration(86_400 * 3) == "3d", "phone clock: three days reads 3d")
+}
+
+// MARK: Steer on a review page: the sheet's layout, its draft, and how it opens
+
+do {
+    // The layout is chosen from the sheet's height without the keyboard, and kept while a message is written.
+    check(DecisionLayout.pinned(height: 686, questionPicker: false), "a tall sheet pins its command and controls")
+    check(!DecisionLayout.pinned(height: 579, questionPicker: false) && DecisionLayout.pinned(height: 580, questionPicker: false), "580 pt is the line")
+    check(!DecisionLayout.pinned(height: 686, questionPicker: true), "the answer picker flows, however tall the sheet")
+    // Opening the keyboard shrinks the space to about 380 pt: a layout chosen from it would swap. Latched, it cannot.
+    check(DecisionLayout.pinned(height: 380, questionPicker: false, latched: true, composing: true), "composing keeps the pinned layout the keyboard squeezed")
+    check(!DecisionLayout.pinned(height: 700, questionPicker: false, latched: false, composing: true), "composing keeps the flowing layout when the height grows")
+    check(!DecisionLayout.pinned(height: 380, questionPicker: false, latched: true, composing: false), "not composing: the height decides, the latch is spent")
+    check(DecisionLayout.pinned(height: 700, questionPicker: false, latched: nil, composing: true), "composing with nothing latched yet: the height decides")
+    check(DecisionLayout.latch(current: true, composing: true) == true && DecisionLayout.latch(current: false, composing: true) == false
+          && DecisionLayout.latch(current: true, composing: false) == nil, "the latch is taken when the composer opens and dropped when it closes")
+
+    // A swipe must not eat a message.
+    check(DecisionDraftGuard.blocksSwipeDismiss(draft: "use staging", sendPending: false, phase: .open), "a draft blocks the swipe")
+    check(!DecisionDraftGuard.blocksSwipeDismiss(draft: "  \n ", sendPending: false, phase: .open), "blank text is no draft")
+    check(DecisionDraftGuard.blocksSwipeDismiss(draft: "", sendPending: true, phase: .open), "a send arming or in flight blocks the swipe")
+    check(DecisionDraftGuard.blocksSwipeDismiss(draft: "", sendPending: false, phase: .sending), "a reply on its way to the relay blocks the swipe")
+    check(!DecisionDraftGuard.blocksSwipeDismiss(draft: "", sendPending: false, phase: .sent(queued: false, slow: false)), "a reply the relay holds no longer blocks it")
+
+    // A page that resolves under a message keeps the sheet (and the message); a delivered reply still closes it.
+    check(DecisionDraftGuard.keepsDraft(phase: .resolved("answered at the Mac"), draft: "use staging"), "resolved with a draft keeps it")
+    check(DecisionDraftGuard.keepsDraft(phase: .alreadyReplied, draft: "use staging"), "already answered with a draft keeps it")
+    check(!DecisionDraftGuard.keepsDraft(phase: .resolved("x"), draft: " "), "resolved with no draft closes as before")
+    check(!DecisionDraftGuard.keepsDraft(phase: .delivered(nil), draft: "use staging"), "delivered is not kept")
+    check(DecisionDraftGuard.autoCloseDelay(phase: .resolved("x"), draft: "use staging") == nil, "a kept draft cancels the auto-close")
+    check(DecisionDraftGuard.autoCloseDelay(phase: .resolved("x"), draft: "") == 2.2, "no draft: 2.2 s as before")
+    check(DecisionDraftGuard.autoCloseDelay(phase: .delivered(nil), draft: "") == 1.4, "delivered: 1.4 s as before")
+    check(DecisionDraftGuard.autoCloseDelay(phase: .open, draft: "x") == nil, "an open page never closes itself")
+
+    // Steer opens the sheet with its message box, once, for that page, briefly.
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+    let hint = DecisionEntry(id: "p1", at: t0)
+    check(DecisionEntry.wantsComposer(hint, for: "p1", now: t0.addingTimeInterval(1)), "Steer asked for the composer on this page")
+    check(!DecisionEntry.wantsComposer(hint, for: "p2", now: t0.addingTimeInterval(1)), "another page's sheet does not take it")
+    check(!DecisionEntry.wantsComposer(hint, for: "p1", now: t0.addingTimeInterval(6)), "an old request belongs to an earlier opening")
+    check(!DecisionEntry.wantsComposer(nil, for: "p1", now: t0), "no request: the sheet opens on its buttons")
+}
+
+// MARK: Yes/No replies: the detector (the table is the same strings and answers as Android's YesNoQuestionTest.kt) and where it is offered
+
+do {
+    // Change this table and that one together: the two apps must answer every case alike.
+    let vectors: [(String, String?)] = [
+        ("I've finished the refactor. Should I run the full test suite now?", "Should I run the full test suite now?"),
+        ("All done.\n\nShould I go ahead and commit?", "Should I go ahead and commit?"),
+        ("Do you want me to run the tests?", "Do you want me to run the tests?"),
+        ("Want me to fix it?", "Want me to fix it?"),
+        ("Shall I proceed?", "Shall I proceed?"),
+        ("Fixed the bug in parser.swift. Want me to fix the other two warnings as well?", "Want me to fix the other two warnings as well?"),
+        ("I can add a migration for this.\nWould you like me to?", "Would you like me to?"),
+        ("**Should I commit these changes?**", "Should I commit these changes?"),
+        ("Everything passes.   \n\n  Shall I push?  \n\n", "Shall I push?"),
+        ("Done — should I open a PR?", "should I open a PR?"),
+        ("Quick question: do you want me to keep the old API?", "do you want me to keep the old API?"),
+        ("Is it ok if I delete the unused files?", "Is it ok if I delete the unused files?"),
+        ("Ready to proceed?", "Ready to proceed?"),
+        ("Okay to commit?", "Okay to commit?"),
+        ("That's the plan. Sound good?", "Sound good?"),
+        ("Does that sound good?", "Does that sound good?"),
+        ("Ok, should I run the linter too?", "Ok, should I run the linter too?"),
+        ("So do you want me to go ahead?", "So do you want me to go ahead?"),
+        ("Can I go ahead and delete the build folder?", "Can I go ahead and delete the build folder?"),
+        ("Would it be okay if I renamed the module?", "Would it be okay if I renamed the module?"),
+        ("Should I use `npm test` here?", "Should I use `npm test` here?"),
+        ("Proceed?", "Proceed?"),
+        ("Are you ready for me to merge?", "Are you ready for me to merge?"),
+        ("Should we split this into two PRs?", "Should we split this into two PRs?"),
+        ("Does that work for you?", "Does that work for you?"),
+        ("Shall I?", "Shall I?"),
+        ("", nil),
+        ("All done.", nil),
+        ("What should I do next?", nil),
+        ("Which file should I edit?", nil),
+        ("How do you want me to handle the error?", nil),
+        ("Why did the test fail?", nil),
+        ("Where should I put the config?", nil),
+        ("When should I run it?", nil),
+        ("Who owns this module?", nil),
+        ("Should I commit or push?", nil),
+        ("Do you want me to run the tests or the linter?", nil),
+        ("Should I commit, and with which message?", nil),
+        ("Should I fix what's broken?", nil),
+        ("```\nShould I run the tests?\n```", nil),
+        ("Here is the code:\n```swift\nlet x = 1 // should I?\n```", nil),
+        ("Do you want me to run the tests?\n```\nnpm test\n```", nil),
+        ("Should I run the tests?\n```\nnpm test", nil),
+        ("> Should I commit?", nil),
+        ("The prompt says: \"Should I run the tests?\"", nil),
+        ("She asked \"Should I commit?", nil),
+        ("Should I commit? Let me know.", nil),
+        ("Should I commit?\n\nI'll wait here.", nil),
+        ("- Should I commit?\n- Should I push?", nil),
+        ("1. Should I commit?", nil),
+        ("Should I go ahead\nand commit?", nil),
+        ("Can you share the error log?", nil),
+        ("Could you paste the stack trace?", nil),
+        ("Will you be at the Mac later?", nil),
+        ("Is the build green?", nil),
+        ("Are there any other changes?", nil),
+        ("Do the tests pass?", nil),
+        ("Should the tests run first?", nil),
+        ("Does this make sense?", nil),
+        ("Do you prefer tabs?", nil),
+        ("I wonder whether I should commit?", nil),
+        ("Should I run the full suite? Or only the unit tests?", nil),
+        ("Do you want me to run the tests", nil),
+        ("Want me to fix it? 🙂", nil),
+        ("Should I run `npm test?", nil),
+        ("Should I use Postgres vs SQLite?", nil),
+        ("Should I keep the old API versus the new one?", nil),
+        ("Should I run the tests? Should I also commit?", nil),
+        ("Would you like me to make any other changes?", nil),
+        ("Do you need anything else?", nil),
+        ("Want me to look at anything else?", nil),
+    ]
+    var allOK = true
+    for (text, expected) in vectors where YesNoQuestion.detect(text) != expected {
+        allOK = false
+        print("yes/no table: \(text.debugDescription) expected \(String(describing: expected)) got \(String(describing: YesNoQuestion.detect(text)))")
+    }
+    check(allOK, "the detector gives the shared table's answer for every case")
+    check(vectors.count == 71, "the shared yes/no table has its 71 cases (\(vectors.count))")
+    check(vectors.filter { $0.1 != nil }.count >= 20 && vectors.filter { $0.1 == nil }.count >= 20, "the table is half yes and mostly no: false positives are the worry")
+    check(YesNoQuestion.brief("Should I go ahead?") == "Should I go ahead?", "a short question is its own hint")
+    check(YesNoQuestion.brief(String(repeating: "a", count: 120)).count == 90, "a long one is cut to 90 characters")
+
+    // Where the room offers it.
+    func asst(_ id: String, _ text: String) -> TranscriptTimeline.Item {
+        .entry(TranscriptEntry(id: id, role: .assistant, text: text, at: nil, tool: nil), delivery: nil)
+    }
+    func user(_ id: String, _ text: String) -> TranscriptTimeline.Item {
+        .entry(TranscriptEntry(id: id, role: .user, text: text, at: nil, tool: nil), delivery: nil)
+    }
+    func sent(_ state: SessionDeliveryState) -> TranscriptTimeline.Item {
+        .pending(SentSessionCommand(clientId: "c1", sessionId: "s1", kind: .input, text: "Yes", sentAt: nwNow, state: state))
+    }
+    func offer(mode: RoomComposerMode = .nextTask, state: LiveSessionState = .idle, ended: Bool = false, ready: Bool = true,
+               ask: Bool = false, _ items: [TranscriptTimeline.Item]) -> String? {
+        YesNoReply.roomOffer(mode: mode, state: state, ended: ended, ready: ready, hasAsk: ask, items: items)
+    }
+    let q = asst("a1", "Tests pass.\n\nShould I commit?")
+    check(offer([user("u1", "fix it"), q]) == "Should I commit?", "idle, last message asks: offered")
+    check(offer(mode: .steer, state: .active, [q]) == nil, "mid-turn: not offered")
+    check(offer(mode: .tellInstead(pageId: "p1"), state: .waitingOnApproval, [q]) == nil, "a prompt waits (it has Approve and Deny): not offered")
+    check(offer(mode: .blocked("x"), [q]) == nil && offer(mode: .locked("x"), [q]) == nil && offer(mode: .disabled("x"), [q]) == nil,
+          "where Page cannot type: not offered")
+    check(offer(state: .rateLimited, [q]) == nil, "only an idle session, not a rate-limited one")
+    check(offer(ended: true, [q]) == nil && offer(ready: false, [q]) == nil, "an ended session or an unreachable Mac: not offered")
+    check(offer(ask: true, [q]) == nil, "a question the picker answers is left to it")
+    check(offer([q, user("u2", "Yes")]) == nil, "the user answered in the terminal: gone")
+    check(offer([q, sent(.sending)]) == nil && offer([q, sent(.typed(nil))]) == nil, "a reply sent from here, still sending or typed: gone at once")
+    check(offer([q, .entry(TranscriptEntry(id: "t1", role: .tool, text: "Bash", at: nil, tool: "Bash"), delivery: nil)]) == nil,
+          "a tool call after the question: the session moved on")
+    check(offer([asst("a2", "All done.")]) == nil && offer([]) == nil, "no question, or no story: not offered")
+
+    // The review sheet takes the page's question, behind the same gate as Steer.
+    check(YesNoReply.reviewOffer(question: "Want me to run the tests?", takesReply: true, open: true) == "Want me to run the tests?", "a finished turn that asks: offered")
+    check(YesNoReply.reviewOffer(question: "Want me to run the tests?", takesReply: false, open: true) == nil, "where the page takes no reply: not offered")
+    check(YesNoReply.reviewOffer(question: "Want me to run the tests?", takesReply: true, open: false) == nil, "once sent or resolved: not offered")
+    check(YesNoReply.reviewOffer(question: nil, takesReply: true, open: true) == nil, "no question: nothing")
+}
+
+
+// MARK: - Queued messages (hold-v1, retract-v1, reply-retract-v1, the 10 s Undo)
+// The names and strings are the Android app's (`QueuedMessagesTest.kt`): change one, change the other.
+do {
+    let t0 = Date(timeIntervalSince1970: 1_761_400_000)
+    let caps: Set<String> = ["hold-v1", "retract-v1"]
+
+    // Which way a message to a busy session may go.
+    func plan(busy: Bool = true, canType: Bool = true, canHold: Bool = true, caps c: Set<String> = caps, last: SendChoice? = nil) -> SendChoicePlan {
+        SendChoicePlan.build(busy: busy, canType: canType, canHold: canHold, caps: c, last: last)
+    }
+    check(plan(busy: false).mode == .none && !plan(busy: false).countsDown && !plan(busy: false).holds, "idle: no choice, sends at once")
+    check(plan().mode == .choice && plan().offersChoice && plan().selected == .now, "busy, both ways: the choice, Now by default")
+    check(plan(last: .whenFinished).selected == .whenFinished && plan(last: .whenFinished).holds && !plan(last: .whenFinished).countsDown,
+          "the last choice is kept, and a held message has no countdown")
+    check(plan().countsDown && !plan().holds, "send now to a busy session waits the countdown")
+    check(plan(canHold: false).mode == .none && plan(canHold: false).countsDown, "no canHold: no choice, but Undo still applies")
+    check(plan(caps: []).mode == .none && plan(caps: ["retract-v1"]).mode == .none, "an old Mac (no hold-v1): no hold option")
+    check(plan(caps: [], last: .whenFinished).selected == .now && !plan(caps: [], last: .whenFinished).holds, "a remembered hold falls back to Now when the Mac can't hold")
+    check(plan(canType: false).mode == .holdOnly && plan(canType: false).holds && plan(canType: false).selected == .whenFinished && !plan(canType: false).offersChoice,
+          "busy Codex outside cmux (canType false, canHold true): hold only, no choice")
+    check(plan(canType: false, canHold: false).mode == .none && plan(canType: false, caps: []).mode == .none, "can neither type nor hold: nothing offered")
+    check(SendChoice.now.title == "Now" && SendChoice.whenFinished.title == "When it finishes", "choice titles")
+    check(SendChoice.whenFinished.explanation(agent: "Claude") == "Held on your Mac and typed when Claude finishes. Delete it any time before."
+          && SendChoice.now.explanation(agent: "Claude") == "Claude reads it after its current step.", "choice explanations")
+
+    // The composer takes the hold-only case instead of blocking it.
+    func mode(canType: Bool, holdOnly: Bool, state: LiveSessionState = .active) -> RoomComposerMode {
+        RoomComposerMode.resolve(.init(state: state, canType: canType, typeBlocker: "Page can't type into Codex yet", holdOnly: holdOnly))
+    }
+    check(mode(canType: false, holdOnly: true) == .steer, "hold-only busy session: the composer takes text")
+    check(mode(canType: false, holdOnly: false) == .blocked("Page can't type into Codex yet"), "no hold: still blocked")
+    check(mode(canType: false, holdOnly: true, state: .idle) == .blocked("Page can't type into Codex yet"), "an idle session can't be typed to: hold-only doesn't apply")
+
+    // The 10 s countdown.
+    let cd = SendCountdown(startedAt: t0)
+    check(cd.duration == 10 && cd.deadline == t0.addingTimeInterval(10), "10 s")
+    check(cd.label(now: t0) == "Sending in 10 s · Undo" && cd.label(now: t0.addingTimeInterval(0.4)) == "Sending in 10 s · Undo", "label at the start")
+    check(cd.label(now: t0.addingTimeInterval(3.2)) == "Sending in 7 s · Undo" && cd.label(now: t0.addingTimeInterval(9.5)) == "Sending in 1 s · Undo", "label counts down, rounding up")
+    check(cd.secondsLeft(now: t0.addingTimeInterval(11)) == 0 && cd.remaining(now: t0.addingTimeInterval(11)) == 0, "never negative")
+    check(cd.progress(now: t0) == 0 && abs(cd.progress(now: t0.addingTimeInterval(5)) - 0.5) < 1e-9 && cd.progress(now: t0.addingTimeInterval(20)) == 1, "progress")
+    check(cd.verdict(now: t0.addingTimeInterval(9.9)) == .wait && cd.verdict(now: t0.addingTimeInterval(10)) == .send
+          && cd.verdict(now: t0.addingTimeInterval(39)) == .send && cd.verdict(now: t0.addingTimeInterval(41)) == .stale, "wait, send at 0, stale after 30 s asleep")
+    check(SendCountdown.yesNo == 1.2 && SendCountdown(startedAt: t0, duration: SendCountdown.yesNo).isDue(now: t0.addingTimeInterval(1.2)), "the Yes/No ring is the 1.2 s arm")
+    var q = QueuedSend(id: "c1", sessionId: "s1", text: "Then run the linter", countdown: cd)
+    check(q.phase == .counting && q.fire(now: t0.addingTimeInterval(5)) == .wait && q.phase == .counting, "counting: nothing yet")
+    var undone = q
+    check(undone.undo(now: t0.addingTimeInterval(9.99)) && undone.phase == .undone, "Undo before 0 takes it back")
+    check(undone.fire(now: t0.addingTimeInterval(10)) == .wait && undone.phase == .undone, "an undone message never sends")
+    var late = q
+    check(!late.undo(now: t0.addingTimeInterval(10)) && late.phase == .counting, "Undo at 0 refuses: the send is under way")
+    check(q.fire(now: t0.addingTimeInterval(10.1)) == .send && q.phase == .sent, "at 0 it sends")
+    check(q.fire(now: t0.addingTimeInterval(10.2)) == .wait && !q.undo(now: t0.addingTimeInterval(10.2)), "it sends once, and can't be undone afterwards")
+    var slept = QueuedSend(id: "c2", sessionId: "s1", text: "x", countdown: cd)
+    check(slept.fire(now: t0.addingTimeInterval(600)) == .stale && slept.phase == .stale, "the app slept through it: not sent")
+
+    // A kill before 0: the draft comes back, once per place.
+    let kept = OutboxRestore.restore([
+        PersistedSend(id: "b", scope: "session:s1", text: "second", startedAt: 20),
+        PersistedSend(id: "a", scope: "session:s1", text: "first", startedAt: 10),
+        PersistedSend(id: "c", scope: "page:p9", text: "  ", startedAt: 30),
+        PersistedSend(id: "d", scope: "page:p2", text: "tell it", startedAt: 40)])
+    check(kept.map(\.scope) == ["session:s1", "page:p2"] && kept[0].text == "first\n\nsecond" && kept[1].text == "tell it", "restore: oldest first, blank dropped, one draft per place")
+    check(kept[0].note == "Not sent — Page closed before the countdown ended. Your message is back here.", "restore note")
+    check(RestoredDraft.undoneNote == "Not sent — you tapped Undo. Your message is back here."
+          && RestoredDraft.slept == "Not sent — Page was asleep when the countdown ended. Your message is back here.", "undo-from-a-card and slept notes")
+    check(OutboxRestore.scope(sessionId: "s1") == "session:s1" && OutboxRestore.scope(pageId: "p9") == "page:p9", "restore scopes")
+    check(DraftRestore.merge(restored: "hello", current: "") == "hello" && DraftRestore.merge(restored: "hello", current: "and also") == "hello\n\nand also"
+          && DraftRestore.merge(restored: "hello", current: "hello") == "hello", "Undo puts the text back above anything typed since")
+    let persisted = PersistedSend(id: "x", scope: "session:s", text: "t", startedAt: 5)
+    check((try? JSONDecoder().decode(PersistedSend.self, from: JSONEncoder().encode(persisted))) == persisted, "the outbox entry round-trips")
+    let arm = YesNoArm(word: "Yes", startedAt: t0)
+    check(arm.label(now: t0) == "Sending “Yes” in 1.2 s" && arm.label(now: t0.addingTimeInterval(0.8)) == "Sending “Yes” in 0.4 s" && arm.isDue(now: t0.addingTimeInterval(1.2)) && !arm.isDue(now: t0.addingTimeInterval(1.1)), "Yes/No arm")
+
+    // The wire.
+    let listJSON = """
+    {"kind":"list","boot":"b","seq":1,"ts":1761300000000,"macName":"Studio","caps":["hold-v1","retract-v1","images-v1"],
+     "sessions":[{"id":"s1","backend":"claude","title":"page","cwd":"~/p","state":"active","canType":true,"canHold":true,
+       "held":[{"clientId":"c7","text":"Then run the linter","heldAt":"2026-10-24T12:00:00Z","state":"held"},
+               {"clientId":"c6","text":"done one","heldAt":"2026-10-24T11:00:00Z","state":"typed","at":"2026-10-24T11:30:00Z","detail":"Typed into tmux pane %3"},
+               {"clientId":"","text":"no id"}, {"clientId":"c5","state":"someday"}]},
+      {"id":"s2","backend":"codex","state":"idle","canType":true}]}
+    """
+    if let p = SessionsPlaintext.decode(Data(listJSON.utf8)), case .list(_, let ss) = p.update {
+        check(p.caps == ["hold-v1", "retract-v1", "images-v1"], "caps decoded")
+        check(ss[0].canHold && !ss[1].canHold && ss[1].held.isEmpty, "canHold defaults to false")
+        check(ss[0].held.map(\.clientId) == ["c7", "c6", "c5"], "held entries: a bad one dropped, the rest kept")
+        check(ss[0].held[0].state == .held && ss[0].held[0].state.isWaiting && ss[0].held[0].heldAt != nil, "held entry")
+        check(ss[0].held[1].state == .typed && !ss[0].held[1].state.isWaiting && ss[0].held[1].detail == "Typed into tmux pane %3" && ss[0].held[1].at != nil, "settled entry")
+        check(ss[0].held[2].state == .unknown("someday"), "unknown held state kept as unknown")
+    } else { check(false, "list with caps decodes") }
+    if let p = SessionsPlaintext.decode(Data(#"{"kind":"list","seq":1,"ts":1761300000000,"sessions":[]}"#.utf8)) { check(p.caps == [], "an older Mac sends no caps: none") } else { check(false, "old list") }
+    let heldRes = SessionsPlaintext.decode(Data(#"{"kind":"result","seq":2,"ts":1761300000000,"clientId":"c7","ok":true,"code":"queued","held":true,"detail":"Held — Page types it when Claude finishes this turn"}"#.utf8))
+    if case .result(let r)? = heldRes.map(\.update) { check(r.held && !r.fromHold && r.code == .queued && r.ok, "held result") } else { check(false, "held result decodes") }
+    let finalRes = SessionsPlaintext.decode(Data(#"{"kind":"result","seq":3,"ts":1761300000000,"clientId":"c7","ok":false,"code":"cancelled","reason":"cancelled","fromHold":true,"detail":"Deleted — not sent"}"#.utf8))
+    if case .result(let r)? = finalRes.map(\.update) { check(r.fromHold && r.code == .cancelled && !r.ok && r.reason == "cancelled", "cancelled final result") } else { check(false, "cancelled decodes") }
+    let retractRes = SessionsPlaintext.decode(Data(#"{"kind":"result","seq":4,"ts":1761300000000,"clientId":"r1","ok":true,"code":"delivered","retract":"deleted","detail":"Deleted — not sent"}"#.utf8))
+    if case .result(let r)? = retractRes.map(\.update) { check(r.retract == "deleted" && r.code == .delivered, "retract result") } else { check(false, "retract decodes") }
+    func plain(_ c: SessionCommand) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: c.plaintext(clientId: "c", viewer: "v", now: t0))) as? [String: Any] ?? [:]
+    }
+    check(plain(.input(sessionId: "s", text: "hi"))["hold"] == nil, "no hold: the same bytes as before")
+    check(plain(.input(sessionId: "s", text: "hi", hold: false))["hold"] == nil && plain(.input(sessionId: "s", text: "hi", hold: true))["hold"] as? Bool == true, "hold only when true")
+    let rh = plain(.retract(heldId: "c7", interventionId: nil)), ri = plain(.retract(heldId: nil, interventionId: "iv1"))
+    check(rh["op"] as? String == "retract" && rh["heldId"] as? String == "c7" && rh["interventionId"] == nil, "retract by heldId")
+    check(ri["op"] as? String == "retract" && ri["interventionId"] as? String == "iv1" && ri["heldId"] == nil, "retract by interventionId")
+    let ivJSON = #"{"id":"a","sessionId":"s","openedAt":"2026-10-24T01:02:03Z","deliveryStatus":"pending","deliveryForwardedAt":"2026-10-24T01:03:00Z"}"#
+    check((try? JSONDecoder.page().decode(Intervention.self, from: Data(ivJSON.utf8)))?.deliveryForwardedAt != nil, "deliveryForwardedAt decoded")
+    check((try? JSONDecoder.page().decode(Intervention.self, from: Data(#"{"id":"a","sessionId":"s","openedAt":"2026-10-24T01:02:03Z"}"#.utf8)))?.deliveryForwardedAt == nil, "no deliveryForwardedAt: nil")
+
+    // Delivery states: held, and its one final result.
+    func res(_ code: CommandResult.Code, ok: Bool? = nil, reason: String? = nil, detail: String? = nil, held: Bool = false, fromHold: Bool = false) -> CommandResult {
+        CommandResult(clientId: "c7", ok: ok ?? (code == .delivered || code == .queued), code: code, reason: reason, detail: detail, interventionId: nil, held: held, fromHold: fromHold)
+    }
+    let sending = SessionDeliveryState.sending
+    let held = sending.applying(res(.queued, detail: "Held — Page types it when Claude finishes this turn", held: true), agent: "Claude")
+    check(held == .held("Held — Page types it when Claude finishes this turn") && held.isHeld && !held.isPending, "queued + held: Held, with the Mac's words")
+    check(sending.applying(res(.queued), agent: "Claude") == .queued(nil), "queued without held: in the agent's own queue")
+    check(held.applying(res(.queued, held: true), agent: "Claude") == held, "a second held result changes nothing")
+    check(held.applying(res(.delivered, detail: "no fromHold"), agent: "Claude") == held, "held ignores a result that isn't the final one")
+    check(held.applying(res(.delivered, detail: "Typed into tmux pane %3", fromHold: true), agent: "Claude") == .typed("Typed into tmux pane %3"), "final: typed")
+    check(held.applying(res(.cancelled, ok: false, reason: "cancelled", detail: "Deleted — not sent", fromHold: true), agent: "Claude") == .deleted("Deleted — not sent"), "final: cancelled is Deleted, not Not sent")
+    check(sending.applying(res(.cancelled, ok: false, reason: "cancelled"), agent: "Claude") == .deleted("Deleted — not sent"), "cancelled without detail: the default words")
+    if case .refused(let reason, _) = held.applying(res(.refused, ok: false, reason: "expired", detail: "Not sent — the turn didn't finish within 6 hours", fromHold: true), agent: "Claude") { check(reason == "expired", "final: refused") } else { check(false, "final refused") }
+    check(SessionDeliveryState.deleted(nil).applying(res(.delivered, fromHold: true), agent: "Claude") == .deleted(nil), "deleted is settled")
+    check(held.label(.input) == "Held" && SessionDeliveryState.deleted(nil).label(.input) == "Deleted" && SessionDeliveryState.unconfirmed("x").label(.input) == "Check the session", "labels")
+    check(held.explanation(.input, agent: "Claude") == "Held — Page types it when Claude finishes this turn" && SessionDeliveryState.held(nil).explanation(.input, agent: "Claude") == "Held — sends when Claude finishes", "held words: the Mac's, else Page's")
+    check(SessionDeliveryState.queued("Queued").explanation(.input, agent: "Claude") == "Already with Claude — it reads it after this step.", "L5: already with Claude, said plainly")
+    check(SessionDeliveryState.counting(cd).explanation(.input, agent: "Claude") == "Nothing has been sent yet. Undo it and the message comes back." && !SessionDeliveryState.counting(cd).isPending && SessionDeliveryState.counting(cd).isCounting, "counting")
+
+    // Settling a held message from the row's list as well as from results.
+    func entry(_ state: HeldState, detail: String? = nil) -> HeldMessage { HeldMessage(clientId: "c7", text: "t", heldAt: t0, state: state, at: t0, detail: detail) }
+    check(sending.reconciled(entry: entry(.held), seen: false, sessionListed: true) == .held(nil), "still sending but the row holds it: Held")
+    check(held.reconciled(entry: entry(.held), seen: true, sessionListed: true) == held, "held and still held: unchanged")
+    check(held.reconciled(entry: entry(.typing), seen: true, sessionListed: true) == .held("Held — Page types it when Claude finishes this turn", note: nil, typing: true), "typing: the headline stays, Delete goes")
+    check(held.reconciled(entry: entry(.typed, detail: "Typed into tmux pane %3"), seen: true, sessionListed: true) == .typed("Typed into tmux pane %3"), "row says typed")
+    check(held.reconciled(entry: entry(.deleted), seen: true, sessionListed: true) == .deleted("Deleted — not sent"), "row says deleted")
+    check(held.reconciled(entry: entry(.ended), seen: true, sessionListed: true) == .refused(reason: "ended", message: "Not sent — the session ended"), "row says ended: refused, as the final result reads")
+    check(held.reconciled(entry: entry(.expired), seen: true, sessionListed: true) == .refused(reason: "expired", message: "Not sent — the turn didn't finish within 6 hours"), "row says expired")
+    check(held.applying(res(.refused, ok: false, reason: "ended", detail: "Not sent — the session ended", fromHold: true), agent: "Claude") == held.reconciled(entry: entry(.ended), seen: true, sessionListed: true), "the final result and the list agree on an ended session, in the Mac's words")
+    check(held.reconciled(entry: entry(.failed, detail: "Not sent — someone is typing at the Mac"), seen: true, sessionListed: true) == .failed("Not sent — someone is typing at the Mac"), "row says failed, with its reason")
+    if case .unconfirmed(let m) = held.reconciled(entry: entry(.unconfirmed), seen: true, sessionListed: true) { check(m.contains("Check the session"), "row says unconfirmed") } else { check(false, "unconfirmed") }
+    check(held.reconciled(entry: nil, seen: true, sessionListed: true) == .unconfirmed("No longer held — check the session"), "seen held, then gone with no settled state: No longer held")
+    check(held.reconciled(entry: nil, seen: false, sessionListed: false) == .unconfirmed("No longer held — check the session"), "its session left the list: No longer held")
+    check(held.reconciled(entry: nil, seen: false, sessionListed: true) == held, "race: a list built before the Mac accepted it names nothing yet: unchanged")
+    check(sending.reconciled(entry: nil, seen: true, sessionListed: true) == .sending, "a plain send is never in held[]: unchanged")
+    check(SessionDeliveryState.typed(nil).reconciled(entry: entry(.deleted), seen: true, sessionListed: true) == .typed(nil), "a settled message is never reopened")
+    check(SessionDeliveryState.noAnswer.reconciled(entry: entry(.held), seen: false, sessionListed: true) == .held(nil), "a missed result is recovered from the list")
+    check(held.reconciled(entry: entry(.unknown("later")), seen: true, sessionListed: true) == held, "an unknown state changes nothing")
+
+    // The room timeline: held messages from another device show too, oldest first.
+    func sent(_ id: String, _ state: SessionDeliveryState, at: TimeInterval) -> SentSessionCommand {
+        SentSessionCommand(clientId: id, sessionId: "s1", kind: .input, text: "mine \(id)", sentAt: t0.addingTimeInterval(at), state: state)
+    }
+    let hm = [HeldMessage(clientId: "c7", text: "same as mine", heldAt: t0, state: .held, at: nil, detail: nil),
+              HeldMessage(clientId: "other", text: "from my iPad", heldAt: t0.addingTimeInterval(-60), state: .held, at: nil, detail: nil),
+              HeldMessage(clientId: "gone", text: "old", heldAt: t0, state: .typed, at: t0, detail: nil)]
+    let pending = HeldTimeline.pending(sent: [sent("c7", .held(nil), at: 0)], held: hm, sessionId: "s1")
+    check(pending.map(\.clientId) == ["c7", "other"] && pending[1].text == "from my iPad" && pending[1].state == .held(nil), "the Mac's own held entry: one bubble, settled ones left to the transcript")
+    let merged = TranscriptTimeline.merge(entries: [], sent: pending)
+    check(merged.map(\.id) == ["p:other", "p:c7"], "pending bubbles, oldest first")
+    let echoEntry = TranscriptEntry(id: "e1", role: .user, text: "mine c7", at: t0.addingTimeInterval(5), tool: nil)
+    if case .entry(_, let delivery)? = TranscriptTimeline.merge(entries: [echoEntry], sent: [sent("c7", .held(nil), at: 0)]).first { check(delivery == nil, "a held message is not claimed by an identical line in the transcript") } else { check(true, "held stays a bubble") }
+
+    // Taking back: keyed on `retract`, never on `code`.
+    func rr(retract: String?, code: CommandResult.Code = .delivered, ok: Bool = true, reason: String? = nil, detail: String? = nil) -> CommandResult {
+        CommandResult(clientId: "r1", ok: ok, code: code, reason: reason, detail: detail, interventionId: nil, retract: retract)
+    }
+    check(RetractOutcome.from(rr(retract: "deleted", detail: "Deleted — not sent")) == .deleted("Deleted — not sent"), "deleted arrives as code delivered: still Deleted, never Typed")
+    check(RetractOutcome.from(rr(retract: "deleted")) == .deleted("Deleted — not sent"), "deleted default words")
+    check(RetractOutcome.from(rr(retract: "too_late", code: .refused, ok: false, reason: "too_late", detail: "Too late — it was already typed")) == .tooLate("Too late — it was already typed"), "too late, in the Mac's words")
+    check(RetractOutcome.from(rr(retract: "too_late", code: .refused, ok: false, reason: "too_late")) == .tooLate("Too late — it was already typed"), "too late default")
+    check(RetractOutcome.from(rr(retract: "not_found", code: .refused, ok: false, reason: "not_found", detail: "Page isn't holding that message")) == .notFound("Page isn't holding that message"), "not found")
+    check(RetractOutcome.from(rr(retract: nil, code: .refused, ok: false, reason: "too_late")) == .tooLate("Too late — it was already typed"), "no retract field: too_late from the reason")
+    check(RetractOutcome.from(rr(retract: nil, code: .refused, ok: false, reason: "not_found")) == .notFound("Page isn't holding that message"), "no retract field: not_found from the reason")
+    check(RetractOutcome.from(rr(retract: nil)) == .deleted("Deleted — not sent"), "no retract field, ok: deleted")
+    check(RetractOutcome.from(rr(retract: nil, code: .failed, ok: false, reason: "error", detail: "no")) == nil, "an error answer isn't an outcome")
+    check(RetractOutcome.deleted("x").note == .deleted("x") && RetractOutcome.tooLate("y").note == .tooLate("y") && RetractOutcome.notFound("z").note == .notFound("z"), "outcome to note")
+    check(RetractNote.deleting.text == "Deleting…" && RetractNote.deleting.isBusy && !RetractNote.deleted("x").isBusy, "deleting")
+    check(RetractNote.unconfirmed.text == "Couldn't confirm the delete — it may still be sent" && RetractNote.timeout == 20, "20 s with no answer: couldn't confirm")
+    check(RetractNote.deleted("a").isFinal && RetractNote.tooLate("a").isFinal && RetractNote.notFound("a").isFinal && !RetractNote.unconfirmed.isFinal && !RetractNote.failed("a").isFinal, "final notes")
+
+    // The relay's queue.
+    func relay(_ status: Int, _ body: String) -> RelayRetractOutcome { RelayRetractOutcome.from(status: status, body: Data(body.utf8)) }
+    check(relay(200, #"{"ok":true,"retracted":true}"#) == .deleted && relay(200, #"{"ok":true,"retracted":true}"#).note == .deleted("Deleted — not sent"), "retracted: Deleted — not sent")
+    check(relay(200, #"{"ok":true,"retracted":false,"nothing":true}"#) == .nothing && relay(200, #"{"ok":true,"retracted":false,"nothing":true}"#).note == .notFound("Nothing to delete"), "nothing: Nothing to delete")
+    check(relay(409, #"{"error":"too_late","stage":"forwarded","deliveryForwardedAt":"2026-10-24T01:03:00Z"}"#).note == .tooLate("Too late — your Mac already has it"), "too late, forwarded")
+    check(relay(409, #"{"error":"too_late","stage":"delivered"}"#).note == .tooLate("Too late — your Mac already has it"), "too late, delivered")
+    check(relay(409, #"{"error":"too_late","stage":"not_held"}"#).note == .failed("Couldn't take it back — it may still be sent"), "too late, not held: it may still be sent")
+    check(relay(409, #"{"error":"too_late","stage":"somewhere_new"}"#).note == .failed("Couldn't take it back — it may still be sent") && relay(409, #"{"error":"too_late"}"#).note == .failed("Couldn't take it back — it may still be sent"), "unknown stage")
+    check(relay(409, #"{"error":"hook_held"}"#) == .hookHeld && relay(409, #"{"error":"hook_held"}"#).note == .failed("It's waiting on the hook, so it can't be deleted."), "hook held")
+    check(relay(404, #"{"error":"not_found"}"#) == .oldRelay && relay(404, #"{"error":"not_found"}"#).note == .failed("Update your relay to delete queued replies"), "an old relay: not_found")
+    check(relay(404, #"{"error":"no_such_intervention"}"#) == .pageGone && relay(404, #"{"error":"no_such_intervention"}"#).note == nil, "a new relay's 404 is a gone page, never an old relay")
+    check(RetractNote.postFailure(.macOffline) == .failed("Your Mac is offline — try again when it's back") && RetractNote.postFailure(.accepted) == nil, "a retract the relay couldn't forward")
+    check(relay(404, "").note == .failed("Couldn't take it back — it may still be sent"), "a 404 with no error string is not called an old relay")
+    check(relay(410, #"{"error":"token_retired","why":"Replaced"}"#) == .retired("Replaced") && relay(410, #"{"error":"token_retired","why":"Replaced"}"#).note == nil, "retired token")
+    check(relay(401, "{}").note == .failed("The relay no longer accepts this pairing. Re-pair with your Mac."), "unauthorised")
+    check(relay(500, "oops").note == .failed("Couldn't take it back — it may still be sent") && RelayRetractOutcome.transportCopy == "Couldn't reach your relay — it may still be sent", "other failures")
+
+    // Which replies are queued at the relay, from what the relay returns.
+    check(RelayQueue.isQueued(deliveryStatus: "pending", forwardedAt: nil, hookBlocking: false), "pending, never forwarded: queued (docs/PROTOCOL.md)")
+    check(!RelayQueue.isQueued(deliveryStatus: "pending", forwardedAt: t0, hookBlocking: false), "forwarded: the Mac has it")
+    check(!RelayQueue.isQueued(deliveryStatus: "pending", forwardedAt: nil, hookBlocking: true), "a hook page is never queued")
+    check(!RelayQueue.isQueued(deliveryStatus: "delivered", forwardedAt: nil, hookBlocking: false) && !RelayQueue.isQueued(deliveryStatus: nil, forwardedAt: nil, hookBlocking: false), "only pending")
+    check(RelayQueue.canDelete(features: ["sessions-v1", "reply-retract-v1"]) && !RelayQueue.canDelete(features: ["sessions-v1"]) && !RelayQueue.canDelete(features: nil), "Delete only when the relay says reply-retract-v1")
+    func synced(_ local: ReplyDelivery?, status: String?, method: String? = nil, forwarded: Date? = nil, hook: Bool = false, repliedAt: Date? = nil) -> ReplyDelivery? {
+        ReplyDelivery.synced(local: local, deliveryStatus: status, deliveryDetail: "d", deliveryMethod: method, repliedAt: repliedAt, forwardedAt: forwarded, hookBlocking: hook, now: t0)
+    }
+    check(synced(nil, status: "pending") == .sent(queued: true, at: t0), "after a relaunch a queued reply is still queued (so Delete survives a cold launch)")
+    check(synced(nil, status: "pending", forwarded: t0) == .sent(queued: false, at: t0) && synced(nil, status: "pending", hook: true) == .sent(queued: false, at: t0), "forwarded or hook: not queued")
+    check(synced(.failed("x"), status: "pending") == .sent(queued: true, at: t0) && synced(.retracted("Deleted — not sent"), status: "pending") == .sent(queued: true, at: t0), "a newer reply replaces a failure or a deletion")
+    check(synced(.sent(queued: false, at: t0), status: "pending", forwarded: t0) == .sent(queued: false, at: t0), "local sent kept")
+    check(synced(.sent(queued: true, at: t0.addingTimeInterval(-60)), status: "pending", forwarded: t0) == .sent(queued: false, at: t0.addingTimeInterval(-60)), "the queue flushed: no longer queued, so Delete goes away")
+    check(synced(.sent(queued: true, at: t0), status: "failed", method: "retracted") == .retracted("d"), "the page's own record says retracted: Deleted, not a failure")
+    check(synced(.sent(queued: true, at: t0), status: "failed", method: "none") == .failed("d"), "a real failure stays one")
+    check(synced(.sending, status: "failed", method: "retracted") == .sending, "an in-progress send is never clobbered")
+    check(synced(nil, status: "delivered", method: "held_until_reset") == .heldOnMac(detail: "d") && synced(.heldOnMac(detail: nil), status: "delivered", method: "typed") == .delivered(detail: "d"), "held until reset, then typed")
+
+    // A reply waiting somewhere deletable.
+    func qs(_ delivery: ReplyDelivery?, hook: Bool = false, features: Set<String>? = ["reply-retract-v1"], mac: Set<String> = caps, note: RetractNote? = nil, resets: Date? = nil) -> ReplyQueueStatus? {
+        ReplyQueueStatus.build(.init(delivery: delivery, isHook: hook, relayFeatures: features, macCaps: mac, note: note, resetsAt: resets))
+    }
+    let atRelay = qs(.sent(queued: true, at: t0))
+    check(atRelay?.layer == .relay && atRelay?.headline == "Queued — your Mac is offline" && atRelay?.canDelete == true && atRelay?.deleting == false, "L2: queued, with Delete")
+    check(qs(.sent(queued: true, at: t0), features: ["sessions-v1"])?.canDelete == false && qs(.sent(queued: true, at: t0), features: nil)?.canDelete == false, "an old relay: queued, but no Delete")
+    check(qs(.sent(queued: true, at: t0), hook: true) == nil && qs(.sent(queued: false, at: t0)) == nil && qs(.delivered(detail: nil)) == nil && qs(nil) == nil, "not queued: nothing to show")
+    check(qs(.sent(queued: true, at: t0), note: .deleting)?.deleting == true && qs(.sent(queued: true, at: t0), note: .deleting)?.canDelete == false, "deleting: no second tap")
+    check(qs(.sent(queued: true, at: t0), note: .failed("Update your relay to delete queued replies"))?.note == .failed("Update your relay to delete queued replies"), "the note stays with the reply")
+    let atMac = qs(.heldOnMac(detail: "Will send it when the limit resets at 3:00 PM"))
+    check(atMac?.layer == .macHold && atMac?.headline == "Held on your Mac until 3:00 PM" && atMac?.canDelete == true, "L3: held until the time, with Delete")
+    check(qs(.heldOnMac(detail: nil), mac: [])?.canDelete == false && qs(.heldOnMac(detail: nil), mac: ["hold-v1"])?.canDelete == false, "an old Mac (no retract-v1): no Delete for a held reply")
+    check(qs(.heldOnMac(detail: nil), resets: t0)?.headline.hasPrefix("Held on your Mac until ") == true && qs(.heldOnMac(detail: nil))?.headline == "Held on your Mac until the limit resets", "the session's reset time, else the words")
+    check(HeldUntilReset.headline(detail: "Will send it when the limit resets at 11:45 PM.", resetsAt: nil, timeZone: .current) == "Held on your Mac until 11:45 PM", "time from the Mac's sentence")
+    check(HeldUntilReset.headline(detail: "something at the shop", resetsAt: nil, timeZone: .current) == "Held on your Mac until the limit resets", "no time in the sentence")
+
+    // Receipts.
+    let nwAt = t0
+    func cmd(_ state: SessionDeliveryState) -> SentSessionCommand { sent("c7", state, at: 0) }
+    func rc(_ state: SessionDeliveryState, at: TimeInterval = 1, retract: Bool = true, note: RetractNote? = nil) -> SendReceipt? {
+        SendReceipt.build(cmd(state), agent: "Claude", now: nwAt.addingTimeInterval(at), canRetract: retract, note: note)
+    }
+    check(rc(.counting(cd), at: 0)?.headline == "Sending in 10 s · Undo" && rc(.counting(cd), at: 0)?.countdown == cd && rc(.counting(cd), at: 0)?.tone == .working, "the Undo receipt")
+    check(rc(.counting(cd), at: 4)?.headline == "Sending in 6 s · Undo", "the Undo receipt counts down")
+    check(rc(.held(nil))?.headline == "Held — sends when Claude finishes" && rc(.held(nil))?.canDelete == true && rc(.held(nil))?.tone == .held, "held receipt, with Delete")
+    check(rc(.held("Held — Page types it when Claude finishes this turn"))?.headline == "Held — Page types it when Claude finishes this turn", "held receipt: the Mac's own words")
+    check(rc(.held(nil), retract: false)?.canDelete == false, "an old Mac: held, but no Delete")
+    check(rc(.held(nil), note: .deleting)?.canDelete == false && rc(.held(nil), note: .tooLate("Too late — it was already typed"))?.note == .tooLate("Too late — it was already typed"), "deleting / too late")
+    check(rc(.deleted(nil))?.headline == "Deleted — not sent" && rc(.deleted(nil))?.tone == .neutral && rc(.deleted(nil), at: 120) == nil, "deleted receipt fades")
+    check(rc(.unconfirmed("No longer held — check the session"))?.tone == .problem, "unconfirmed receipt is a problem")
+    check(rc(.queued(nil))?.headline == "Already with Claude — it reads it after this step." && rc(.queued(nil))?.canDelete == false, "L5 receipt: no Delete offered")
+
+    // The 10 s Undo on the page path.
+    var pa = PendingAction(rowId: "p", kind: .tellInstead, text: "x", commit: nil, startedAt: t0, armed: true, armDuration: SendCountdown.sendNow)
+    check(pa.isCountdown && pa.armLabel(now: t0.addingTimeInterval(2)) == "Sending in 8 s · Undo", "pending countdown label")
+    if case .arming(let pr) = pa.phase(now: t0.addingTimeInterval(5)) { check(abs(pr - 0.5) < 1e-9, "10 s ring progress") } else { check(false, "arming at 5 s") }
+    if case .ready = pa.phase(now: t0.addingTimeInterval(10)) { check(true, "ready at 10 s") } else { check(false, "ready at 10 s") }
+    pa.armDuration = ArmSpec.duration
+    check(!pa.isCountdown && pa.armLabel(now: t0.addingTimeInterval(0.4)).hasPrefix("Sending in 0.8 s"), "the short ring is unchanged")
+    let thread = ReceiptThread.derive(pending: PendingAction(rowId: "p", kind: .tellInstead, text: "x", commit: nil, startedAt: t0, armed: true, armDuration: 10),
+                                      delivery: nil, changedAt: nil, now: t0.addingTimeInterval(10.1))
+    check(thread.stage == .sending, "after a 10 s Undo the thread starts sending")
+
+    // Phases and cards.
+    func phase(_ d: ReplyDelivery?, live: Bool = true) -> DecisionPhase {
+        DecisionPhase.derive(.init(delivery: d, isLive: live, hasSnapshot: true, lookupFinished: true, closeReason: "replied", closeLookupFinished: true, now: t0, legacyRelay: false))
+    }
+    check(phase(.heldOnMac(detail: nil), live: false) == .heldOnMac(nil), "held on the Mac: the sheet stays after the page closes, so it can be deleted")
+    check(phase(.retracted("Deleted — not sent")) == .retracted("Deleted — not sent") && phase(.retracted("Deleted — not sent")).acceptsInput && phase(.retracted("x")).autoCloseDelay == nil, "deleted: a new reply is accepted, the sheet stays")
+    check(phase(.retracted("Deleted — not sent")).statusLine(legacyRelay: false)?.text == "Deleted — not sent" && phase(.retracted("x")).statusLine(legacyRelay: false)?.tone == .neutral, "deleted status line")
+    check(!phase(.heldOnMac(detail: nil)).acceptsInput && phase(.heldOnMac(detail: nil)).autoCloseDelay == nil, "held: no second reply, no auto close")
+    check(CardOutcome.from(pending: nil, delivery: .heldOnMac(detail: nil), now: t0) == .sending && CardOutcome.from(pending: nil, delivery: .retracted("Deleted — not sent"), now: t0) == .problem("Deleted — not sent"), "card outcomes")
+    check(ReceiptThread.derive(pending: nil, delivery: .heldOnMac(detail: nil), changedAt: t0, now: t0).stage == .held
+          && ReceiptThread.derive(pending: nil, delivery: .retracted("Deleted — not sent"), changedAt: t0, now: t0).stage == .retracted("Deleted — not sent"), "thread stages for held and deleted")
+    let ivq = Intervention(id: "a", sessionId: "s", cwd: "", projectName: "p", kind: .userInput, openedAt: t0, context: "")
+    check(ReceiptBuilder.receipt(for: ivq, delivery: .retracted("Deleted — not sent"), route: nil, now: t0)?.outcome.failureMessage == "Deleted — not sent", "Now receipt: deleted")
+    check(ReceiptBuilder.receipt(for: ivq, delivery: .heldOnMac(detail: "Will send it when the limit resets at 3:00 PM"), route: nil, now: t0)?.outcome.failureMessage == "Held on your Mac until 3:00 PM", "Now receipt: held until")
+
+    // Leaving a sheet with a message written, and the layout under it.
+    check(DecisionDraftGuard.needsConfirm(draft: "hi", countdownPending: false) && !DecisionDraftGuard.needsConfirm(draft: "  ", countdownPending: false)
+          && !DecisionDraftGuard.needsConfirm(draft: "hi", countdownPending: true), "leaving asks only about a message that isn't already on its way")
+    check(!DecisionDraftGuard.blocksSwipeDismiss(draft: "hi", sendPending: true, phase: .open, countdownPending: true) && DecisionDraftGuard.blocksSwipeDismiss(draft: "hi", sendPending: false, phase: .open), "a swipe may leave a message that is waiting out its countdown")
+    check(DecisionDraftGuard.keepsDock(composerOpen: true, draft: "hi", rowTakesReply: false) && !DecisionDraftGuard.keepsDock(composerOpen: true, draft: "hi", rowTakesReply: true)
+          && !DecisionDraftGuard.keepsDock(composerOpen: true, draft: " ", rowTakesReply: false) && !DecisionDraftGuard.keepsDock(composerOpen: false, draft: "hi", rowTakesReply: false), "the dock stays when the row stops offering a reply under a written message")
+    check(DecisionLayout.latch(height: 0, questionPicker: false, composing: true) == nil && DecisionLayout.latch(height: 700, questionPicker: false, composing: true) == true
+          && DecisionLayout.latch(height: 500, questionPicker: false, composing: true) == false && DecisionLayout.latch(height: 700, questionPicker: false, composing: false) == nil, "latch: nothing until the sheet is measured")
+    check(DecisionLayout.relatch(latched: nil, composing: true, oldHeight: 0, newHeight: 700, questionPicker: false) == true
+          && DecisionLayout.relatch(latched: nil, composing: true, oldHeight: 0, newHeight: 500, questionPicker: false) == false, "the first measurement after the composer opened at height 0 latches the layout")
+    check(DecisionLayout.relatch(latched: false, composing: true, oldHeight: 500, newHeight: 700, questionPicker: false) == false, "a latch already in force is kept")
+    check(DecisionLayout.relatch(latched: nil, composing: true, oldHeight: 500, newHeight: 700, questionPicker: false) == nil && DecisionLayout.relatch(latched: true, composing: false, oldHeight: 0, newHeight: 700, questionPicker: false) == nil, "no composer: nothing latched")
+
+    // The app asking for another sheet over one that holds a message.
+    var sq = SheetQueue(current: .decision("a"))
+    sq.setDraft(true)
+    sq.request(.decision("b"))
+    check(sq.current == .decision("a") && sq.deferred == .decision("b"), "a request waits while the open sheet holds a message")
+    sq.resolveDeferred(discard: false)
+    check(sq.current == .decision("a") && sq.deferred == nil && sq.draftHeld == .decision("a"), "keep editing: the request is dropped")
+    sq.request(.session("s1"))
+    sq.resolveDeferred(discard: true)
+    check(sq.current == nil && sq.pending == .session("s1") && sq.draftHeld == nil, "discard: the sheet closes and the asked-for one comes up")
+    sq.dismissed()
+    check(sq.current == .session("s1"), "…once the first has finished dismissing")
+    var sq2 = SheetQueue(current: .decision("a"))
+    sq2.request(.decision("a")); sq2.request(.tower(nil))
+    check(sq2.current == nil && sq2.pending == .tower(nil) && sq2.deferred == nil, "no draft held: the old behaviour")
+    var sq3 = SheetQueue(current: .decision("a"))
+    sq3.setDraft(true); sq3.setDraft(false); sq3.request(.dispatch)
+    check(sq3.deferred == nil && sq3.pending == .dispatch, "draft cleared: no wait")
+    var sq4 = SheetQueue(current: .decision("a"))
+    sq4.setDraft(true); sq4.request(.decision("a"))
+    check(sq4.deferred == nil && sq4.current == .decision("a"), "asking for the sheet already up does nothing")
+    sq4.close()
+    check(sq4.current == nil && sq4.draftHeld == nil, "close forgets the draft")
+}
+
+
+// MARK: - Follow-ups: forwarded deletes, held notes, late photo results (the Android app's, line for line)
+do {
+    let t0 = Date(timeIntervalSince1970: 1_761_400_000)
+    let caps: Set<String> = ["hold-v1", "retract-v1"]
+    func res(_ code: CommandResult.Code, reason: String? = nil, detail: String? = nil, held: Bool = false, fromHold: Bool = false, retract: String? = nil, ok: Bool? = nil) -> CommandResult {
+        CommandResult(clientId: "c7", ok: ok ?? (code == .delivered || code == .queued), code: code, reason: reason, detail: detail, interventionId: nil, held: held, fromHold: fromHold, retract: retract)
+    }
+
+    // 1. Once the relay has forwarded a pending reply it is no longer queued, so Delete goes away.
+    check(ReplyDelivery.synced(local: .sent(queued: true, at: t0), deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: t0, forwardedAt: t0.addingTimeInterval(5), hookBlocking: false, now: t0)
+          == .sent(queued: false, at: t0), "a queued reply the relay has since forwarded: sent(queued: false)")
+    check(ReplyDelivery.synced(local: .sent(queued: true, at: t0), deliveryStatus: "pending", deliveryDetail: nil, deliveryMethod: nil, repliedAt: t0, forwardedAt: nil, hookBlocking: false, now: t0)
+          == .sent(queued: true, at: t0), "…and one it hasn't stays queued")
+
+    // 2. A relay 409 `forwarded`: ask the Mac, in the relay's words.
+    check(ForwardedRetract.asksMac(stage: "forwarded", macCaps: caps) && !ForwardedRetract.asksMac(stage: "forwarded", macCaps: ["hold-v1"]) && !ForwardedRetract.asksMac(stage: "forwarded", macCaps: []), "forwarded asks only a Mac that advertises retract-v1")
+    check(!ForwardedRetract.asksMac(stage: "delivered", macCaps: caps) && !ForwardedRetract.asksMac(stage: nil, macCaps: caps) && !ForwardedRetract.asksMac(stage: "not_held", macCaps: caps), "delivered (or anything else) never chains")
+    check(RetractNote.askingMac.text == "Asking your Mac…" && RetractNote.askingMac.isBusy && !RetractNote.askingMac.isFinal, "asking: busy, Asking your Mac…")
+    check(ForwardedRetract.note(for: res(.delivered, detail: "Deleted — not sent", retract: "deleted")) == .deleted("Deleted — not sent"), "the Mac deleted it: Deleted — not sent")
+    check(ForwardedRetract.note(for: res(.delivered, retract: "deleted")) == .deleted("Deleted — not sent"), "…its default words")
+    check(ForwardedRetract.note(for: res(.refused, reason: "too_late", detail: "Too late — it was already typed", retract: "too_late", ok: false)) == .tooLate("Too late — your Mac already has it"), "too late: the relay's words, not the Mac's")
+    check(ForwardedRetract.note(for: res(.refused, reason: "not_found", detail: "Page isn't holding that message", retract: "not_found", ok: false)) == .tooLate("Too late — your Mac already has it"), "not found: Too late — your Mac already has it")
+    check(ForwardedRetract.note(for: res(.refused, reason: "disabled", ok: false)) == .failed(SessionResultCopy.refusal(reason: "disabled", detail: nil, agent: "Claude")), "another refusal: the Mac's words")
+    check(ForwardedRetract.timeoutNote == .tooLate("Too late — your Mac already has it") && ForwardedRetract.tooLate.text == "Too late — your Mac already has it", "no retract-v1, or no answer in 20 s: Too late — your Mac already has it")
+    check(ForwardedRetract.isChainNote(.askingMac) && ForwardedRetract.isChainNote(ForwardedRetract.tooLate) && !ForwardedRetract.isChainNote(.deleting) && !ForwardedRetract.isChainNote(nil) && !ForwardedRetract.isChainNote(.tooLate("Too late — it was already typed")) && ForwardedRetract.isChainNote(.failed("Typing from your phone is turned off")), "the chain's own notes")
+    // …kept on screen after the reply left the queue.
+    let chainAsk = ReplyQueueStatus.build(.init(delivery: .sent(queued: false, at: t0), isHook: false, relayFeatures: ["reply-retract-v1"], macCaps: caps, note: .askingMac))
+    check(chainAsk?.headline == "Asking your Mac…" && chainAsk?.asking == true && chainAsk?.canDelete == false && chainAsk?.deleting == false, "asking: the block stays, no button")
+    check(ReplyQueueStatus.build(.init(delivery: .sent(queued: false, at: t0), isHook: false, relayFeatures: ["reply-retract-v1"], macCaps: caps, note: ForwardedRetract.tooLate))?.headline == "Too late — your Mac already has it", "…and the final word")
+    check(ReplyQueueStatus.build(.init(delivery: .sent(queued: false, at: t0), isHook: false, relayFeatures: nil, macCaps: caps, note: nil)) == nil
+          && ReplyQueueStatus.build(.init(delivery: .sent(queued: false, at: t0), isHook: false, relayFeatures: nil, macCaps: caps, note: .deleting)) == nil
+          && ReplyQueueStatus.build(.init(delivery: .delivered(detail: nil), isHook: false, relayFeatures: nil, macCaps: caps, note: .askingMac)) == nil, "no chain note, or the Mac has typed it: nothing")
+    // The Mac's refusal (a stale clock, typing turned off) decided nothing: its words stay on screen, as on Android.
+    let chainRefused = ReplyQueueStatus.build(.init(delivery: .sent(queued: false, at: t0), isHook: false, relayFeatures: ["reply-retract-v1"], macCaps: caps, note: ForwardedRetract.note(for: res(.refused, reason: "disabled", ok: false))))
+    check(chainRefused?.headline == SessionResultCopy.refusal(reason: "disabled", detail: nil, agent: "Claude") && chainRefused?.asking == false && chainRefused?.canDelete == false, "a refusal after forwarded: the Mac's words, no button")
+    let iv = Intervention(id: "a", sessionId: "s", cwd: "", projectName: "p", kind: .userInput, openedAt: t0, context: "")
+    check(ReceiptBuilder.receipt(for: iv, delivery: .sent(queued: false, at: t0), route: nil, now: t0) == nil
+          && ReceiptBuilder.receipt(for: iv, delivery: .sent(queued: false, at: t0), route: nil, now: t0, changedAt: t0, retractNote: .askingMac)?.outcome.failureMessage == "Asking your Mac…"
+          && ReceiptBuilder.receipt(for: iv, delivery: .sent(queued: false, at: t0), route: nil, now: t0, changedAt: t0, retractNote: .deleting) == nil, "Now keeps the ask on its receipt line")
+
+    // 3. "No longer held" is not final for the Mac's own final result.
+    let gone = SessionDeliveryState.unconfirmed("No longer held — check the session")
+    check(gone.applying(res(.delivered, detail: "Typed into tmux pane %3", fromHold: true), agent: "Claude") == .typed("Typed into tmux pane %3"), "a final fromHold result replaces No longer held (typed)")
+    check(gone.applying(res(.cancelled, reason: "cancelled", detail: "Deleted — not sent", fromHold: true, ok: false), agent: "Claude") == .deleted("Deleted — not sent"), "…deleted")
+    if case .refused(let why, _) = gone.applying(res(.refused, reason: "ended", detail: "Not sent — the session ended", fromHold: true, ok: false), agent: "Claude") { check(why == "ended", "…ended") } else { check(false, "ended replaces No longer held") }
+    check(gone.applying(res(.delivered, detail: "x"), agent: "Claude") == gone, "a result that isn't the final one changes nothing")
+    let restarted = SessionDeliveryState.unconfirmed("Page restarted while typing this and won't retype it. Check the session.")
+    check(restarted.applying(res(.delivered, fromHold: true), agent: "Claude") == restarted, "any other unconfirmed state stays terminal")
+
+    // 4. A list 30 s after sending that names the session, not the message, and never held it before.
+    let held = SessionDeliveryState.held(nil)
+    check(held.reconciled(entry: nil, seen: false, sessionListed: true, sentAt: t0, now: t0.addingTimeInterval(29)) == held, "29 s: a list built before the Mac accepted it")
+    check(held.reconciled(entry: nil, seen: false, sessionListed: true, sentAt: t0, now: t0.addingTimeInterval(31)) == .unconfirmed("No longer held — check the session"), "31 s: No longer held")
+    check(SessionDeliveryState.sending.reconciled(entry: nil, seen: false, sessionListed: true, sentAt: t0, now: t0.addingTimeInterval(60)) == .sending, "a plain send is never in held[]")
+    check(held.reconciled(entry: nil, seen: false, sessionListed: true) == held && SessionDeliveryState.heldGrace == 30, "no times given: unchanged")
+
+    // 5. A held entry's detail is a note under the headline, not the headline.
+    let entryHeld = HeldMessage(clientId: "c7", text: "t", heldAt: t0, state: .held, at: nil, detail: "Not typed — someone is typing at the Mac")
+    let withNote = SessionDeliveryState.held("Held — Page types it when Claude finishes this turn").reconciled(entry: entryHeld, seen: true, sessionListed: true)
+    check(withNote == .held("Held — Page types it when Claude finishes this turn", note: "Not typed — someone is typing at the Mac", typing: false), "still held, with why the last try didn't type it")
+    check(SessionDeliveryState.sending.reconciled(entry: entryHeld, seen: false, sessionListed: true) == .held(nil, note: "Not typed — someone is typing at the Mac", typing: false), "recovered from the list: the note, not a headline")
+    check(withNote.explanation(.input, agent: "Claude") == "Held — Page types it when Claude finishes this turn · Not typed — someone is typing at the Mac"
+          && SessionDeliveryState.held(nil, note: "why").explanation(.input, agent: "Claude") == "Held — sends when Claude finishes · why", "explanation: headline · note")
+    check(SessionDeliveryState.held(nil, note: nil, typing: true).explanation(.input, agent: "Claude") == "Page is typing it into the session now."
+          && SessionDeliveryState.held(nil, note: nil, typing: true).label(.input) == "Typing it now" && withNote.label(.input) == "Held", "typing: its own words")
+    let noteReceipt = SendReceipt.build(SentSessionCommand(clientId: "c7", sessionId: "s", kind: .input, text: "t", sentAt: t0, state: withNote, target: nil), agent: "Claude", now: t0.addingTimeInterval(2), canRetract: true)
+    check(noteReceipt?.headline == "Held — Page types it when Claude finishes this turn" && noteReceipt?.detail == "Not typed — someone is typing at the Mac" && noteReceipt?.canDelete == true, "receipt: the note under the headline")
+    let typingReceipt = SendReceipt.build(SentSessionCommand(clientId: "c7", sessionId: "s", kind: .input, text: "t", sentAt: t0, state: .held(nil, note: "x", typing: true), target: nil), agent: "Claude", now: t0.addingTimeInterval(2), canRetract: true)
+    check(typingReceipt?.headline == "Typing it now" && typingReceipt?.canDelete == false && SessionDeliveryState.held(nil, note: nil, typing: true).isHeldTyping && !held.isHeldTyping, "typing: no Delete")
+    let foreign = HeldTimeline.pending(sent: [], held: [HeldMessage(clientId: "o", text: "x", heldAt: t0, state: .typing, at: nil, detail: nil),
+                                                         HeldMessage(clientId: "p", text: "y", heldAt: t0, state: .held, at: nil, detail: "why")], sessionId: "s")
+    check(foreign.map(\.state) == [.held(nil, note: nil, typing: true), .held(nil, note: "why", typing: false)], "another phone's held entries carry their note and typing")
+
+    // 6. A `retract` value this build doesn't know is a refusal, in the Mac's words.
+    check(RetractOutcome.note(for: res(.delivered, detail: "Something new", retract: "someday")) == .failed("Something new"), "unknown retract: refused, with the result's detail")
+    check(RetractOutcome.note(for: res(.delivered, retract: "someday")) == .failed("Your Mac didn't type this."), "…and the plain words when there is none")
+    check(RetractOutcome.note(for: res(.delivered, retract: "deleted")) == .deleted("Deleted — not sent") && RetractOutcome.note(for: res(.refused, reason: "stale", ok: false)) == .failed(SessionResultCopy.refusal(reason: "stale", detail: nil, agent: "Claude")), "known answers and other refusals as before")
+
+    // 7. Why a queued reply has no Delete, said up front, from the Mac only once its list has arrived.
+    func why(_ d: ReplyDelivery?, hook: Bool = false, relay: Set<String>? = ["reply-retract-v1"], mac: Set<String> = caps, list: Bool = true) -> String? {
+        QueuedDelete.whyNot(delivery: d, isHook: hook, relayFeatures: relay, macCaps: mac, hasList: list)
+    }
+    check(why(.sent(queued: true, at: t0), hook: true) == "Waiting on the hook. It can't be deleted from here.", "hook-held")
+    check(why(.sent(queued: true, at: t0), relay: ["sessions-v1"]) == "Update your relay to delete queued replies.", "an old relay")
+    check(why(.sent(queued: true, at: t0), relay: nil) == nil && why(.sent(queued: true, at: t0)) == nil && why(.sent(queued: false, at: t0), hook: true) == nil, "relay unknown yet, or a reply that can be deleted, or not queued: nothing")
+    check(why(.heldOnMac(detail: nil), mac: []) == "Update Page on your Mac to delete a held reply.", "an old Mac")
+    check(why(.heldOnMac(detail: nil), mac: [], list: false) == nil && why(.heldOnMac(detail: nil), mac: ["hold-v1"], list: false) == nil, "…but not before the first list has said what the Mac can do")
+    check(why(.heldOnMac(detail: nil)) == nil && why(.delivered(detail: nil), mac: []) == nil && why(nil) == nil, "a Mac that can take it back, or nothing queued: nothing")
+    let oldRelayBlock = ReplyQueueStatus.build(.init(delivery: .sent(queued: true, at: t0), isHook: false, relayFeatures: ["sessions-v1"], macCaps: caps, note: nil))
+    check(oldRelayBlock?.whyNot == "Update your relay to delete queued replies." && oldRelayBlock?.canDelete == false, "the block carries it")
+    check(ReplyQueueStatus.build(.init(delivery: .heldOnMac(detail: nil), isHook: false, relayFeatures: nil, macCaps: [], note: nil, hasList: false))?.whyNot == nil
+          && ReplyQueueStatus.build(.init(delivery: .heldOnMac(detail: nil), isHook: false, relayFeatures: nil, macCaps: [], note: nil, hasList: true))?.whyNot == "Update Page on your Mac to delete a held reply.", "the block: the old-Mac note only after the first list")
+
+    // 8. A late `inputImages` result still finds its bubble for 5 minutes.
+    var routes = PhotoResultRoutes()
+    routes.record(clientId: "second", bubble: "first", now: t0)
+    check(routes.bubble(for: "second", now: t0.addingTimeInterval(31)) == "first", "after the 30 s timeout the answer still finds the bubble")
+    check(routes.bubble(for: "second", now: t0.addingTimeInterval(300)) == "first" && routes.bubble(for: "second", now: t0.addingTimeInterval(301)) == nil, "…until 5 minutes")
+    check(routes.bubble(for: "other", now: t0) == nil, "an id never sent: nothing")
+    routes.record(clientId: "third", bubble: "later", now: t0.addingTimeInterval(400))
+    check(routes.bubble(for: "second", now: t0.addingTimeInterval(400)) == nil && routes.bubble(for: "third", now: t0.addingTimeInterval(400)) == "later" && !routes.isEmpty, "old routes are dropped when a new one is recorded")
+    routes.removeAll()
+    check(routes.isEmpty && routes.bubble(for: "third", now: t0.addingTimeInterval(400)) == nil, "unpairing clears them")
+    // …and a late result settles a bubble that gave up waiting.
+    check(SessionDeliveryState.noAnswer.applying(res(.delivered, detail: "Sent 2 photos to Claude"), agent: "Claude") == .typed("Sent 2 photos to Claude")
+          && SessionDeliveryState.failed("x").applying(res(.delivered), agent: "Claude") == .typed(nil), "a late result beats No answer, or a POST that looked lost")
+
+    // 9. The Mac stops offering photos with some staged: dim, and say so. A piece that fails in transit goes straight back.
+    check(PhotoOffer.build(caps: [], attach: nil, attachBlocker: nil, composer: .nextTask, ended: false, staged: 2) == PhotoOffer(mode: .unavailable("Your Mac can't take photos any more"), attach: nil, note: nil), "staged photos, Mac stopped offering: dimmed, with its reason")
+    check(PhotoOffer.build(caps: [], attach: nil, attachBlocker: nil, composer: .nextTask, ended: false, staged: 0).mode == .hidden, "nothing staged: no button")
+    var retry = PhotoUploadMachine(counts: [1])
+    let first = retry.startable(now: t0)
+    retry.finished(first[0], .failed("Couldn't reach your relay: timed out"), now: t0)
+    check(retry.backoffUntil == nil && retry.startable(now: t0) == first && retry.wait(now: t0) == 0, "a piece that failed in transit is re-queued at once, with no pause")
+    check(PhotoCopy.typing(host: "tmux") == "Typing into tmux…" && PhotoCopy.typing(host: nil) == "Typing into the session…", "the line after inputImages goes out")
+
+    // 10. Encoding: PNG when it fits, else JPEG 0.9 then the ladder; metadata always gone.
+    check(PhotoEncoder.ladder.map(\.edge) == [2000, 2000, 1600, 1280, 1024] && PhotoEncoder.ladder.map(\.quality) == [0.8, 0.6, 0.6, 0.6, 0.5] && PhotoEncoder.screenshotStep.edge == 2000 && PhotoEncoder.screenshotStep.quality == 0.9, "the ladder: 0.8, 0.6, 1600, 1280, 1024 px at 0.5; a PNG that doesn't fit starts at 0.9")
+    let pngWithMeta = photoTestData(photoTestImage(width: 400, height: 300, noise: 1), type: "public.png", gps: true, exif: true)
+    if case .success(let o) = PhotoEncoder.encode(pngWithMeta) {
+        check(o.mime == "image/png" && o.data.starts(with: [0x89, 0x50, 0x4E, 0x47]), "a PNG source that fits stays PNG")
+        check(photoProps(o.data)[kCGImagePropertyGPSDictionary] == nil && !photoHas(o.data, "GPS") && !photoHas(o.data, "Acme") && !photoHas(o.data, "private note") && !photoHas(o.data, "tEXt") && !photoHas(o.data, "iTXt")
+              && photoProps(o.data)[kCGImagePropertyTIFFDictionary] == nil && photoProps(o.data)[kCGImagePropertyIPTCDictionary] == nil,
+              "…with no GPS, camera or text chunks")
+        // ImageIO's own eXIf chunk is structural (colour space and pixel size), as in the JPEG.
+        let pngExif = Set(((photoProps(o.data)[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String })
+        check(pngExif.isSubset(of: ["ColorSpace", "PixelXDimension", "PixelYDimension"]), "…and the only Exif left is structural: \(pngExif.sorted())")
+    } else { check(false, "PNG with metadata encodes") }
+    let tinyJpeg = photoTestData(photoTestImage(width: 200, height: 150, noise: 1), gps: true)
+    if case .success(let o) = PhotoEncoder.encode(tinyJpeg) { check(o.mime == "image/jpeg" && !photoHas(o.data, "GPS"), "a small JPEG is never PNG, and loses its GPS") } else { check(false, "tiny JPEG encodes") }
+
+    // 11 (iOS). Undo on any counting bubble, except the one whose receipt carries it.
+    let cd = SendCountdown(startedAt: t0)
+    func cmd(_ id: String, _ state: SessionDeliveryState) -> SentSessionCommand { SentSessionCommand(clientId: id, sessionId: "s", kind: .input, text: "t", sentAt: t0, state: state) }
+    check(SendReceipt.bubbleOffersUndo(cmd("a", .counting(cd)), receiptId: "b") && SendReceipt.bubbleOffersUndo(cmd("a", .counting(cd)), receiptId: nil), "an older counting message: Undo on its bubble")
+    check(!SendReceipt.bubbleOffersUndo(cmd("a", .counting(cd)), receiptId: "a") && !SendReceipt.bubbleOffersUndo(cmd("a", .sending), receiptId: nil) && !SendReceipt.bubbleOffersUndo(cmd("a", .held(nil)), receiptId: nil), "the receipt's own message, or one no longer counting: none")
+}
+
+// MARK: - Photos into the room (images-v1)
+
+// A picture made in the test: smooth colour with a little noise (photo-like, a few hundred KB), as an RGBA bitmap.
+func photoTestImage(width: Int, height: Int, noise: Int = 24, alpha: Bool = false, seed: UInt64 = 7) -> CGImage {
+    let space = CGColorSpace(name: CGColorSpace.sRGB)!
+    let info = alpha ? CGImageAlphaInfo.premultipliedLast.rawValue : CGImageAlphaInfo.noneSkipLast.rawValue
+    let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space, bitmapInfo: info)!
+    var state = seed
+    func rnd() -> Int { state = state &* 6364136223846793005 &+ 1442695040888963407; return Int((state >> 33) % UInt64(max(1, noise))) }
+    let px = ctx.data!.assumingMemoryBound(to: UInt8.self)
+    let stride = ctx.bytesPerRow
+    for y in 0..<height {
+        for x in 0..<width {
+            let o = y * stride + x * 4
+            let r = (x * 255 / width + rnd()) & 255, g = (y * 255 / height + rnd()) & 255, b = ((x + y) * 255 / (width + height) + rnd()) & 255
+            let a = alpha ? (x < width / 2 ? 255 : 128) : 255
+            px[o] = UInt8(alpha ? r * a / 255 : r); px[o + 1] = UInt8(alpha ? g * a / 255 : g); px[o + 2] = UInt8(alpha ? b * a / 255 : b); px[o + 3] = UInt8(a)
+        }
+    }
+    return ctx.makeImage()!
+}
+
+/// Encodes with whatever metadata the test asks for: this is the picker's data, GPS and all.
+func photoTestData(_ image: CGImage, type: String = "public.jpeg", orientation: Int? = nil, gps: Bool = false, exif: Bool = false, quality: Double = 0.9) -> Data {
+    let out = NSMutableData()
+    let dest = CGImageDestinationCreateWithData(out, type as CFString, 1, nil)!
+    var props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+    if let o = orientation { props[kCGImagePropertyOrientation] = o }
+    if gps {
+        props[kCGImagePropertyGPSDictionary] = [kCGImagePropertyGPSLatitude: 51.5007, kCGImagePropertyGPSLatitudeRef: "N",
+                                                kCGImagePropertyGPSLongitude: 0.1246, kCGImagePropertyGPSLongitudeRef: "W"] as [CFString: Any]
+    }
+    if exif {
+        props[kCGImagePropertyExifDictionary] = [kCGImagePropertyExifDateTimeOriginal: "2026:10:24 12:00:00", kCGImagePropertyExifUserComment: "private note"] as [CFString: Any]
+        props[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFMake: "Acme", kCGImagePropertyTIFFModel: "PhoneCam 9"] as [CFString: Any]
+    }
+    CGImageDestinationAddImage(dest, image, props as CFDictionary)
+    _ = CGImageDestinationFinalize(dest)
+    return out as Data
+}
+
+func photoProps(_ data: Data) -> [CFString: Any] {
+    guard let src = CGImageSourceCreateWithData(data as CFData, nil) else { return [:] }
+    return CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] ?? [:]
+}
+
+func photoHas(_ data: Data, _ needle: String) -> Bool { data.range(of: Data(needle.utf8)) != nil }
+
+do {
+    // Availability: the button shows only with the cap AND the row's attach.
+    let allCaps: Set<String> = ["hold-v1", "retract-v1", "images-v1"]
+    func offer(_ caps: Set<String>, _ attach: String?, _ blocker: String? = nil, mode: RoomComposerMode = .nextTask, ended: Bool = false, staged: Int = 0) -> PhotoOffer {
+        PhotoOffer.build(caps: caps, attach: attach, attachBlocker: blocker, composer: mode, ended: ended, staged: staged)
+    }
+    check(offer(allCaps, "image").mode == .available && offer(allCaps, "image").attach == "image" && offer(allCaps, "image").note == nil, "an idle Claude row with attach and the cap: the button, no note")
+    check(offer([], "image").mode == .hidden && offer(["hold-v1"], "image").mode == .hidden, "no images-v1: no button, even with attach")
+    check(offer(allCaps, nil).mode == .hidden && offer(allCaps, "clipboard").mode == .hidden, "no attach (or one this phone can't explain): no button")
+    check(offer(allCaps, "path").mode == .available && offer(allCaps, "path").note == PhotoOffer.pathNote
+          && PhotoOffer.pathNote == "Terminal can't paste photos — Claude gets the file's location and opens it itself", "the path route says so in one line")
+    check(offer(allCaps, "image", mode: .steer).mode == .unavailable("Claude is working — send the photo when it finishes") && offer(allCaps, "image", mode: .steer).showsButton
+          && !offer(allCaps, "image", mode: .steer).isAvailable, "while it works: shown, dim, with its reason")
+    check(offer(allCaps, "image", mode: .tellInstead(pageId: "p")).reason == "Answer the prompt first" && offer(allCaps, "image", mode: .locked("x")).reason == "Answer the prompt first", "while it waits: Answer the prompt first")
+    check(offer(allCaps, "image", mode: .blocked("x")).mode == .hidden && offer(allCaps, "image", mode: .disabled("x")).mode == .hidden && offer(allCaps, "image", ended: true).mode == .hidden, "blocked, disabled or ended: no button")
+    check(offer(allCaps, nil, "Page can't send photos to Codex yet").note == "Page can't send photos to Codex yet" && offer(allCaps, nil, "Page can't send photos to Codex yet").mode == .hidden,
+          "attachBlocker is a one-line note on a row that takes no photos")
+    check(offer([], nil, "Page can't send photos to Codex yet").note == nil && offer(allCaps, nil, "x", mode: .steer).note == "x" && offer(allCaps, nil, "x", mode: .tellInstead(pageId: "p")).note == nil, "…only when the Mac does photos and the field takes text")
+    check(offer(["hold-v1"], "image", staged: 2).reason == "Your Mac can't take photos any more" && offer(allCaps, "image", staged: 2).mode == .available, "a Mac that stops offering photos is said out loud when some are staged")
+    check(offer(allCaps, "image").previewTail == "pasted as images, then Return" && offer(allCaps, "path").previewTail == "typed as file locations, then Return", "the preview says how they go")
+    // …through the room's own plan: the row's fields reach it.
+    var row = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .idle, host: "tmux", canType: true,
+                          typeBlocker: nil, canInterrupt: true, provider: nil, lastActivityAt: nil, interventionId: nil, preview: "")
+    row.attach = "image"
+    let planIn = RoomPlan.Inputs(session: row, character: AgentCharacter.from(backend: row.backend, provider: nil), pageRow: nil, ended: false, ready: true, macName: "Mac", caps: allCaps)
+    check(RoomPlan.build(planIn).photos.mode == .available, "an idle row: the plan offers photos")
+    var busyIn = planIn; busyIn.session = LiveSession(id: "s1", backend: .known(.claude), title: "page", cwd: "~/p", state: .active, host: "tmux", canType: true,
+                                                       typeBlocker: nil, canInterrupt: true, provider: nil, lastActivityAt: nil, interventionId: nil, preview: "", attach: "image")
+    check(RoomPlan.build(busyIn).photos.reason == PhotoOffer.busyReason, "a busy row: the plan says why not")
+    var oldMac = planIn; oldMac.caps = []
+    check(RoomPlan.build(oldMac).photos.mode == .hidden, "an old Mac (no caps): nothing offered")
+
+    // The list row's two fields.
+    let rowJSON = #"{"kind":"list","seq":1,"ts":1761300000000,"caps":["images-v1"],"sessions":[{"id":"a","backend":"claude","state":"idle","canType":true,"attach":"path"},{"id":"b","backend":"codex","state":"idle","canType":true,"attachBlocker":"Page can't send photos to Codex yet"},{"id":"c","state":"idle","attach":"wormhole"}]}"#
+    if let p = SessionsPlaintext.decode(Data(rowJSON.utf8)), case .list(_, let ss) = p.update {
+        check(p.caps == ["images-v1"] && ss[0].attach == "path" && ss[0].attachBlocker == nil, "attach decodes")
+        check(ss[1].attach == nil && ss[1].attachBlocker == "Page can't send photos to Codex yet" && ss[2].attach == nil, "attachBlocker decodes; an unknown route is none")
+    } else { check(false, "list with attach decodes") }
+
+    // The caption.
+    check(PhotoCaption.problem("what is wrong with this screen?") == nil && PhotoCaption.problem("") == nil && PhotoCaption.problem("see /tmp/notes and fix") == nil, "ordinary captions pass")
+    check(PhotoCaption.problem("/var/folders/ab/T/page-images/s1/x.png") == PhotoCaption.pathLineMessage, "a line that is only an absolute image path is refused")
+    check(PhotoCaption.problem("look\n  /Users/me/Desktop/shot.JPG  \nplease") == PhotoCaption.pathLineMessage && PhotoCaption.problem("'/Users/me/a b.png'") == PhotoCaption.pathLineMessage, "on any line, quoted or not")
+    check(PhotoCaption.problem("~/Pictures/a.webp") == PhotoCaption.pathLineMessage && PhotoCaption.problem("/etc/hosts") == nil && PhotoCaption.problem("fix /a/b.png now") == nil, "~/ counts; non-images and words around a path don't")
+    check(PhotoCaption.problem(String(repeating: "a", count: 8001)) == PhotoCaption.tooLongMessage && PhotoCaption.problem(String(repeating: "a", count: 8000)) == nil, "8000 characters at most")
+    check(PhotoCaption.pathLineMessage.contains("add a word before it"), "the Mac's wording")
+
+    // Chunking.
+    check(PhotoPieces.count(bytes: 1) == 1 && PhotoPieces.count(bytes: 32768) == 1 && PhotoPieces.count(bytes: 32769) == 2 && PhotoPieces.count(bytes: 1024 * 1024) == 32 && PhotoPieces.count(bytes: 0) == 0, "piece counts: 1 MiB is 32 pieces")
+    check(PhotoPieces.range(index: 0, bytes: 40000) == 0..<32768 && PhotoPieces.range(index: 1, bytes: 40000) == 32768..<40000 && PhotoPieces.range(index: 5, bytes: 40000).isEmpty, "piece ranges")
+    let blob = Data((0..<100_000).map { UInt8($0 % 251) })
+    var rebuilt = Data()
+    for i in 0..<PhotoPieces.count(bytes: blob.count) { rebuilt.append(blob.subdata(in: PhotoPieces.range(index: i, bytes: blob.count))) }
+    check(rebuilt == blob && PhotoPieces.count(bytes: blob.count) == 4, "the pieces put back give the photo")
+    check(PhotoPieces.sha256Hex(Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) == "4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6", "sha256 is lowercase hex (the doc's vector)")
+    let imageId = PhotoPieces.newImageId()
+    check((8...64).contains(imageId.utf8.count) && imageId.utf8.allSatisfy { ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || $0 == 95 || $0 == 45 } && imageId != PhotoPieces.newImageId(), "image ids fit [A-Za-z0-9_-]{8,64} and differ")
+
+    // The wire, against the doc's test vector.
+    let sig = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+    let vecPhoto = PreparedPhoto(id: "img_0001", data: sig, mime: "image/png", sha256: PhotoPieces.sha256Hex(sig), width: 1, height: 1, thumb: nil)
+    let partPT = SessionCommand.imagePart(sessionId: "s1", photo: PhotoRef(vecPhoto), index: 0, total: 1, data: sig).plaintext(clientId: "p1", viewer: "v1", now: Date(timeIntervalSince1970: 1_761_300_000))
+    let docPT = #"{"op":"imagePart","clientId":"p1","ts":1761300000000,"viewer":"v1","sessionId":"s1","imageId":"img_0001","index":0,"total":1,"bytes":8,"sha256":"4c4b6a3be1314ab86138bef4314dde022e600960d8689a2c8f8631802d20dab6","mime":"image/png","data":"iVBORw0KGgo="}"#
+    let a = (try? JSONSerialization.jsonObject(with: partPT)) as? NSDictionary
+    let b = (try? JSONSerialization.jsonObject(with: Data(docPT.utf8))) as? NSDictionary
+    check(a != nil && a == b, "imagePart plaintext is the doc's, field for field")
+    if let e = try? SessionCrypto.seal(Data(docPT.utf8), root: vecRoot, direction: .phoneToMac, aad: SessionFrameType.command, nonce: vecNonce) {
+        check(Base64URL.encode(e.sealed) == "sfJ3_bSsO7l2-_M4mMyqKxe10i_Q0D61cL5j4Popm85vXQ9Hp1dfQj6dH7htBjpm-mAZLF4Zn4LmtnRVzdbV-wg5ihZiEycDG8ROltjZGvf5NleVwJxZyQAh27rd_icoECLTsVeB0dO1byIYo8XlndG-KezuqN-17JSE65Aqpgg-31jI_KaizgNnnPsfF_on_Lfg0ibBnsPwNg2xNJz4GSO8b_2SX1kn36Es7xohPMngqJBCjeKMBY9wpMiFKBeRqKqf_VIC-foBtzPDdgnuD4lX2XIMHhcC6T-z_7YqiViBEha8t23VoCHhAO6F-Bvzy8CmL9jZmO4L2Ck9rm_TTTsE1TF1_uaPBnrB-Q",
+              "the doc's imagePart test vector seals to the doc's ciphertext")
+    } else { check(false, "seal the imagePart vector") }
+    // The biggest body: a 32 KiB piece with the longest ids the Mac accepts fits the Worker's 64 KiB.
+    let bigPart = Data((0..<32768).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+    let longPhoto = PreparedPhoto(id: String(repeating: "i", count: 64), data: bigPart, mime: "image/jpeg", sha256: PhotoPieces.sha256Hex(bigPart), width: 1, height: 1, thumb: nil)
+    let bigPT = SessionCommand.imagePart(sessionId: String(repeating: "s", count: 256), photo: PhotoRef(longPhoto), index: 31, total: 32, data: bigPart)
+        .plaintext(clientId: String(repeating: "c", count: 128), viewer: String(repeating: "v", count: 128), now: Date())
+    let bigBody = try! SessionCommand.requestBody(plaintext: bigPT, root: vecRoot)
+    check(bigBody.count <= SessionComposer.maxBodyBytes && bigBody.count > 59_000, "a 32 KiB piece with the longest ids is \(bigBody.count) bytes: under 64 KiB")
+    check(!(String(data: bigPT, encoding: .utf8) ?? "").contains("\\/"), "slashes are not escaped (that would inflate the body)")
+    let imgsPT = SessionCommand.inputImages(sessionId: "s1", text: "what's wrong?", photos: [PhotoRef(vecPhoto)], target: nil).plaintext(clientId: "c9", viewer: "v1", now: Date(timeIntervalSince1970: 1_761_300_000))
+    let imgsObj = (try? JSONSerialization.jsonObject(with: imgsPT)) as? [String: Any]
+    check(imgsObj?["op"] as? String == "inputImages" && imgsObj?["text"] as? String == "what's wrong?" && (imgsObj?["images"] as? [[String: Any]])?.first?["id"] as? String == "img_0001"
+          && (imgsObj?["images"] as? [[String: Any]])?.first?["bytes"] as? Int == 8 && imgsObj?["hold"] == nil, "inputImages carries the caption and the photo list; it adds nothing to input")
+    let capPlain = SessionCommand.inputImages(sessionId: "s1", text: "", photos: [PhotoRef(vecPhoto)], target: SessionTarget(session: row, macName: "Mac")).plaintext(clientId: "c9", viewer: "v1", now: Date())
+    check(((try? JSONSerialization.jsonObject(with: capPlain)) as? [String: Any])?["text"] as? String == "", "the caption may be empty")
+
+    // Re-encoding. The picker's data: 3000x2000 with GPS, EXIF and TIFF (camera) metadata.
+    let big = photoTestImage(width: 3000, height: 2000)
+    let original = photoTestData(big, gps: true, exif: true)
+    check(photoProps(original)[kCGImagePropertyGPSDictionary] != nil && photoHas(original, "Exif"), "(the test photo does carry GPS and EXIF)")
+    switch PhotoEncoder.prepare(original) {
+    case .failure(let f): check(false, "the big photo encodes: \(f)")
+    case .success(let p):
+        let props = photoProps(p.data)
+        let w = (props[kCGImagePropertyPixelWidth] as? Int) ?? 0, h = (props[kCGImagePropertyPixelHeight] as? Int) ?? 0
+        check(p.mime == "image/jpeg" && p.data.starts(with: [0xFF, 0xD8, 0xFF]), "a photo goes as JPEG")
+        check(max(w, h) <= 2000 && max(w, h) > 1200 && p.width == w && p.height == h, "long edge at most 2000 px (\(w)x\(h))")
+        check(p.bytes <= PhotoLimits.maxBytesEach && p.bytes > 20_000, "at most 1 MiB (\(p.bytes) bytes)")
+        check(props[kCGImagePropertyGPSDictionary] == nil, "NO GPS in the output")
+        check(!photoHas(p.data, "GPS") && !photoHas(p.data, "http://ns.adobe.com/xap") && !photoHas(p.data, "Acme") && !photoHas(p.data, "PhoneCam") && !photoHas(p.data, "private note"),
+              "no GPS, XMP, camera or note strings anywhere in the bytes")
+        // ImageIO itself writes a bare Exif header (colour space and pixel size, nothing about where or when).
+        let exifKeys = Set(((props[kCGImagePropertyExifDictionary] as? [CFString: Any]) ?? [:]).keys.map { $0 as String })
+        check(exifKeys.isSubset(of: ["ColorSpace", "PixelXDimension", "PixelYDimension"]), "the only Exif left is structural: \(exifKeys.sorted())")
+        check(props[kCGImagePropertyIPTCDictionary] == nil && props[kCGImagePropertyTIFFDictionary] == nil, "no IPTC, no TIFF (camera make, model, time)")
+        check(p.sha256 == PhotoPieces.sha256Hex(p.data) && p.sha256.count == 64 && p.thumb != nil && (p.thumb?.count ?? 0) < 40_000, "sha256 of the output, and a small thumbnail")
+        check(p.pieceCount == PhotoPieces.count(bytes: p.bytes) && p.pieceCount <= PhotoLimits.maxPieces, "pieces within 32")
+    }
+    // The orientation is baked into the pixels: a "rotate 90" landscape comes out portrait.
+    let turned = photoTestData(photoTestImage(width: 1600, height: 1000), orientation: 6, gps: true)
+    if case .success(let o) = PhotoEncoder.encode(turned) {
+        check(o.height > o.width && photoProps(o.data)[kCGImagePropertyOrientation] == nil || (photoProps(o.data)[kCGImagePropertyOrientation] as? Int) == 1, "orientation 6 (portrait) is baked in: \(o.width)x\(o.height)")
+    } else { check(false, "oriented photo encodes") }
+    // A small photo that already fits is still re-encoded: its GPS must not travel.
+    let small = photoTestData(photoTestImage(width: 400, height: 300), gps: true, exif: true)
+    if case .success(let o) = PhotoEncoder.encode(small) {
+        check(o.data != small && photoProps(o.data)[kCGImagePropertyGPSDictionary] == nil && !photoHas(o.data, "GPS") && !photoHas(o.data, "Acme") && max(o.width, o.height) == 400, "a small photo is re-encoded too, at its own size, with no GPS")
+    } else { check(false, "small photo encodes") }
+    // PNG: with alpha and fitting, PNG; a screenshot (a PNG source) that fits stays PNG (docs: "PNG (screenshots, when it
+    // fits; else JPEG at 0.9)"); a huge alpha picture is flattened to JPEG.
+    let alphaSmall = photoTestData(photoTestImage(width: 300, height: 200, noise: 1, alpha: true), type: "public.png")
+    if case .success(let o) = PhotoEncoder.encode(alphaSmall) { check(o.mime == "image/png" && o.data.starts(with: [0x89, 0x50, 0x4E, 0x47]), "alpha that fits stays PNG") } else { check(false, "alpha png encodes") }
+    let shot = photoTestData(photoTestImage(width: 600, height: 900, noise: 1), type: "public.png")
+    if case .success(let o) = PhotoEncoder.encode(shot) { check(o.mime == "image/png", "a screenshot that fits goes as PNG") } else { check(false, "screenshot encodes") }
+    let bigShot = photoTestData(photoTestImage(width: 2000, height: 1500, noise: 256), type: "public.png")
+    if case .success(let o) = PhotoEncoder.encode(bigShot) { check(o.mime == "image/jpeg" && o.bytes <= PhotoLimits.maxBytesEach, "a screenshot too big as PNG goes as JPEG") } else { check(false, "big screenshot encodes") }
+    check(PhotoEncoder.screenshotStep.quality == 0.9 && PhotoEncoder.ladder.map(\.quality) == [0.8, 0.6, 0.6, 0.6, 0.5], "JPEG at 0.9 after a PNG that doesn't fit, then the ladder (Android's steps)")
+    let alphaBig = photoTestData(photoTestImage(width: 2400, height: 1800, noise: 60, alpha: true), type: "public.png")
+    if case .success(let o) = PhotoEncoder.encode(alphaBig) {
+        check(o.mime == "image/jpeg" && o.bytes <= PhotoLimits.maxBytesEach && max(o.width, o.height) <= 2000, "alpha that doesn't fit as PNG is flattened to JPEG within the limits")
+    } else { check(false, "big alpha encodes") }
+    // HEIC in (when this machine can write one).
+    let heicOut = NSMutableData()
+    if let d = CGImageDestinationCreateWithData(heicOut, "public.heic" as CFString, 1, nil) {
+        CGImageDestinationAddImage(d, photoTestImage(width: 1200, height: 800), [kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 1.0, kCGImagePropertyGPSLatitudeRef: "N"] as [CFString: Any]] as CFDictionary)
+        if CGImageDestinationFinalize(d), let result = Optional(PhotoEncoder.encode(heicOut as Data)) {
+            if case .success(let o) = result { check(o.mime == "image/jpeg" && photoProps(o.data)[kCGImagePropertyGPSDictionary] == nil, "HEIC in: JPEG out, no GPS") } else { check(false, "HEIC encodes") }
+        } else { print("note: this machine cannot write HEIC; HEIC input not exercised") }
+    } else { print("note: this machine cannot write HEIC; HEIC input not exercised") }
+    // Refusals.
+    check(PhotoEncoder.encode(Data("not an image".utf8)) == .failure(.unreadable) && PhotoEncoder.encode(Data()) == .failure(.unreadable), "garbage is unreadable")
+    check(PhotoEncoder.encode(original, budget: 15_000) == .failure(.overTotal), "no room left in the 2.5 MiB: overTotal")
+    check(PhotoEncoder.encode(photoTestData(photoTestImage(width: 3000, height: 2000, noise: 256), quality: 1.0)) == .failure(.tooBig) || { if case .success(let o) = PhotoEncoder.encode(photoTestData(photoTestImage(width: 3000, height: 2000, noise: 256), quality: 1.0)) { return o.bytes <= PhotoLimits.maxBytesEach }; return false }(),
+          "pure noise either steps down to fit or is refused as too big, never over 1 MiB")
+    check(PhotoEncoder.budget(used: 0) == PhotoLimits.maxBytesEach && PhotoEncoder.budget(used: 2_000_000) == PhotoLimits.maxBytesTotal - 2_000_000 && PhotoEncoder.Failure.tooBig.message.contains("too large"), "the budget left is the smaller of 1 MiB and what's left of 2.5 MiB")
+    // Four photos fit together, one at a time against what's left.
+    var used = 0
+    var fits = true
+    for seed in 1...4 {
+        switch PhotoEncoder.prepare(photoTestData(photoTestImage(width: 3000, height: 2000, seed: UInt64(seed))), budget: PhotoEncoder.budget(used: used)) {
+        case .success(let p): used += p.bytes
+        case .failure: fits = false
+        }
+    }
+    check(fits && used <= PhotoLimits.maxBytesTotal, "four 3000x2000 photos fit 2.5 MiB (\(used) bytes)")
+
+    // The upload machine.
+    let t0 = Date(timeIntervalSince1970: 1_000)
+    var m = PhotoUploadMachine(counts: [3, 2])
+    check(m.total == 5 && m.doneCount == 0 && m.phase == .uploading && m.progressLabel == "Uploading 0 of 5", "starts uploading")
+    let first = m.startable(now: t0)
+    check(first.count == 3 && first == [PhotoPieceRef(photo: 0, index: 0), PhotoPieceRef(photo: 0, index: 1), PhotoPieceRef(photo: 0, index: 2)] && m.startable(now: t0).isEmpty, "at most 3 in flight")
+    m.finished(first[0], .accepted, now: t0)
+    let second = m.startable(now: t0)
+    check(second == [PhotoPieceRef(photo: 1, index: 0)] && m.inFlightCount == 3 && m.progressLabel == "Uploading 1 of 5", "an answer frees one slot, in order")
+    m.finished(first[1], .accepted, now: t0); m.finished(first[2], .accepted, now: t0); m.finished(second[0], .accepted, now: t0)
+    check(m.phase == .uploading && m.startable(now: t0) == [PhotoPieceRef(photo: 1, index: 1)], "not ready until every piece is accepted")
+    m.finished(PhotoPieceRef(photo: 1, index: 1), .accepted, now: t0)
+    check(m.phase == .ready && m.doneCount == 5 && m.startable(now: t0).isEmpty, "every piece got its 202: ready for inputImages")
+    // 429: back off and retry the same piece, with a growing wait that a 202 resets.
+    var r = PhotoUploadMachine(counts: [2])
+    let r1 = r.startable(now: t0)
+    r.finished(r1[0], .rateLimited, now: t0)
+    check(r.attempt(of: r1[0]) == 1 && r.backoffUntil == t0.addingTimeInterval(0.5) && r.startable(now: t0.addingTimeInterval(0.4)).isEmpty && r.wait(now: t0) == 0.5, "429: wait 0.5 s, nothing starts meanwhile")
+    let r2 = r.startable(now: t0.addingTimeInterval(0.5))
+    check(r2 == [r1[0]] && r.attempt(of: r1[0]) == 2, "…then the same piece again (a new post, so a new clientId)")
+    r.finished(r2[0], .rateLimited, now: t0.addingTimeInterval(1))
+    check(r.backoffUntil == t0.addingTimeInterval(2), "a second 429 in a row waits 1 s")
+    var waited = r.backoffUntil!
+    var gaps: [TimeInterval] = []
+    for _ in 0..<5 {
+        let p = r.startable(now: waited)
+        r.finished(p[0], .rateLimited, now: waited)
+        gaps.append(r.backoffUntil!.timeIntervalSince(waited))
+        waited = r.backoffUntil!
+    }
+    check(gaps == [2, 4, 4, 4, 4], "the wait doubles, then stops growing at 4 s: \(gaps)")
+    r.startable(now: waited).forEach { r.finished($0, .accepted, now: waited) }
+    check(r.backoffUntil == nil, "no wait left after a piece is accepted")
+    var many = PhotoUploadMachine(counts: [1])
+    var clock = t0
+    for _ in 0..<PhotoUploadMachine.maxRateLimits + 1 {
+        let p = many.startable(now: clock)
+        guard !p.isEmpty else { break }
+        many.finished(p[0], .rateLimited, now: clock)
+        clock = many.backoffUntil ?? clock
+    }
+    if case .stopped(let why) = many.phase { check(why.contains("Too many"), "endless 429s end in a message") } else { check(false, "endless 429 stops") }
+    // 503 stops everything.
+    var off = PhotoUploadMachine(counts: [4])
+    let o1 = off.startable(now: t0)
+    off.finished(o1[0], .macOffline, now: t0)
+    check(off.phase == .stopped("Your Mac went offline") && off.startable(now: t0).isEmpty, "503 mac_offline: stop, post nothing more")
+    off.finished(o1[1], .accepted, now: t0)
+    check(off.phase == .stopped("Your Mac went offline") && off.doneCount == 0, "answers that land after a stop change nothing")
+    // Transport errors are retried, then reported; other relay refusals stop at once.
+    var flaky = PhotoUploadMachine(counts: [1])
+    for n in 1...3 {
+        let p = flaky.startable(now: t0)
+        check(p.count == 1 && flaky.attempt(of: p[0]) == n, "attempt \(n)")
+        flaky.finished(p[0], .failed("Couldn't reach your relay: timed out"), now: t0)
+    }
+    check(flaky.phase == .stopped("Couldn't reach your relay: timed out"), "three transport failures in a row: stop with the reason")
+    var rejected = PhotoUploadMachine(counts: [2])
+    rejected.finished(rejected.startable(now: t0)[0], .tooLarge, now: t0)
+    check(rejected.phase == .stopped(SessionComposer.Problem.tooLarge.message), "413 stops")
+    var denied = PhotoUploadMachine(counts: [2])
+    denied.finished(denied.startable(now: t0)[0], .unauthorized, now: t0)
+    check(denied.phase == .stopped(SessionCommandOutcome.unauthorized.failureMessage!), "401 stops")
+    // 'missing': one resend of those photos' pieces, then final.
+    var miss = PhotoUploadMachine(counts: [2, 3, 1])
+    while miss.phase == .uploading { for p in miss.startable(now: t0) { miss.finished(p, .accepted, now: t0) } }
+    check(miss.phase == .ready, "uploaded")
+    check(!miss.resend(photos: []) && !miss.resend(photos: [9]) && !miss.resent, "naming no photo resends nothing")
+    check(miss.resend(photos: [1]) && miss.resent && miss.phase == .uploading && miss.doneCount == 3 && miss.progressLabel == "Uploading 3 of 6", "the named photo's 3 pieces go again")
+    let again = miss.startable(now: t0)
+    check(again == [PhotoPieceRef(photo: 1, index: 0), PhotoPieceRef(photo: 1, index: 1), PhotoPieceRef(photo: 1, index: 2)] && miss.attempt(of: again[0]) == 1, "only that photo's pieces")
+    again.forEach { miss.finished($0, .accepted, now: t0) }
+    check(miss.phase == .ready && !miss.resend(photos: [1]), "uploaded again; a second 'missing' is final")
+    var notReady = PhotoUploadMachine(counts: [2])
+    check(!notReady.resend(photos: [0]), "nothing to resend before the first upload ends")
+
+    // Draft: thumbnails, Send, labels.
+    let prepared = PreparedPhoto(id: "img_aaaaaaaa", data: Data([1, 2, 3]), mime: "image/jpeg", sha256: "", width: 1, height: 1, thumb: nil)
+    let readyItem = PhotoDraftItem(id: "a", phase: .ready(prepared)), busyItem = PhotoDraftItem(id: "b", phase: .encoding)
+    check(PhotoDraft.slots([]) == 4 && PhotoDraft.slots([readyItem, busyItem]) == 2 && PhotoDraft.slots(Array(repeating: readyItem, count: 5)) == 0, "up to 4 photos")
+    check(PhotoDraft.canSend(text: "", items: [readyItem]) && PhotoDraft.canSend(text: "look", items: []) && !PhotoDraft.canSend(text: "", items: []), "photos alone can go; words alone can go; nothing can't")
+    check(!PhotoDraft.canSend(text: "look", items: [readyItem, busyItem]) && PhotoDraft.anyEncoding([busyItem]) && PhotoDraft.prepared([readyItem, busyItem]) == [prepared], "Send waits for every photo to be encoded")
+    check(PhotoDraft.removeLabel(index: 0, count: 2) == "Photo 1 of 2, remove" && PhotoDraft.photoLabel(index: 1, count: 2) == "Photo 2 of 2" && PhotoDraft.countLabel(1) == "1 photo" && PhotoDraft.countLabel(3) == "3 photos", "accessibility labels")
+
+    // What Send does with photos.
+    let idleRow = row
+    func decide(_ mode: RoomComposerMode, _ text: String, photos: Int) -> RoomSend.Decision {
+        RoomSend.decide(mode: mode, text: text, shown: idleRow, routeSessionId: "s1", live: idleRow, ended: false, hasReplyAction: true, macName: "Mac", photos: photos)
+    }
+    check(decide(.nextTask, "", photos: 0) == .refuse(SessionComposer.Problem.empty.message), "no photos: an empty message is still refused")
+    if case .input = decide(.nextTask, "", photos: 2) { check(true, "x") } else { check(false, "photos alone are a message") }
+    check(decide(.steer, "look", photos: 1) == .refuse(PhotoOffer.busyReason) && decide(.tellInstead(pageId: "p"), "look", photos: 1) == .refuse(PhotoOffer.waitingReason), "photos never go to a working or waiting session")
+    check(decide(.nextTask, "/tmp/shot.png", photos: 1) == .refuse(PhotoCaption.pathLineMessage), "a path-only caption line is refused before anything is sent")
+    if case .input = decide(.steer, "look", photos: 0) { check(true, "x") } else { check(false, "text to a busy session is unchanged") }
+
+    // The result and the words.
+    let resultJSON = #"{"kind":"result","seq":3,"ts":1761300000000,"clientId":"c9","ok":false,"code":"refused","reason":"attachment_missing","detail":"Part of a photo didn't reach your Mac — send it again","attached":0,"missing":["img_0001","img_0002"]}"#
+    if let p = SessionsPlaintext.decode(Data(resultJSON.utf8)), case .result(let res) = p.update {
+        check(res.attached == 0 && res.missing == ["img_0001", "img_0002"] && res.reason == "attachment_missing" && !res.ok, "result: attached and missing decode")
+    } else { check(false, "result with missing decodes") }
+    if let p = SessionsPlaintext.decode(Data(#"{"kind":"result","seq":3,"ts":1761300000000,"clientId":"c9","ok":true,"code":"delivered"}"#.utf8)), case .result(let res) = p.update {
+        check(res.attached == nil && res.missing.isEmpty, "an older Mac sends neither")
+    } else { check(false, "plain result decodes") }
+    check(SessionResultCopy.refusal(reason: "attachment_missing", detail: nil, agent: "Claude") == "Part of a photo didn't reach your Mac — send it again"
+          && SessionResultCopy.refusal(reason: "attach_busy", detail: "x", agent: "Claude") == "Claude is working — send the photo when it finishes"
+          && SessionResultCopy.refusal(reason: "attachment_invalid", detail: "Your phone sent location data with the photo, so Page didn't use it", agent: "Claude").contains("location data")
+          && SessionResultCopy.refusal(reason: "attach_unsupported", detail: nil, agent: "Claude").contains("can't take photos"), "the new reasons have their copy")
+    check(PhotoCopy.delivered(detail: "Sent 2 photos to Claude in tmux pane %3", attached: 2, count: 2, attach: "image") == "Sent 2 photos to Claude in tmux pane %3", "the Mac's own sentence wins")
+    check(PhotoCopy.delivered(detail: nil, attached: 2, count: 2, attach: "image") == "Sent 2 photos to Claude"
+          && PhotoCopy.delivered(detail: nil, attached: 1, count: 2, attach: "image") == "Sent, but Claude received 1 of 2 photos"
+          && PhotoCopy.delivered(detail: nil, attached: 0, count: 1, attach: "image") == "Sent, but Claude took the photo as a file location, not an image"
+          && PhotoCopy.delivered(detail: nil, attached: 0, count: 1, attach: "path") == "Sent as a file location — Claude opens the photo itself (not attached)"
+          && PhotoCopy.delivered(detail: nil, attached: nil, count: 1, attach: "image") == "Sent the photo to Claude — it hasn't logged it yet", "delivered, without the Mac's sentence")
+
+    // The sent message: bubble labels and receipt.
+    let sendTarget = SessionTarget(session: row, macName: "Studio MBP")
+    let tNow = Date(timeIntervalSince1970: 5_000)
+    func photoCmd(_ state: SessionDeliveryState, phase: PhotoSend.Phase = .typing, attached: Int? = nil, text: String = "what is this?") -> SentSessionCommand {
+        var c = SentSessionCommand(clientId: "m1", sessionId: "s1", kind: .input, text: text, sentAt: tNow, state: state, target: sendTarget)
+        c.photos = PhotoSend(count: 2, attach: "image", phase: phase, attached: attached)
+        return c
+    }
+    let up = photoCmd(.sending, phase: .uploading(done: 7, total: 13))
+    check(up.statusLabel() == "Uploading 7 of 13" && photoCmd(.sending).statusLabel() == "Typing into tmux…", "bubble: Uploading 7 of 13, then Typing into tmux…")
+    let upReceipt = SendReceipt.build(up, agent: "Claude", now: tNow)
+    check(upReceipt?.headline == "Uploading 7 of 13" && upReceipt?.tone == .working && upReceipt?.progress == 7.0 / 13.0 && upReceipt?.detail?.hasPrefix("2 photos to ") == true, "receipt while uploading: words and a bar")
+    check(SendReceipt.build(photoCmd(.sending), agent: "Claude", now: tNow)?.headline == "Typing into tmux…", "receipt while the Mac puts them in")
+    let doneCmd = photoCmd(.typed("Sent 2 photos to Claude in tmux pane %3"), attached: 2)
+    check(SendReceipt.build(doneCmd, agent: "Claude", now: tNow)?.headline == "Sent 2 photos to Claude in tmux pane %3" && SendReceipt.build(doneCmd, agent: "Claude", now: tNow)?.tone == .good
+          && doneCmd.statusLabel() == "Sent" && doneCmd.statusExplanation(agent: "Claude") == "Sent 2 photos to Claude in tmux pane %3", "receipt and bubble: the Mac's sentence")
+    let pathCmd = photoCmd(.typed("Sent as a file location — Claude opens the photo itself (not attached)"), attached: 0)
+    check(SendReceipt.build(pathCmd, agent: "Claude", now: tNow)?.tone == .neutral, "a path-route delivery is not dressed up as attached")
+    check(SendReceipt.build(photoCmd(.refused(reason: "attach_busy", message: PhotoOffer.busyReason)), agent: "Claude", now: tNow)?.headline == "Refused: \(PhotoOffer.busyReason)"
+          && SendReceipt.build(photoCmd(.noAnswer), agent: "Claude", now: tNow)?.headline == "No answer from Studio MBP"
+          && photoCmd(.noAnswer).statusExplanation(agent: "Claude") == PhotoCopy.noAnswer, "refused and no answer read as for any message")
+    check(SendReceipt.build(doneCmd, agent: "Claude", now: tNow.addingTimeInterval(61)) == nil, "a good receipt fades after a minute")
+    check(SessionDeliveryState.sending.timedOut(sentAt: tNow, now: tNow.addingTimeInterval(25)) == .noAnswer
+          && SessionDeliveryState.sending.timedOut(sentAt: tNow, now: tNow.addingTimeInterval(25), timeout: PhotoLimits.resultTimeout) == .sending
+          && SessionDeliveryState.sending.timedOut(sentAt: tNow, now: tNow.addingTimeInterval(30), timeout: PhotoLimits.resultTimeout) == .noAnswer, "photos wait 30 s for the result (text 20 s)")
+
+    // The transcript: chips, the count, and matching the phone's own bubble.
+    let entries = try! JSONDecoder.page().decode(LossyList<TranscriptEntry>.self, from: Data(#"[{"id":"u1","role":"user","text":"[Image #1] [Image #2]what are these?","images":2},{"id":"u2","role":"user","text":"[2 images]","images":2},{"id":"u3","role":"user","text":"plain","images":0},{"id":"a1","role":"assistant","text":"hi","images":3}]"#.utf8)).elements
+    check(entries[0].images == 2 && entries[0].photoCount == 2 && entries[0].displayText == "what are these?" && entries[1].displayText == "" && entries[2].photoCount == 0 && entries[2].displayText == "plain", "transcript entries carry the photo count and show the words without the chips")
+    check(entries[3].images == 0, "only user entries carry photos")
+    check(TranscriptEntry(id: "x", role: .user, text: "hi", at: nil, tool: nil).images == 0, "existing callers still build entries")
+    check(PhotoEcho.caption(of: "[Image #1] [Image #2]what are these?") == "what are these?" && PhotoEcho.caption(of: "[Image]") == "" && PhotoEcho.caption(of: "[2 images]") == ""
+          && PhotoEcho.caption(of: "look\nPhoto from my phone: /var/x/a.jpg\nPhoto from my phone: /var/x/b.jpg") == "look", "chips, placeholders and path lines are not the caption")
+    let sentAt = Date(timeIntervalSince1970: 9_000)
+    func echoEntry(_ id: String, _ text: String, images: Int) -> TranscriptEntry { TranscriptEntry(id: id, role: .user, text: text, at: sentAt.addingTimeInterval(5), tool: nil, images: images) }
+    var pendingPhoto = photoCmd(.typed("Sent 2 photos"), attached: 2)
+    pendingPhoto.sentAt = sentAt
+    var items = TranscriptTimeline.merge(entries: [echoEntry("e1", "[Image #1] [Image #2]what is this?", images: 2)], sent: [pendingPhoto])
+    check(items.count == 1 && { if case .entry(_, let d) = items[0] { return d?.clientId == "m1" }; return false }(), "the phone's photo message is matched to its transcript row (no duplicate bubble)")
+    var noCaption = photoCmd(.typed("Sent"), attached: 2, text: ""); noCaption.sentAt = sentAt
+    items = TranscriptTimeline.merge(entries: [echoEntry("e1", "[2 images]", images: 2)], sent: [noCaption])
+    check(items.count == 1, "…also with no caption")
+    items = TranscriptTimeline.merge(entries: [echoEntry("e1", "what is this?\nPhoto from my phone: /var/x/a.jpg", images: 0)], sent: [pendingPhoto])
+    check(items.count == 1, "…also on the path route")
+    items = TranscriptTimeline.merge(entries: [echoEntry("e1", "what is this?", images: 0)], sent: [pendingPhoto])
+    check(items.count == 2, "a plain text entry with the same words is not the photo message")
+    var textCmd = SentSessionCommand(clientId: "t1", sessionId: "s1", kind: .input, text: "what is this?", sentAt: sentAt, state: .typed(nil), target: sendTarget)
+    items = TranscriptTimeline.merge(entries: [echoEntry("e1", "[Image #1]what is this?", images: 1)], sent: [textCmd])
+    check(items.count == 2, "and a text message never claims a photo row")
+    textCmd.sentAt = sentAt
+    var pendingUp = pendingPhoto; pendingUp.state = .sending
+    items = TranscriptTimeline.merge(entries: [echoEntry("e1", "[Image #1] [Image #2]what is this?", images: 2)], sent: [pendingUp])
+    check(items.count == 1, "the row may arrive before the Mac's result")
 }
 
 print("passes=\(passes) failures=\(failures)")

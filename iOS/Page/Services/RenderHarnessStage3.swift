@@ -159,6 +159,80 @@ enum RenderFixtures3 {
             i.session = session("room-local", "tokenizer-lab", backend: "opencode", provider: "ollama", state: .active, preview: "Generating…")
             i.transcript = SessionTranscript(sessionId: "room-local", entries: localEntries, truncated: false)
             i.screen = nil; i.runs = []; i.fiveHourPct = nil; i.sent = []; i.diff = nil
+        case "room-yesno", "room-yesno-draft", "room-yesno-arm":
+            // Idle, and Claude's last message asks a yes/no question: Yes and No lead the quick replies.
+            i.session = session("room-claude", "mac-on-claude-code", state: .idle, ago: 120)
+            i.transcript = SessionTranscript(sessionId: "room-claude", entries: [
+                entry("y1", .user, "Fix the flaky ordering test.", ago: 900),
+                entry("y2", .assistant, "The test sorted by timestamp, and two events can share one. I sort by id as well now, and ran the suite five times: all green.\n\nShould I go ahead and commit?", ago: 130)],
+                truncated: false)
+            i.screen = nil; i.runs = []; i.diff = nil; i.sent = []
+            // Yes was tapped 0.4 s ago: the 1.2 s ring runs, and Cancel still works.
+            if screen == "room-yesno-arm" { i.yesNoArm = YesNoArm(word: "Yes", startedAt: now.addingTimeInterval(-0.4)) }
+        case "room-queue-choice", "room-queue-undo", "room-queue-held", "room-queue-bubbles":
+            // A busy session on a Mac that holds messages (hold-v1) and takes them back (retract-v1).
+            i.caps = ["hold-v1", "retract-v1"]
+            i.session.canHold = true
+            i.screen = nil; i.runs = []; i.diff = nil
+            let target = SessionTarget(session: i.session, macName: mac)
+            switch screen {
+            case "room-queue-choice":
+                i.choiceExplained = false
+            case "room-queue-undo":
+                // Send was tapped 3 s ago: 7 s left to Undo, and nothing has been sent.
+                i.choiceExplained = true
+                let cd = SendCountdown(startedAt: now.addingTimeInterval(-3))
+                let c = SentSessionCommand(clientId: "c-3", sessionId: "room-claude", kind: .input, text: "Then run the linter",
+                                           sentAt: now.addingTimeInterval(-3), state: .counting(cd), target: target)
+                i.sent.append(c); i.latestInput = c
+            default:
+                // Two held messages from this phone, and one the Mac holds from another device. Delete on each.
+                i.choiceExplained = true
+                i.lastChoice = .whenFinished
+                let a = SentSessionCommand(clientId: "c-3", sessionId: "room-claude", kind: .input, text: "Then run the linter",
+                                           sentAt: now.addingTimeInterval(-200), state: .held(nil), target: target)
+                let b = SentSessionCommand(clientId: "c-4", sessionId: "room-claude", kind: .input, text: "And update the changelog",
+                                           sentAt: now.addingTimeInterval(-40), state: .held(nil), target: target)
+                i.sent += [a, b]
+                // Without a receipt above the field, each bubble carries its own Delete.
+                if screen == "room-queue-held" { i.latestInput = b }
+                i.session.held = [
+                    HeldMessage(clientId: "other-1", text: "Bump the version after that", heldAt: now.addingTimeInterval(-300), state: .held, at: nil, detail: nil),
+                    HeldMessage(clientId: "c-3", text: "Then run the linter", heldAt: now.addingTimeInterval(-200), state: .held, at: nil, detail: nil),
+                    HeldMessage(clientId: "c-4", text: "And update the changelog", heldAt: now.addingTimeInterval(-40), state: .held, at: nil, detail: nil)]
+            }
+        case "room-photos-composer", "room-photos-path", "room-photos-busy", "room-photos-uploading", "room-photos-bubble":
+            // A Mac that takes photos (images-v1) and a Claude row with a way for them to reach it.
+            i.caps = ["hold-v1", "retract-v1", "images-v1"]
+            i.screen = nil; i.runs = []; i.diff = nil; i.sent = []
+            if screen != "room-photos-busy" { i.session = session("room-claude", "mac-on-claude-code", state: .idle, ago: 120) }
+            i.session.attach = screen == "room-photos-path" ? "path" : "image"
+            let target = SessionTarget(session: i.session, macName: mac)
+            switch screen {
+            case "room-photos-composer":
+                i.photos = [RenderPhotos.item(0), RenderPhotos.item(1)]
+            case "room-photos-path":
+                i.photos = [RenderPhotos.item(2)]
+            case "room-photos-busy":
+                // The dimmed button was tapped: the reason is shown.
+                i.composerProblem = PhotoOffer.busyReason
+            case "room-photos-uploading":
+                var c = SentSessionCommand(clientId: "c-5", sessionId: "room-claude", kind: .input, text: "What's wrong with this screen?",
+                                           sentAt: now.addingTimeInterval(-4), state: .sending, target: target)
+                c.photos = PhotoSend(count: 2, attach: "image", phase: .uploading(done: 7, total: 13), attached: nil)
+                i.sent = [c]; i.latestInput = c
+            default:
+                i.transcript = SessionTranscript(sessionId: "room-claude", entries: [
+                    entry("p1", .user, "Fix the flaky ordering test.", ago: 900),
+                    entry("p2", .assistant, "Done: the test sorts by id as well now, and the suite is green five runs in a row.", ago: 600),
+                    TranscriptEntry(id: "p3", role: .user, text: "[Image #1] [Image #2]What's wrong with this screen?", at: now.addingTimeInterval(-40), tool: nil, images: 2),
+                    entry("p4", .assistant, "The second screenshot shows the Send button greyed out while the first has it lit: the draft is empty in the second.", ago: 20)], truncated: false)
+                var c = SentSessionCommand(clientId: "c-5", sessionId: "room-claude", kind: .input, text: "What's wrong with this screen?",
+                                           sentAt: now.addingTimeInterval(-45), state: .typed("Sent 2 photos to Claude in cmux"), target: target)
+                c.photos = PhotoSend(count: 2, attach: "image", phase: .typing, attached: 2)
+                i.sent = [c]
+                i.latestInput = c
+            }
         case "room-ended":
             i.session = session("room-claude", "mac-on-claude-code", state: .idle, ago: 400)
             i.ended = true
@@ -194,7 +268,9 @@ enum RenderFixtures3 {
         case "room-stop": data.fixedStop = 0.62
         default: break
         }
-        return Room(data: data, lens: RoomLens.resolve(lens, offered: data.lenses), draft: screen == "room-draft" ? "Run the tests, then stop" : "",
+        let draft = screen == "room-draft" ? "Run the tests, then stop" : screen == "room-yesno-draft" ? "Yes, and push it too"
+            : screen == "room-queue-choice" ? "Then run the linter" : screen == "room-photos-composer" ? "What's wrong with this screen?" : ""
+        return Room(data: data, lens: RoomLens.resolve(lens, offered: data.lenses), draft: draft,
                     runId: "wf1")
     }
 
@@ -358,6 +434,29 @@ struct HarnessWidgets: View {
             }
             .padding(.horizontal, 17).padding(.top, 60).padding(.bottom, 30)
         }
+    }
+}
+/// Photos for the render harness: pictures drawn in code, then put through the real re-encoder.
+enum RenderPhotos {
+    static func item(_ seed: Int) -> PhotoDraftItem {
+        let palettes: [[(CGFloat, CGFloat, CGFloat)]] = [[(0.10, 0.28, 0.55), (0.95, 0.62, 0.30)], [(0.08, 0.40, 0.36), (0.85, 0.85, 0.55)], [(0.35, 0.18, 0.50), (0.95, 0.45, 0.55)]]
+        let c = palettes[seed % palettes.count]
+        let w = 1600, h = 1200
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [
+            CGColor(red: c[0].0, green: c[0].1, blue: c[0].2, alpha: 1), CGColor(red: c[1].0, green: c[1].1, blue: c[1].2, alpha: 1)] as CFArray, locations: [0, 1])!
+        ctx.drawLinearGradient(gradient, start: .zero, end: CGPoint(x: w, y: h), options: [])
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.22))
+        ctx.fillEllipse(in: CGRect(x: w / 5 + seed * 90, y: h / 4, width: h / 2, height: h / 2))
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.18))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h / 5))
+        let out = NSMutableData()
+        let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+        CGImageDestinationFinalize(dest)
+        guard case .success(let photo) = PhotoEncoder.prepare(out as Data) else { return PhotoDraftItem(id: "render-\(seed)", phase: .encoding) }
+        return PhotoDraftItem(id: "render-\(seed)", phase: .ready(photo))
     }
 }
 #endif

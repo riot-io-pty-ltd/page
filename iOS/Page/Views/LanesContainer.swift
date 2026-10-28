@@ -7,6 +7,7 @@ struct LanesContainer: View {
     @EnvironmentObject var pairing: PairingStore
     @EnvironmentObject var router: AppRouter
     @EnvironmentObject var activity: ActivityStore
+    @Environment(\.nwDaypart) private var daypart
 
     var body: some View {
         // Ages and presence re-evaluate every 5 s. The store bumps `waitTick`
@@ -35,6 +36,7 @@ struct LanesContainer: View {
                                      others: pairing.otherStatus, now: now)
         var data = LanesScreenData(fleet: sky, lanes: lanes, now: now, standby: macs)
         data.duskDawn = activity.duskDawn
+        data.daypart = daypart
         if availability != .ready { data.availability = SessionAvailabilityCopy(availability) }
         var a = LanesScreenActions()
         a.openRow = { row in

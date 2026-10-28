@@ -66,6 +66,17 @@ struct PulseModel: Equatable {
         dates.map { max(0, now.timeIntervalSince($0)) }.max() ?? 0
     }
 
+    /// The ripple's pace changes in steps this long.
+    static let paceStep: TimeInterval = 15
+
+    /// A wait as the live surfaces pace the ripple: whole `paceStep`s. A
+    /// ring's phase is `t / emissionInterval`, so every change to the pace
+    /// moves the rings at once; in steps, they only re-pace every 15 s (as
+    /// often as Android's), however often the screen is rebuilt. Pure.
+    static func pacedWait(_ wait: TimeInterval) -> TimeInterval {
+        (max(0, wait) / paceStep).rounded(.down) * paceStep
+    }
+
     /// True while the pulse moves at all. Quiet and dusk are still, so they
     /// run no clock and cost nothing.
     var isAnimated: Bool { mode == .working || mode == .waiting }

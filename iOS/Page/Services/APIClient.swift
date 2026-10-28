@@ -292,7 +292,9 @@ final class APIClient: NSObject, ObservableObject {
             if let touched = deliveryTouchedSeq[iv.id], touched > startSeq { continue }
             let local = deliveries[iv.id]
             let next = ReplyDelivery.synced(local: local, deliveryStatus: iv.deliveryStatus,
-                                            deliveryDetail: iv.deliveryDetail, repliedAt: iv.repliedAt, now: now)
+                                            deliveryDetail: iv.deliveryDetail, deliveryMethod: iv.deliveryMethod,
+                                            repliedAt: iv.repliedAt, forwardedAt: iv.deliveryForwardedAt,
+                                            hookBlocking: iv.isBlockingHook, now: now)
             if next != local { deliveries[iv.id] = next; deliveryTimes[iv.id] = now }
         }
     }
@@ -436,6 +438,71 @@ final class APIClient: NSObject, ObservableObject {
             setDelivery(interventionId, .failed(message))
         }
         return outcome
+    }
+
+    /// DELETE /reply/<id>: takes back a reply the relay is holding for an offline Mac. Offered only when
+    /// `/status` lists `reply-retract-v1`; an old relay would answer 404 `not_found`. The answer is said
+    /// in words under the reply (`SessionStore.retractNotes`), and a deleted reply frees the page.
+    func retractReply(_ id: String) async {
+        let store = SessionStore.shared
+        guard RelayQueue.canDelete(features: store.relayFeatures), store.retractNotes[id]?.isBusy != true else { return }
+        #if DEBUG
+        if isDevMode {
+            store.noteRelayRetract(id: id, .deleting)
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            setDelivery(id, .retracted(SessionDeliveryState.deletedCopy))
+            store.noteRelayRetract(id: id, .deleted(SessionDeliveryState.deletedCopy))
+            return
+        }
+        #endif
+        guard let creds = credentials(), let url = creds.url("reply", id) else {
+            store.noteRelayRetract(id: id, .failed("Page isn't paired with a Mac."))
+            return
+        }
+        store.noteRelayRetract(id: id, .deleting)
+        let outcome: RelayRetractOutcome
+        do {
+            let (data, status) = try await perform(request(url, method: "DELETE", token: creds.token))
+            outcome = RelayRetractOutcome.from(status: status, body: data)
+        } catch {
+            outcome = .failed(RelayRetractOutcome.transportCopy)
+        }
+        guard creds == credentials() else { return }
+        // "forwarded": the relay handed it to the Mac, which may still hold it (rate-limit or resume queue), so the
+        // note is Page's ask to the Mac, not the relay's last word. "delivered" never asks.
+        var askMac = false
+        if case .tooLate(let stage) = outcome, ForwardedRetract.asksMac(stage: stage, macCaps: store.macCaps) { askMac = true }
+        store.noteRelayRetract(id: id, askMac ? .askingMac : outcome.note)
+        switch outcome {
+        case .deleted:
+            setDelivery(id, .retracted(SessionDeliveryState.deletedCopy))
+        case .tooLate(let stage):
+            // The Mac has it: no longer queued, so it waits for the Mac's own word.
+            if stage == "forwarded" || stage == "delivered" { setDelivery(id, .sent(queued: false, at: Date())) }
+            if askMac, let sessionId = (inbox + history).first(where: { $0.id == id })?.sessionId {
+                store.askMacToRetractForwarded(interventionId: id, sessionId: sessionId)
+            } else if askMac {
+                store.noteRelayRetract(id: id, ForwardedRetract.timeoutNote)
+            }
+        case .nothing:
+            // The relay holds nothing for this page: look again at what it says happened.
+            Task { await refreshInbox() }
+        case .pageGone:
+            // The page isn't pending any more: nothing of it is left to answer or delete.
+            setDelivery(id, .gone)
+        case .retired(let why):
+            markRetired(why)
+        case .hookHeld, .oldRelay, .failed:
+            break
+        }
+    }
+
+    /// The Mac deleted a reply it was holding (a `retract` answered `deleted`): the page takes a new reply.
+    func markRetracted(interventionId id: String, detail: String) {
+        switch deliveries[id] {
+        case .heldOnMac?, .sent?, .delivered?: setDelivery(id, .retracted(detail))
+        default: break
+        }
     }
 
     /// POST /sessions/command with an already-encrypted `{"e": …}` body.
@@ -855,8 +922,14 @@ final class APIClient: NSObject, ObservableObject {
         case "reply.result":
             guard let id = payload["interventionId"] as? String else { return }
             let detail = (payload["detail"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let method = payload["method"] as? String
             if (payload["success"] as? Bool) == true {
-                setDelivery(id, .delivered(detail: detail))
+                // Held on the Mac until a rate limit resets: not typed yet, and still deletable.
+                setDelivery(id, method == HeldUntilReset.method ? .heldOnMac(detail: detail) : .delivered(detail: detail))
+            } else if (payload["cancelled"] as? Bool) == true || method == RetractedReply.method {
+                // Taken back, from this phone or another: nothing was typed.
+                setDelivery(id, .retracted(detail ?? SessionDeliveryState.deletedCopy))
+                SessionStore.shared.noteRelayRetract(id: id, nil)
             } else {
                 setDelivery(id, .failed(detail ?? "Your Mac couldn't deliver the reply."))
             }

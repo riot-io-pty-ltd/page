@@ -77,11 +77,13 @@ enum DevBypass {
         let now = Date()
         func s(_ id: String, _ backend: String, _ title: String, _ state: LiveSessionState, host: String,
                canType: Bool = true, blocker: String? = nil, canInterrupt: Bool = true, provider: String? = "anthropic",
-               ago: TimeInterval, page: String? = nil, preview: String) -> LiveSession {
-            LiveSession(id: id, backend: AgentBackend(wire: backend), title: title, cwd: "~/projects/\(title)",
+               ago: TimeInterval, page: String? = nil, preview: String, attach: String? = nil) -> LiveSession {
+            var row = LiveSession(id: id, backend: AgentBackend(wire: backend), title: title, cwd: "~/projects/\(title)",
                         state: state, host: host, canType: canType, typeBlocker: canType ? nil : blocker,
                         canInterrupt: canInterrupt, provider: provider, lastActivityAt: now.addingTimeInterval(-ago),
                         interventionId: page, preview: preview)
+            row.attach = attach
+            return row
         }
         return [
             s("7f3a9c2b-1111-aaaa-bbbb-cccccccccccc", "claude", "acme-web", .waitingOnApproval, host: "cmux",
@@ -98,7 +100,7 @@ enum DevBypass {
               canType: false, blocker: "Page can't type into Terminal yet", canInterrupt: false,
               ago: 310, page: "dev-3", preview: "4-step plan for the Reply screen is ready"),
             s("99999999-4444-dddd-eeee-ffffffffffff", "claude", "orbit-api", .idle, host: "iTerm",
-              ago: 900, preview: "Finished the migration and all tests pass."),
+              ago: 900, preview: "Finished the migration and all tests pass.", attach: "image"),
             s("ra7e1111-7777-0000-1111-222222222222", "codex", "docs-site", .rateLimited, host: "cmux",
               provider: "cloudGateway", ago: 1800, preview: "Rate limited until 3pm")
         ]

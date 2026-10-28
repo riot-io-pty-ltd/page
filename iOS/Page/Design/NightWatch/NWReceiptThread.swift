@@ -26,10 +26,10 @@ struct NWReceiptThreadView: View {
         var s = f
         switch f.stage {
         case .sending: s.reach = 0.42
-        case .sent, .queued: s.reach = 0.5
+        case .sent, .queued, .held: s.reach = 0.5
         case .typed, .verified:
             s.reach = 1; s.macLit = true; s.dotTeal = 1; s.rings = 0
-        case .failed: s.reach = 0
+        case .failed, .retracted: s.reach = 0
         case .idle, .arming: break
         }
         s.glint = nil
@@ -43,7 +43,8 @@ struct NWReceiptThreadView: View {
         switch f.stage {
         case .idle, .arming: return NightWatch.RGBA(1, 1, 1, 0.92)
         case .sending, .sent, .typed: return NightWatch.Palette.sky
-        case .queued: return NightWatch.Palette.amber
+        case .queued, .held: return NightWatch.Palette.amber
+        case .retracted: return NightWatch.Palette.textSecondary
         case .verified: return NightWatch.Palette.green
         case .failed: return NightWatch.Palette.amber
         }
@@ -94,6 +95,8 @@ struct NWReceiptThreadView: View {
         case .sending: return "Sending"
         case .sent: return "Sent, waiting for your Mac to confirm"
         case .queued: return "Queued until your Mac is back online"
+        case .held: return "Held on your Mac until the rate limit resets"
+        case .retracted(let why): return why
         case .typed, .verified: return "Delivered and verified on your Mac"
         case .failed(let why): return why
         case .idle: return ""

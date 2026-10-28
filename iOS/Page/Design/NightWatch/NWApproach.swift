@@ -60,16 +60,13 @@ struct NWArrival<Content: View>: View {
         let measured = top != nil
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         return content()
-            .background(GeometryReader { g in
-                Color.clear.onAppear { top = g.frame(in: .named(nwStreamSpace)).minY }
-            })
             // Its words only as it lands: in flight it is the outline alone.
             .opacity(f.content)
             .overlay(
                 shape.fill(tint.opacity(0.07 * f.glow).color)
                     .overlay(shape.strokeBorder(tint.opacity(0.85 * max(f.glow, f.edge)).color, lineWidth: 1.2))
                     // The soft light round it is a glow, so it follows the Card glow setting (Off: none).
-                    .shadow(color: tint.opacity(0.55 * f.glow * cardGlow.strength).color, radius: 14)
+                    .shadow(color: tint.opacity(0.55 * f.glow * cardGlow.strength).color, radius: 20)
                     .allowsHitTesting(false))
             .overlay(alignment: .top) {
                 // The contrail: back up to the pulse, brightest at the card.
@@ -82,6 +79,11 @@ struct NWArrival<Content: View>: View {
             }
             .scaleEffect(f.scale, anchor: .top)
             .offset(y: -distance * CGFloat(1 - f.travel))
+            // Its slot, kept current all the way down (a row that appears above it moves it), so it always comes
+            // from the pulse. Read here, outside the flight's own scale and offset, which would feed back into it.
+            .background(GeometryReader { g in
+                Color.clear.onChange(of: g.frame(in: .named(nwStreamSpace)).minY, initial: true) { _, y in top = y }
+            })
             .mask(alignment: .top) { behindTheWords(distance: distance) }
             .opacity(waiting || !measured ? 0 : f.opacity)
             .zIndex(1)
@@ -104,6 +106,37 @@ struct NWArrival<Content: View>: View {
             .offset(y: -reach)
         } else {
             Rectangle().padding(-2_000)
+        }
+    }
+}
+
+/// What hangs under an arriving card (its first-time tip): it waits until
+/// the card has landed and fades in as it settles (360 to 520 ms), once the
+/// rows below have made room, so nothing sits in the slot while the outline
+/// is still in the air. Whether it is arriving is decided once, as it first
+/// appears, in the same pass as the card's own approach. Reduce Motion: it
+/// is simply there.
+struct NWArrivalTail<Content: View>: View {
+    /// The render harness: draw this many seconds into the approach.
+    var pinned: Double? = nil
+    @ViewBuilder var content: () -> Content
+
+    @State private var startedAt: Double?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(arriving: Bool, delay: Double = 0, pinned: Double? = nil, @ViewBuilder content: @escaping () -> Content) {
+        self.pinned = pinned
+        self.content = content
+        _startedAt = State(initialValue: arriving ? Date().timeIntervalSinceReferenceDate + delay : nil)
+    }
+
+    var body: some View {
+        if (startedAt == nil && pinned == nil) || reduceMotion {
+            content()
+        } else {
+            NWOneShot(start: startedAt, duration: ApproachModel.duration + 0.4, pinned: pinned) { e in
+                content().opacity(e.map { MotionCurve.smooth(MotionCurve.progress($0, from: ApproachModel.lands, to: ApproachModel.duration)) } ?? 1)
+            }
         }
     }
 }

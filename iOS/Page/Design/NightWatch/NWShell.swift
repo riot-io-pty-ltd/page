@@ -26,13 +26,15 @@ struct NWShell<NowContent: View, LanesContent: View>: View {
         ZStack(alignment: .bottom) {
             NWBackdrop()
             ZStack {
+                // A third of the width, fading: the arriving one in over the whole 320 ms, the leaving one out in 200.
                 if destination == .now {
-                    now().transition(reduceMotion ? .opacity : .move(edge: .leading).combined(with: .opacity))
+                    now().transition(reduceMotion ? .opacity : Self.slide(thirds: -1))
                 } else {
-                    lanes().transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
+                    lanes().transition(reduceMotion ? .opacity : Self.slide(thirds: 1))
                 }
             }
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: destination)
+            // Android's tween(320): fast out, slow in.
+            .animation(reduceMotion ? nil : .timingCurve(0.4, 0, 0.2, 1, duration: 0.32), value: destination)
             NWNavCapsule(selection: Binding(get: { destination == .now ? .now : .lanes },
                                             set: { destination = $0 == .now ? .now : .lanes }),
                          decideCount: decideCount, workingCount: workingCount, pulseWaiting: pulseWaiting,
@@ -45,11 +47,35 @@ struct NWShell<NowContent: View, LanesContent: View>: View {
         .animation(.easeOut(duration: 0.15), value: shownStop.isActive)
     }
 
+    /// Now sits a third of the width to the left (-1), Lanes a third to the
+    /// right (1), whichever way the change goes.
+    private static func slide(thirds: CGFloat) -> AnyTransition {
+        let shift = AnyTransition.modifier(active: NWThirdSlide(thirds: thirds), identity: NWThirdSlide(thirds: 0))
+        return .asymmetric(insertion: shift.combined(with: .opacity),
+                           removal: shift.combined(with: .opacity.animation(.timingCurve(0.4, 0, 0.2, 1, duration: 0.2))))
+    }
+
     /// While the pulse is held past its dead zone and no Stop flow is running,
     /// the ring follows the hold.
     private var shownStop: StopFlowPhase {
         if stop.isActive { return stop }
         if let h = held, HoldRingSpec.stopAll.isVisible(elapsed: h) { return .holding(progress: HoldRingSpec.stopAll.progress(elapsed: h)) }
         return .idle
+    }
+}
+
+/// Moves a view sideways by thirds of its own width (the destination slide).
+/// A geometry effect, so it knows the width without a GeometryReader and
+/// animates as one number.
+private struct NWThirdSlide: GeometryEffect {
+    var thirds: CGFloat
+
+    var animatableData: CGFloat {
+        get { thirds }
+        set { thirds = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(translationX: thirds * size.width / 3, y: 0))
     }
 }

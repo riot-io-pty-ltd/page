@@ -116,6 +116,15 @@ struct LiveSession: Identifiable, Hashable {
     /// an optional field of the Mac's list (docs/SESSIONS-PROTOCOL.md); an
     /// older Mac sends none and the card shows what it has.
     var flight: SessionFlight? = nil
+    /// `hold-v1`: Page can type here once the turn ends, so "When it finishes" may be offered.
+    var canHold = false
+    /// Messages the Mac is holding for this session, or settled in the last 15 minutes, oldest first.
+    var held: [HeldMessage] = []
+    /// `images-v1`: how a photo sent from the room reaches this session, "image" (pasted, attached) or "path"
+    /// (typed as a file location). Nil: no photo button.
+    var attach: String? = nil
+    /// Why a row Page can type into takes no photos ("Page can't send photos to Codex yet").
+    var attachBlocker: String? = nil
 
     static let defaultBlocker = "Page can't type into this session."
 
@@ -138,6 +147,7 @@ extension LiveSession: Decodable {
         case id, backend, title, cwd, state, host, canType, typeBlocker, canInterrupt
         case provider, lastActivityAt, interventionId, preview, ask
         case busySince, startedAt, model, recentSteps, health, healthDetail, healthNote, workflows, workflowsRunning, resetsAt, stepSince
+        case canHold, held, attach, attachBlocker
     }
 
     /// Lenient like `Intervention`: only `id` is required. A malformed
@@ -179,6 +189,12 @@ extension LiveSession: Decodable {
             workflows: ((try? c.decodeIfPresent(LossyList<WorkflowBrief>.self, forKey: .workflows)) ?? nil)?.elements ?? [],
             workflowsRunning: (try? c.decodeIfPresent(Int.self, forKey: .workflowsRunning)) ?? nil,
             resetsAt: LenientDate.decode(c, .resetsAt), stepSince: LenientDate.decode(c, .stepSince))
+        canHold = c.lenientBool(.canHold) ?? false
+        held = Array(((try? c.decodeIfPresent(LossyList<HeldMessage>.self, forKey: .held)) ?? nil)?.elements.prefix(HeldMessage.maxEntries) ?? [])
+        // Only the two routes Page knows: anything newer is not a button this phone can explain.
+        attach = c.lenientString(.attach).flatMap { $0 == "image" || $0 == "path" ? $0 : nil }
+        let why = (c.lenientString(.attachBlocker) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        attachBlocker = why.isEmpty ? nil : String(why.prefix(200))
     }
 }
 
@@ -207,10 +223,20 @@ struct TranscriptEntry: Identifiable, Hashable {
     let at: Date?
     /// Tool name for `tool` rows ("Bash").
     let tool: String?
+    /// `user` entries: how many photos the message carried (`images-v1`; the text then has "[Image #1]" chips).
+    var images = 0
+
+    /// What the bubble shows: the words, without the chips and path lines a photo message carries.
+    var displayText: String {
+        PhotoEcho.isPhotoMessage(text: text, images: images) ? PhotoEcho.caption(of: text) : text
+    }
+
+    /// Photos on this message, by the Mac's count (a path-route message has none attached).
+    var photoCount: Int { role == .user ? images : 0 }
 }
 
 extension TranscriptEntry: Decodable {
-    private enum CodingKeys: String, CodingKey { case id, role, text, at, tool }
+    private enum CodingKeys: String, CodingKey { case id, role, text, at, tool, images }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -226,6 +252,7 @@ extension TranscriptEntry: Decodable {
         text = String((c.lenientString(.text) ?? "").prefix(2400))
         at = (try? c.decodeIfPresent(Date.self, forKey: .at)) ?? nil
         tool = c.lenientString(.tool).flatMap { $0.isEmpty ? nil : String($0.prefix(40)) }
+        images = role == .user ? max(0, min(((try? c.decodeIfPresent(Int.self, forKey: .images)) ?? nil) ?? 0, 99)) : 0
     }
 }
 
@@ -416,6 +443,8 @@ struct SessionScreen: Equatable {
 struct CommandResult: Equatable {
     enum Code: String {
         case delivered, queued, refused, failed
+        /// An `input` with `hold` that was deleted: nothing was typed (`ok` is false).
+        case cancelled
     }
 
     let clientId: String
@@ -425,6 +454,17 @@ struct CommandResult: Equatable {
     /// Short sentence from the Mac, at most 200 characters.
     let detail: String?
     let interventionId: String?
+    /// `hold-v1`: the Mac is holding the message until the turn ends; one more result follows.
+    var held = false
+    /// The final result for a held message (same `clientId` as the `held` one).
+    var fromHold = false
+    /// `retract-v1`: the answer to a `retract` (`deleted`, `too_late`, `not_found`).
+    var retract: String? = nil
+    /// `images-v1`, answers to `inputImages`: how many photos Claude received as images (0: as file locations);
+    /// nil when the Mac couldn't read it back.
+    var attached: Int? = nil
+    /// `attachment_missing`: the ids of photos whose pieces never arrived.
+    var missing: [String] = []
 }
 
 // MARK: - Plaintext kinds (Mac → phone)
@@ -527,6 +567,9 @@ struct SessionsPlaintext: Equatable {
     /// A `list` from a Mac with live sessions turned off in its settings
     /// (an optional field the Mac adds; others never send it).
     var macDisabled: Bool = false
+    /// A `list`'s `caps`: what the Mac accepts beyond the basic ops (`hold-v1`, `retract-v1`, `images-v1`).
+    /// An older Mac sends none, which reads as none. Nil for any other kind.
+    var caps: Set<String>? = nil
 
     static let maxSessions = 100
     static let maxEntries = 40
@@ -547,6 +590,12 @@ struct SessionsPlaintext: Equatable {
         let reason: String?
         let detail: String?
         let interventionId: String?
+        let held: Bool?
+        let fromHold: Bool?
+        let retract: String?
+        let attached: Int?
+        let missing: [String]?
+        let caps: [String]?
         let disabled: Bool?
         let lines: [String]?
         let runs: LossyList<WorkflowRun>?
@@ -562,7 +611,7 @@ struct SessionsPlaintext: Equatable {
 
         private enum CodingKeys: String, CodingKey {
             case kind, seq, ts, boot, macName, sessions, sessionId, entries, truncated
-            case clientId, ok, code, reason, detail, interventionId, disabled, lines, runs, runId, agentId
+            case clientId, ok, code, reason, detail, interventionId, held, fromHold, retract, attached, missing, caps, disabled, lines, runs, runId, agentId
             case scope, repo, patch, note, enabled, files, folders
         }
 
@@ -583,6 +632,12 @@ struct SessionsPlaintext: Equatable {
             reason = c.lenientString(.reason)
             detail = c.lenientString(.detail)
             interventionId = c.lenientString(.interventionId)
+            held = c.lenientBool(.held)
+            fromHold = c.lenientBool(.fromHold)
+            retract = c.lenientString(.retract)
+            attached = (try? c.decodeIfPresent(Int.self, forKey: .attached)) ?? nil
+            missing = try? c.decodeIfPresent([String].self, forKey: .missing)
+            caps = try? c.decodeIfPresent([String].self, forKey: .caps)
             disabled = c.lenientBool(.disabled)
             lines = try? c.decodeIfPresent([String].self, forKey: .lines)
             runs = try? c.decodeIfPresent(LossyList<WorkflowRun>.self, forKey: .runs)
@@ -656,13 +711,20 @@ struct SessionsPlaintext: Equatable {
             update = .result(CommandResult(clientId: cid, ok: ok, code: code,
                                            reason: raw.reason.flatMap { $0.isEmpty ? nil : $0 },
                                            detail: (detail?.isEmpty ?? true) ? nil : String(detail!.prefix(200)),
-                                           interventionId: raw.interventionId.flatMap { $0.isEmpty ? nil : $0 }))
+                                           interventionId: raw.interventionId.flatMap { $0.isEmpty ? nil : $0 },
+                                           held: raw.held ?? false, fromHold: raw.fromHold ?? false,
+                                           retract: raw.retract.flatMap { $0.isEmpty ? nil : $0 },
+                                           attached: raw.attached.flatMap { $0 >= 0 && $0 <= 99 ? $0 : nil },
+                                           missing: Array((raw.missing ?? []).prefix(PhotoLimits.maxPhotos).map { String($0.prefix(64)) })))
         default:
             return nil
         }
         var out = SessionsPlaintext(boot: raw.boot ?? "", seq: Int(raw.seq),
                                     ts: Date(timeIntervalSince1970: raw.ts / 1000), update: update)
-        if case .list = update { out.macDisabled = raw.disabled ?? false }
+        if case .list = update {
+            out.macDisabled = raw.disabled ?? false
+            out.caps = Set((raw.caps ?? []).prefix(40).map { String($0.prefix(40)) })
+        }
         return out
     }
 }
@@ -768,7 +830,14 @@ enum SessionCommand: Equatable {
     case watch(sessionId: String?)
     case refresh
     /// `target` is what the room showed; the Mac refuses if the session no longer matches.
-    case input(sessionId: String, text: String, target: SessionTarget? = nil)
+    /// `hold`: the Mac types it when the turn ends (needs `hold-v1`); sent only when true, so an old Mac sees the same bytes.
+    case input(sessionId: String, text: String, target: SessionTarget? = nil, hold: Bool = false)
+    /// One piece of a photo (`images-v1`), at most 32 KiB raw. Never answered.
+    case imagePart(sessionId: String, photo: PhotoRef, index: Int, total: Int, data: Data)
+    /// Sends the photos (all pieces were accepted) with the caption into the session (`images-v1`). One `result`.
+    case inputImages(sessionId: String, text: String, photos: [PhotoRef], target: SessionTarget? = nil)
+    /// Takes back a message the Mac is holding: a held `input` (`heldId`, its clientId) or a `/reply` (`interventionId`).
+    case retract(heldId: String?, interventionId: String?)
     case interrupt(sessionId: String, target: SessionTarget? = nil)
     /// The answers to the question dialog the session is blocked on (`promptKey`
     /// is the ask's id). The Mac refuses if that is no longer the question showing.
@@ -789,6 +858,9 @@ enum SessionCommand: Equatable {
         case .watch, .watchAgent: return "watch"
         case .refresh:   return "refresh"
         case .input:     return "input"
+        case .retract:   return "retract"
+        case .imagePart: return "imagePart"
+        case .inputImages: return "inputImages"
         case .interrupt: return "interrupt"
         case .answer:    return "answer"
         case .diff:      return "diff"
@@ -806,9 +878,20 @@ enum SessionCommand: Equatable {
         switch self {
         case .watch(let sid):          body["sessionId"] = sid.map { $0 as Any } ?? NSNull()
         case .refresh:                 break
-        case .input(let sid, let text, let target):
+        case .input(let sid, let text, let target, let hold):
             body["sessionId"] = sid; body["text"] = text
+            if hold { body["hold"] = true }
             Self.addExpectation(target, to: &body)
+        case .imagePart(let sid, let photo, let index, let total, let data):
+            body["sessionId"] = sid; body["imageId"] = photo.id; body["index"] = index; body["total"] = total
+            body["bytes"] = photo.bytes; body["sha256"] = photo.sha256; body["mime"] = photo.mime
+            body["data"] = data.base64EncodedString()
+        case .inputImages(let sid, let text, let photos, let target):
+            body["sessionId"] = sid; body["text"] = text; body["images"] = photos.map(\.json)
+            Self.addExpectation(target, to: &body)
+        case .retract(let heldId, let interventionId):
+            if let heldId { body["heldId"] = heldId }
+            if let interventionId { body["interventionId"] = interventionId }
         case .interrupt(let sid, let target):
             body["sessionId"] = sid
             Self.addExpectation(target, to: &body)
@@ -936,15 +1019,29 @@ enum SessionCommandOutcome: Equatable {
 
 enum SessionCommandKind: String {
     case input, interrupt, start, answer
+    /// Takes back a held message or reply; its own result carries `retract`.
+    case retract
 }
 
 /// Where a message (or Stop) sent from the phone stands, keyed by its
-/// `clientId`. Sending → Typed / Queued / Refused from the Mac's `result`;
-/// Failed when the relay didn't forward it; No answer after 20 s of silence.
+/// `clientId`. Waiting out its countdown → Sending → Typed / Queued / Held /
+/// Refused from the Mac's `result`; Failed when the relay didn't forward it;
+/// No answer after 20 s of silence.
 enum SessionDeliveryState: Equatable {
+    /// The 10 s (or 1.2 s) Undo before the POST: nothing has left the phone.
+    case counting(SendCountdown)
     case sending
     case typed(String?)
+    /// Already typed into the agent's own queue, which reads it at the next step: Page can't take it back.
     case queued(String?)
+    /// The Mac holds it until the turn ends (`hold-v1`); it can be deleted until then. `detail`: the Mac's own
+    /// sentence for the hold (the headline); `note`: why its last try didn't type it, a secondary line (the row's
+    /// `held` entry, still "held" but with a `detail`); `typing`: it is being typed right now, so Delete is gone.
+    case held(String?, note: String? = nil, typing: Bool = false)
+    /// A held message that was deleted: nothing was typed.
+    case deleted(String?)
+    /// A held message whose fate Page can't confirm ("No longer held — check the session").
+    case unconfirmed(String)
     case refused(reason: String?, message: String)
     case failed(String)
     case noAnswer
@@ -953,19 +1050,39 @@ enum SessionDeliveryState: Equatable {
 
     var isPending: Bool { self == .sending }
 
+    var isCounting: Bool { if case .counting = self { return true } else { return false } }
+
+    var isHeld: Bool { if case .held = self { return true } else { return false } }
+
+    /// Held, and the Mac is typing it right now: Delete can't take it back.
+    var isHeldTyping: Bool { if case .held(_, _, let typing) = self { return typing } else { return false } }
+
     /// A `result` is the Mac's word and beats anything the phone guessed
     /// (sending, a lost HTTP response, giving up). Once one result has
-    /// landed, a second for the same `clientId` is ignored.
+    /// landed, a second for the same `clientId` is ignored, except the final
+    /// one (`fromHold`) that ends a held message.
     func applying(_ result: CommandResult, agent: String) -> SessionDeliveryState {
         switch self {
-        case .typed, .queued, .refused: return self
-        case .sending, .failed, .noAnswer: break
+        case .typed, .queued, .refused, .deleted: return self
+        case .unconfirmed(let why):
+            // "No longer held" is a guess from the list; the final result, when it does arrive, is the Mac's word.
+            // Any other unconfirmed state (Page restarted while typing it) stays as it is.
+            guard why == Self.noLongerHeld, result.fromHold else { return self }
+        case .held:
+            // Held is not the last word: only the final result settles it.
+            guard result.fromHold else { return self }
+        case .counting, .sending, .failed, .noAnswer: break
         }
         switch result.code {
         case .delivered: return .typed(result.detail)
-        case .queued:    return .queued(result.detail)
-        case .refused:   return .refused(reason: result.reason,
-                                         message: SessionResultCopy.refusal(reason: result.reason, detail: result.detail, agent: agent))
+        case .queued:    return result.held ? .held(result.detail) : .queued(result.detail)
+        case .cancelled: return .deleted(result.detail ?? Self.deletedCopy)
+        case .refused:
+            // A held message's final refusal carries the Mac's own sentence ("Not sent — the session ended").
+            let message = result.fromHold
+                ? result.detail ?? SessionResultCopy.refusal(reason: result.reason, detail: nil, agent: agent)
+                : SessionResultCopy.refusal(reason: result.reason, detail: result.detail, agent: agent)
+            return .refused(reason: result.reason, message: message)
         case .failed:    return .failed(SessionResultCopy.failure(reason: result.reason, detail: result.detail))
         }
     }
@@ -977,24 +1094,30 @@ enum SessionDeliveryState: Equatable {
         return .failed(message)
     }
 
-    /// The phone stops waiting 20 s after sending.
-    func timedOut(sentAt: Date, now: Date) -> SessionDeliveryState {
-        guard self == .sending, now.timeIntervalSince(sentAt) >= Self.resultTimeout else { return self }
+    /// The phone stops waiting 20 s after sending (30 s for photos, counted from `inputImages`).
+    func timedOut(sentAt: Date, now: Date, timeout: TimeInterval = SessionDeliveryState.resultTimeout) -> SessionDeliveryState {
+        guard self == .sending, now.timeIntervalSince(sentAt) >= timeout else { return self }
         return .noAnswer
     }
 
     /// Short status under a message bubble.
     func label(_ kind: SessionCommandKind) -> String {
         switch (self, kind) {
+        case (.counting, _):         return "Waiting to send"
         case (.sending, .input):     return "Sending…"
         case (.sending, .interrupt): return "Stopping…"
         case (.sending, .start):     return "Starting…"
         case (.sending, .answer):    return "Sending your answers…"
+        case (.sending, .retract):   return "Deleting…"
         case (.typed, .input):       return "Typed"
         case (.typed, .interrupt):   return "Stopped"
         case (.typed, .start):       return "Started"
         case (.typed, .answer):      return "Answered"
+        case (.typed, .retract):     return "Deleted"
         case (.queued, _):           return "Queued"
+        case (.held(_, _, let typing), _): return typing ? "Typing it now" : "Held"
+        case (.deleted, _):          return "Deleted"
+        case (.unconfirmed, _):      return "Check the session"
         case (.refused, _):          return "Refused"
         case (.failed, _):           return "Not sent"
         case (.noAnswer, _):         return "No answer from your Mac"
@@ -1004,11 +1127,16 @@ enum SessionDeliveryState: Equatable {
     /// The longer explanation, when there is one.
     func explanation(_ kind: SessionCommandKind, agent: String) -> String? {
         switch self {
+        case .counting: return "Nothing has been sent yet. Undo it and the message comes back."
         case .sending: return nil
         case .typed(let detail):
             return detail ?? (kind == .interrupt ? "Pressed Esc in the session." : nil)
-        case .queued(let detail):
-            return detail ?? "Queued — \(agent) reads it after the current step."
+        case .queued: return Self.alreadyQueued(agent: agent)
+        case .held(let detail, let note, let typing):
+            if typing { return Self.typingCopy }
+            return Self.heldCopy(detail: detail, agent: agent) + (note.map { " · \($0)" } ?? "")
+        case .deleted(let detail): return detail ?? Self.deletedCopy
+        case .unconfirmed(let message): return message
         case .refused(_, let message), .failed(let message):
             return message
         case .noAnswer:
@@ -1016,12 +1144,15 @@ enum SessionDeliveryState: Equatable {
         }
     }
 
+    /// A message already in the agent's own queue: said plainly, with no Delete offered.
+    static func alreadyQueued(agent: String) -> String { "Already with \(agent) — it reads it after this step." }
+
     /// The explanation shown under a message bubble: only when there's
     /// something to act on or wait for, not a "Typed" detail.
     func bubbleExplanation(_ kind: SessionCommandKind, agent: String) -> String? {
         switch self {
-        case .refused, .failed, .noAnswer, .queued: return explanation(kind, agent: agent)
-        case .sending, .typed: return nil
+        case .refused, .failed, .noAnswer, .queued, .held, .deleted, .unconfirmed: return explanation(kind, agent: agent)
+        case .sending, .typed, .counting: return nil
         }
     }
 
@@ -1038,7 +1169,8 @@ struct SentSessionCommand: Identifiable, Equatable {
     let kind: SessionCommandKind
     /// Kept in memory only, to show the bubble until the transcript echoes it.
     let text: String
-    let sentAt: Date
+    /// When it was sent (when a countdown ran out, not when Send was tapped).
+    var sentAt: Date
     var state: SessionDeliveryState
     /// Transcript entry ids already on screen when this was sent (nil if no
     /// transcript had loaded). None of them can be its echo, which keeps an
@@ -1048,8 +1180,43 @@ struct SentSessionCommand: Identifiable, Equatable {
     var target: SessionTarget? = nil
     /// `answer` only: the question (the ask's id) these answers were for.
     var promptKey: String? = nil
+    /// `retract` only: the held message (its clientId) or reply (its page id) this takes back.
+    var subject: String? = nil
+    /// A message with photos (`images-v1`): how many, which route, and where the upload stands.
+    var photos: PhotoSend? = nil
 
     var id: String { clientId }
+
+    /// The short status under a bubble: a photo message says where the upload is, and a delivered one is "Sent".
+    func statusLabel(_ kind: SessionCommandKind = .input) -> String {
+        guard let photos else { return state.label(kind) }
+        switch state {
+        case .sending:
+            switch photos.phase {
+            case .uploading(let done, let total): return PhotoCopy.uploading(done, total)
+            case .typing: return PhotoCopy.typing(host: target?.host)
+            }
+        case .typed: return "Sent"
+        case .noAnswer: return "No answer from your Mac"
+        default: return state.label(kind)
+        }
+    }
+
+    /// The line under a bubble, when there is something to act on or read. A delivered photo message carries
+    /// the Mac's own sentence, because that is how the person learns whether Claude got the image.
+    func statusExplanation(agent: String) -> String? {
+        guard let photos else { return state.bubbleExplanation(.input, agent: agent) }
+        switch state {
+        case .typed(let detail): return PhotoCopy.delivered(detail: detail, attached: photos.attached, count: photos.count, attach: photos.attach)
+        case .noAnswer: return PhotoCopy.noAnswer
+        default: return state.bubbleExplanation(.input, agent: agent)
+        }
+    }
+
+    /// What VoiceOver reads for the bubble's status.
+    func spokenStatus(agent: String) -> String {
+        [statusLabel(), statusExplanation(agent: agent)].compactMap { $0 }.joined(separator: ". ")
+    }
 }
 
 // MARK: - Reason copy
@@ -1090,6 +1257,14 @@ enum SessionResultCopy {
             return detail ?? "Page can't answer this question from here. Answer it on your Mac."
         case "target_mismatch":
             return detail ?? "This room doesn't match the session on your Mac any more, so nothing was typed. Close it and open the session again."
+        case "attachment_missing", "attachment_invalid", "attach_unsupported", "attach_busy":
+            return PhotoCopy.refusal(reason: reason, detail: detail) ?? detail ?? "Your Mac didn't take the photo."
+        case "cancelled":
+            return detail ?? SessionDeliveryState.deletedCopy
+        case "expired":
+            return detail ?? "Not sent — the turn didn't finish within 6 hours."
+        case "too_late":
+            return detail ?? "Too late — it was already typed."
         case "error":
             return detail ?? "Something went wrong on your Mac. Try again."
         default:
@@ -1155,14 +1330,17 @@ enum TranscriptTimeline {
             // Refused and failed messages never reach the session.
             let canEcho: Bool
             switch message.state {
-            case .refused, .failed: canEcho = false
+            // Not typed yet, or never typed: none of these can be in the transcript.
+            case .refused, .failed, .held, .deleted, .counting: canEcho = false
             default: canEcho = true
             }
             let prior = message.priorEntryIds ?? []
             let hit = canEcho ? entries.first { e in
                 e.role == .user && !used.contains(e.id) && !prior.contains(e.id)
                     && (e.at.map { $0 >= message.sentAt.addingTimeInterval(-clockSlack) } ?? true)
-                    && echoes(e.text, message.text)
+                    // A photo message is "[Image #1] caption" in the transcript: compare the caption only.
+                    && (message.photos != nil ? PhotoEcho.echoes(entryText: e.text, images: e.images, caption: message.text)
+                                              : !PhotoEcho.isPhotoMessage(text: e.text, images: e.images) && echoes(e.text, message.text))
             } : nil
             if let hit {
                 used.insert(hit.id)

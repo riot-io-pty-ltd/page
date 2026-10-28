@@ -103,6 +103,8 @@ struct RootView: View {
                 pairing.reloadIfNeeded()
                 // Unreadable before the first unlock after a reboot.
                 if !SessionStore.shared.hasKey { SessionStore.shared.reloadKey() }
+                // A countdown that ran out while Page was away sends now (or comes back as a draft if long stale).
+                SessionStore.shared.appBecameActive()
                 Task { await notifications.refreshAuthorization() }
                 // Backfills the widget's copy for pairings made before it.
                 WidgetShare.sync()

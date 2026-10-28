@@ -302,6 +302,7 @@ struct NWUndoableRow: View {
     @State private var drag: CGFloat = 0
     @State private var passed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nwChromeGlassOn) private var glass
     private let commitAt: CGFloat = 110
 
     var body: some View {
@@ -321,14 +322,24 @@ struct NWUndoableRow: View {
         let x = can ? (fixedDrag ?? drag) : 0
         return ZStack(alignment: .leading) {
             if can {
-            RoundedRectangle(cornerRadius: NightWatch.Radius.row, style: .continuous)
-                .fill(NightWatch.Palette.green.opacity(0.14 + 0.10 * Double(min(1, x / commitAt))).color)
-                .overlay(HStack(spacing: 8) {
-                    Image(systemName: "checkmark")
-                    Text("Approve").font(NightWatch.Typo.bodyStrong)
-                }
-                .foregroundColor(NightWatch.Palette.green.color)
-                .padding(.leading, 18), alignment: .leading)
+            // The well is chrome the row uncovers: green glass, greener as the swipe nears the threshold.
+            // Glass only while the row is moved, so a row at rest has nothing showing round its rim.
+            let reach = Double(min(1, x / commitAt))
+            if x > 0 || !glass {
+                Color.clear
+                    .nwChromeGlass(in: RoundedRectangle(cornerRadius: NightWatch.Radius.row, style: .continuous),
+                                   tint: NightWatch.Palette.chromeGlass.mixed(with: NightWatch.Palette.green.opacity(0.6), 0.22 + 0.2 * reach),
+                                   interactive: false) {
+                        RoundedRectangle(cornerRadius: NightWatch.Radius.row, style: .continuous)
+                            .fill(NightWatch.Palette.green.opacity(0.14 + 0.10 * reach).color)
+                    }
+                    .overlay(HStack(spacing: 8) {
+                        Image(systemName: "checkmark")
+                        Text("Approve").font(NightWatch.Typo.bodyStrong)
+                    }
+                    .foregroundColor(NightWatch.Palette.green.color)
+                    .padding(.leading, 18), alignment: .leading)
+            }
             }
             rowBody
                 // Opaque, so the Approve well never shows through the row.

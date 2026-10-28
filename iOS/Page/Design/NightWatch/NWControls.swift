@@ -314,3 +314,44 @@ struct NWRingsList: View {
         }
     }
 }
+
+// MARK: - Yes / No replies
+
+/// Claude asked a yes/no question in plain text: two tappable replies, "Yes"
+/// (the primary one) and "No", that send exactly those words as the user's
+/// message. Tapping sends; nothing is typed first. 44 pt tall, labelled "Reply
+/// Yes" and "Reply No", with the question in the hint.
+struct NWYesNoReplies: View {
+    let question: String
+    let agent: String
+    var onReply: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            reply(YesNoReply.yes, primary: true)
+            reply(YesNoReply.no, primary: false)
+        }
+    }
+
+    private func reply(_ word: String, primary: Bool) -> some View {
+        Button { onReply(word) } label: {
+            Text(word)
+                .font(NightWatch.Typo.button)
+                .foregroundColor((primary ? NightWatch.Palette.onBright : NightWatch.Palette.textPrimary).color)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background {
+                    if primary {
+                        LinearGradient(colors: [NightWatch.Palette.teal.color, NightWatch.Palette.sky.color], startPoint: .leading, endPoint: .trailing)
+                    } else {
+                        Color.white.opacity(0.07)
+                    }
+                }
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder((primary ? NightWatch.Palette.teal.opacity(0.4) : NightWatch.Palette.hairline).color, lineWidth: 1))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("Reply \(word)"))
+        .accessibilityHint(Text("Sends \"\(word)\" to \(agent), answering: \(YesNoQuestion.brief(question))"))
+    }
+}

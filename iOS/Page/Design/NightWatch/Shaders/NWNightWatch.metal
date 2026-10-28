@@ -28,14 +28,16 @@ static float nw_fbm(float2 p) {
 
 // aurora.glsl: curtains bent by slow noise, streaks, stars fading towards the
 // horizon and a vignette, over the palette's sky gradient. `intensity` 0 is
-// the bare sky (dusk). `stars` scales the scatter of stars.
-[[ stitchable ]] half4 nwAurora(float2 position, half4 color, float2 size, float time, float speed,
+// the bare sky (dusk). `stars` scales the scatter of stars. `phase` moves the
+// curtains: the GLSL's time * u_speed, accumulated in Swift (NWAuroraPhase) so a
+// change of speed never jumps them; `time` is the stars' own twinkle clock.
+[[ stitchable ]] half4 nwAurora(float2 position, half4 color, float2 size, float time, float phase,
                                 half4 skyTop, half4 skyBottom, half4 c1, half4 c2, half4 c3,
                                 float intensity, float stars) {
     float2 uv = float2(position.x / size.x, 1.0 - position.y / size.y);
     float aspect = size.x / size.y;
     float2 p = float2(uv.x * aspect, uv.y);
-    float t = time * speed;
+    float t = phase;
 
     float warp = nw_fbm(p * 1.4 + float2(t * 0.6, -t * 0.25));
     float band1 = smoothstep(0.35, 0.0, abs(uv.y - 0.62 - 0.18 * sin(p.x * 1.6 + t + warp * 3.0)));
@@ -48,8 +50,8 @@ static float nw_fbm(float2 p) {
     col += float3(c2.rgb) * band2 * (0.45 + 0.5 * streaks) * intensity;
     col += float3(c3.rgb) * band3 * 0.35 * intensity;
 
-    // Stars, fading towards the horizon (about two device pixels each).
-    float2 cell = floor(position * 1.5);
+    // Stars, fading towards the horizon, one per 1.5 pt cell at most (Android's 1.5 dp).
+    float2 cell = floor(position / 1.5);
     float s = step(0.9975, nw_hash(cell)) * smoothstep(0.3, 1.0, uv.y);
     col += float3(s) * (0.6 + 0.4 * sin(time * 3.0 + nw_hash(cell + 7.0) * 6.28)) * stars;
 

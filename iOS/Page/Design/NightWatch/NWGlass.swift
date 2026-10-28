@@ -141,3 +141,131 @@ struct NWBackdrop: View {
         .ignoresSafeArea()
     }
 }
+
+// MARK: - Liquid Glass
+
+/// Liquid Glass is for the chrome that floats over the sky (the capsule, the
+/// Mac chip, the round buttons, the composer, a sheet's close button), never
+/// for cards and rows: those keep `NWGlassBackground`, opaque enough to read
+/// over a moving aurora. iOS 26 and later only; everywhere else, and with
+/// Reduce Transparency on, each piece draws exactly today's surface instead.
+/// Every `glassEffect` in the app is in this file, behind that one gate.
+extension NightWatch.Palette {
+    /// The tint of the chrome's glass: the page's own near-black, deep enough
+    /// that white labels hold over the brightest sky of the day (the
+    /// afternoon, and needs-you's amber at full strength).
+    static let chromeGlass = NightWatch.RGBA(hex: 0x04060A, alpha: 0.6)
+}
+
+private struct NWLiquidGlassKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// Whether the chrome may use Liquid Glass where the system has it. On;
+    /// the render harness turns it off (`-NWGlass off`) to draw the fallback.
+    var nwLiquidGlass: Bool {
+        get { self[NWLiquidGlassKey.self] }
+        set { self[NWLiquidGlassKey.self] = newValue }
+    }
+
+    /// The gate: the chrome is on glass only where the system draws it
+    /// (iOS 26+), the harness allows it and Reduce Transparency is off.
+    var nwChromeGlassOn: Bool {
+        #if os(iOS)
+        guard #available(iOS 26.0, *) else { return false }
+        return nwLiquidGlass && !accessibilityReduceTransparency
+        #else
+        return false
+        #endif
+    }
+}
+
+/// One piece of chrome: Liquid Glass in `shape`, tinted, or `fallback` (the
+/// surface it had before glass) behind it.
+struct NWChromeGlass<S: Shape, Fallback: View>: ViewModifier {
+    var shape: S
+    var tint: NightWatch.RGBA
+    /// Glass that answers a touch. Off for hold surfaces: their ring is the feedback.
+    var interactive: Bool
+    var fallback: Fallback
+    @Environment(\.nwChromeGlassOn) private var glass
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            if glass {
+                content.glassEffect(.regular.tint(tint.color).interactive(interactive), in: shape)
+            } else {
+                content.background(fallback)
+            }
+        } else {
+            content.background(fallback)
+        }
+        #else
+        content.background(fallback)
+        #endif
+    }
+}
+
+/// Names a piece of chrome's glass inside an `NWChromeGlassGroup`, so it
+/// morphs into its neighbours as it comes and goes. Nothing without glass.
+struct NWChromeGlassID<ID: Hashable & Sendable>: ViewModifier {
+    var id: ID
+    var namespace: Namespace.ID
+    @Environment(\.nwChromeGlassOn) private var glass
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            if glass {
+                content.glassEffectID(id, in: namespace)
+            } else {
+                content
+            }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+/// Chrome that sits together: one `GlassEffectContainer`, so the pieces
+/// share what they refract and can melt into one another. Just the content
+/// without glass.
+struct NWChromeGlassGroup<Content: View>: View {
+    var spacing: CGFloat? = nil
+    @ViewBuilder var content: () -> Content
+    @Environment(\.nwChromeGlassOn) private var glass
+
+    var body: some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            if glass {
+                GlassEffectContainer(spacing: spacing) { content() }
+            } else {
+                content()
+            }
+        } else {
+            content()
+        }
+        #else
+        content()
+        #endif
+    }
+}
+
+extension View {
+    /// This piece of chrome on Liquid Glass (`NWChromeGlass`), or on `fallback`.
+    func nwChromeGlass<S: Shape, F: View>(in shape: S, tint: NightWatch.RGBA = NightWatch.Palette.chromeGlass, interactive: Bool = true,
+                                          @ViewBuilder fallback: () -> F) -> some View {
+        modifier(NWChromeGlass(shape: shape, tint: tint, interactive: interactive, fallback: fallback()))
+    }
+
+    /// The glass's identity in its group (`NWChromeGlassID`).
+    func nwChromeGlassID<ID: Hashable & Sendable>(_ id: ID, in namespace: Namespace.ID) -> some View {
+        modifier(NWChromeGlassID(id: id, namespace: namespace))
+    }
+}

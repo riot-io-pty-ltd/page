@@ -34,6 +34,8 @@ struct NowScreenData {
     var scrollToId: String? = nil
     /// Each action's delivery state, drawn as its Receipt thread.
     var receipts: [String: ReceiptThreadInput] = [:]
+    /// Where a Delete of the receipt's queued reply stands (deleting, too late, couldn't confirm).
+    var retractNote: RetractNote? = nil
     /// Rows that have left with their reply confirmed, kept while the thread
     /// resolves and the card folds into Settled (`DepartingRows`).
     var ghosts: Set<String> = []
@@ -69,6 +71,8 @@ struct NowScreenActions {
     var dismissBrief: () -> Void = {}
     var reviewFinished: () -> Void = {}
     var seeAll: () -> Void = {}
+    /// Delete the reply the latest receipt says is waiting (at the relay, or held on the Mac).
+    var deleteQueued: (ReceiptRetract) -> Void = { _ in }
     var banner: (NowBanner.Action) -> Void = { _ in }
     var problem: (ProblemState.Action) -> Void = { _ in }
     var showNew: () -> Void = {}
@@ -95,6 +99,8 @@ struct NWNowScreen: View {
     /// The arriving card's height, for the harness's frame of the cards below.
     @State private var arrivalHeight: CGFloat = 0
     @Environment(\.nwMotion) private var motionPin
+    /// The time of day the Horizon's sky is drawn at.
+    @Environment(\.nwDaypart) private var daypart
 
     var body: some View {
         GeometryReader { geo in
@@ -107,7 +113,7 @@ struct NWNowScreen: View {
                         .padding(.horizontal, NightWatch.Space.gutter)
                         // Cards below a new arrival make room on its spring; nothing above moves.
                         .animation(reduceMotion ? nil : .spring(response: ApproachModel.response, dampingFraction: ApproachModel.damping),
-                                   value: rowIds)
+                                   value: NWStreamSpring(rows: rowIds, horizon: horizonHeight))
                     Spacer().frame(height: 120)
                 }
                 .coordinateSpace(name: nwStreamSpace)
@@ -152,7 +158,8 @@ struct NWNowScreen: View {
         let m = data.model
         let waiting = m.pulseRows.filter { !data.ghosts.contains($0.id) }
         return PulseModel(working: m.workingCount, waiting: m.pulseWaiting,
-                          longestWait: PulseModel.longestWait(since: waiting.map(\.waitingSince), now: data.now), paused: m.paused)
+                          longestWait: PulseModel.pacedWait(PulseModel.longestWait(since: waiting.map(\.waitingSince), now: data.now)),
+                          paused: m.paused)
     }
 
     /// The Horizon's height, and where its pulse sits in the stream's space.
@@ -174,17 +181,19 @@ struct NWNowScreen: View {
         // needs you, so the first Decide card is in view; all quiet gets the sky to itself.
         let height = horizonHeight
         return ZStack(alignment: .top) {
-            NWHorizon(palette: p.map { $0.tone == .slate ? .asleep : .problem } ?? NightWatch.AuroraPalette(m.mood),
+            NWHorizon(palette: p.map { $0.tone == .slate ? .asleep : .problem } ?? NightWatch.AuroraPalette(m.mood, daypart: daypart),
                       pulse: p.map { $0.tone == .slate ? .hollowSlate : .hollowAmber } ?? NWPulseOrb.Style(m.mood),
                       headline: p?.title ?? data.handover ?? m.headline,
                       subline: p?.subtitle ?? (data.handover == nil ? m.subline : m.headline),
                       footnote: p == nil && quiet && m.headline == "All quiet" ? "Page is keeping watch. Go to sleep." : nil,
                       height: height, topInset: inset, model: pulseModel,
                       workingJump: workingJump(problem: p).map { j in (j.jump, j.rest, { scrollRequest = HeaderJump.sectionId }) })
-            HStack(alignment: .top) {
-                NWMacChip(model: data.chip, onTap: actions.tapChip)
-                Spacer()
-                settingsOrb(rings: m.rings)
+            NWChromeGlassGroup {
+                HStack(alignment: .top) {
+                    NWMacChip(model: data.chip, onTap: actions.tapChip)
+                    Spacer()
+                    settingsOrb(rings: m.rings)
+                }
             }
             .padding(.horizontal, NightWatch.Space.gutter)
             .padding(.top, inset + 6)
@@ -215,6 +224,8 @@ struct NWNowScreen: View {
                 }
             }
             .frame(width: 56, height: 56)
+            // The rings sit on a glass disc; before glass they float bare.
+            .nwChromeGlass(in: Circle()) { Color.clear }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -255,7 +266,7 @@ struct NWNowScreen: View {
                     .offset(y: push(below: order.firstIndex(of: row.id).map { $0 - 1 }))
                     // The approach draws an arrival itself; a departure has already folded or simply fades.
                     .transition(reduceMotion ? .opacity : .asymmetric(insertion: .identity, removal: .opacity))
-                if let tip = data.tip, tip.anchorId == row.id { tipCallout(tip).offset(y: push(below: order.firstIndex(of: row.id))) }
+                if let tip = data.tip, tip.anchorId == row.id { tipCallout(tip, under: row).offset(y: push(below: order.firstIndex(of: row.id))) }
             }
             // The Brief sits after Decide and Look when something needs you.
             if section == .look || (section == .decide && !sections.contains { $0.0 == .look }), let b = data.brief, b.hasUrgent {
@@ -270,11 +281,39 @@ struct NWNowScreen: View {
                         onDismiss: actions.dismissBrief, onReview: reviewFinished)
         }
         Group {
-            if let line = data.model.receiptLine { NWReceiptLine(text: line, failed: data.model.receiptFailed) }
+            if let line = data.model.receiptLine {
+                NWReceiptLine(text: line, failed: data.model.receiptFailed)
+                // A reply still waiting at the relay or on the Mac: Delete takes it back.
+                if let r = data.model.receiptRetract { receiptDelete(r) }
+            }
             if quiet && data.problem == nil { NWTonightCard(rings: data.model.rings) }
             NWSettledList(log: data.log, onSeeAll: actions.seeAll).padding(.top, 6)
         }
         .offset(y: push(below: order.count - 1))
+    }
+
+    /// Delete under the receipt of a reply that is still waiting somewhere it can be taken back from.
+    @ViewBuilder private func receiptDelete(_ r: ReceiptRetract) -> some View {
+        HStack(spacing: 12) {
+            if let n = data.retractNote {
+                Text(n.text).font(NightWatch.Typo.caption)
+                    .foregroundColor((n.isFinal ? NightWatch.Palette.textSecondary : NightWatch.Palette.amber).color)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            if data.retractNote?.isBusy == true {
+                ProgressView().controlSize(.small).tint(NightWatch.Palette.textSecondary.color).frame(width: 44, height: 44)
+            } else {
+                Button { actions.deleteQueued(r) } label: {
+                    Text("Delete").font(NightWatch.Typo.captionStrong).foregroundColor(NightWatch.Palette.red.color)
+                        .padding(.horizontal, 10).frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(Text(r.layer == .relay ? "Takes the reply back from the relay so it is never typed."
+                                        : "Takes the reply back from your Mac so it is never typed."))
+            }
+        }
+        .padding(.horizontal, 14)
     }
 
     /// The In flight rows, between Decide/Look and Review (or after them when nothing has finished).
@@ -288,11 +327,16 @@ struct NWNowScreen: View {
         }
     }
 
-    /// A first-time tip under the row it explains.
-    private func tipCallout(_ tip: NowTipTarget) -> some View {
-        NWTipCallout(text: tip.tip.text(biometry: data.biometry), symbol: tip.tip.symbol, onDismiss: { actions.dismissTip(tip.tip) })
-            .padding(.top, -6)
-            .transition(.opacity)
+    /// A first-time tip under the row it explains. Under a card that is
+    /// arriving it waits for the card to land (`NWArrivalTail`), and that
+    /// fade is its entrance.
+    private func tipCallout(_ tip: NowTipTarget, under row: NowRow) -> some View {
+        let arriving = arrivalPlan[row.id] != nil && !data.ghosts.contains(row.id)
+        return NWArrivalTail(arriving: arriving, delay: arrivalPlan[row.id] ?? 0, pinned: approachPin(row)) {
+            NWTipCallout(text: tip.tip.text(biometry: data.biometry), symbol: tip.tip.symbol, onDismiss: { actions.dismissTip(tip.tip) })
+        }
+        .padding(.top, -6)
+        .transition(arriving && !reduceMotion ? .asymmetric(insertion: .identity, removal: .opacity) : .opacity)
     }
 
     // MARK: Final approach
@@ -309,12 +353,22 @@ struct NWNowScreen: View {
         return CGFloat(ApproachModel.pushOffset(height: Double(arrivalHeight) + 16, elapsed: t))
     }
 
+    /// When each new row leaves the pulse: a few arrivals come down one after
+    /// another; a flood just appears.
+    private var arrivalPlan: [String: TimeInterval] {
+        ApproachModel.schedule(ApproachModel.arrivals(previous: seen.map { Array($0) }, current: order), start: 0)
+    }
+
+    /// The render harness's moment in the approach, for the row it pins.
+    private func approachPin(_ row: NowRow) -> Double? {
+        data.pinnedArrival == row.id ? motionPin.flatMap { $0.kind == .approach ? $0.time : nil } : nil
+    }
+
     /// A card, arriving from the pulse if it is new, or folding away if it
     /// has just been confirmed and has left.
     @ViewBuilder private func arriving(_ row: NowRow, inset: CGFloat) -> some View {
-        let pinned = data.pinnedArrival == row.id ? motionPin.flatMap { $0.kind == .approach ? $0.time : nil } : nil
-        // A few arrivals come down one after another; a flood just appears.
-        let plan = ApproachModel.schedule(ApproachModel.arrivals(previous: seen.map { Array($0) }, current: order), start: 0)
+        let pinned = approachPin(row)
+        let plan = arrivalPlan
         if data.ghosts.contains(row.id) {
             card(row).modifier(NWResolveFold(changedAt: data.receipts[row.id]?.changedAt))
         } else {
@@ -358,4 +412,16 @@ struct NWNowScreen: View {
                          onOpen: { actions.open(row.id) }, onCancel: { actions.cancel(row.id) })
         }
     }
+}
+
+/// What the stream springs on: its rows. A change that comes with the
+/// Horizon giving up its room (the first item arriving) or taking it back
+/// (the last one going) counts as no change, so the stream jumps with the
+/// Horizon in that one frame and the only thing moving is the arrival, not
+/// the Runway gliding 226 pt up through it.
+private struct NWStreamSpring: Equatable {
+    var rows: [String]
+    var horizon: CGFloat
+
+    static func == (a: Self, b: Self) -> Bool { a.horizon != b.horizon || a.rows == b.rows }
 }

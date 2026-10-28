@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Sends the actions a card or sheet asks for, through the one path that
 /// exists (`APIClient.reply`). It adds the Receipt thread's first phase
@@ -18,7 +21,15 @@ final class ActionCoordinator: ObservableObject {
     @Published private(set) var localProblems: [String: String] = [:]
 
     private var tasks: [String: Task<Void, Never>] = [:]
+    /// Rows whose written reply is waiting out its 10 s Undo (and so is on disk, in case the app is killed).
+    private var countdowns: Set<String> = []
+    #if canImport(UIKit)
+    /// Keeps Page awake through a countdown and its send if the person leaves the app, as the room's outbox does.
+    private var background: [String: UIBackgroundTaskIdentifier] = [:]
+    #endif
     private let api: APIClient
+
+    private static func outboxId(_ rowId: String) -> String { "page-reply:" + rowId }
 
     /// `api` is resolved here, on the main actor, rather than in a default
     /// argument (which is evaluated outside it).
@@ -29,6 +40,8 @@ final class ActionCoordinator: ObservableObject {
     /// entry. Nothing is sent by this; a send already in flight is the relay's.
     func reset() {
         for task in tasks.values { task.cancel() }
+        for id in countdowns { OutboxFile.remove(id: Self.outboxId(id)); endBackground(id) }
+        countdowns = []
         tasks = [:]
         pending = [:]
         localProblems = [:]
@@ -38,16 +51,29 @@ final class ActionCoordinator: ObservableObject {
     /// names what will be typed; cancel works until it ends), except an
     /// Irreversible approve, whose hold plus biometrics is the arm.
     /// `onResult` gets the relay's answer for a send that happened.
-    func begin(row: NowRow, kind: RowAction.Kind, text: String = "", onResult: ((ReplyOutcome) -> Void)? = nil) {
+    ///
+    /// `countdown`: a written reply to a busy session waits this long (10 s, with Undo) instead of the 1.2 s
+    /// ring. It lives here, not in the sheet, so closing the sheet doesn't cancel it.
+    func begin(row: NowRow, kind: RowAction.Kind, text: String = "", countdown: TimeInterval? = nil,
+               onResult: ((ReplyOutcome) -> Void)? = nil) {
         guard pending[row.id] == nil, ActionGate.isSendable(kind), ActionGate.canBegin(row: row, kind: kind),
               ActionGate.requiresBiometrics(kind: kind, commit: row.commit) == false,
               let request = ReplyMapping.request(for: kind, text: text) else { return }
         localProblems[row.id] = nil
         let armed = ActionGate.requiresArm(kind: kind, commit: row.commit)
-        pending[row.id] = PendingAction(rowId: row.id, kind: kind, text: request.text, commit: row.commit, startedAt: Date(), armed: armed,
-                                        preview: row.action(kind)?.preview)
+        let duration = armed && kind == .tellInstead ? (countdown ?? ArmSpec.duration) : ArmSpec.duration
+        let startedAt = Date()
+        pending[row.id] = PendingAction(rowId: row.id, kind: kind, text: request.text, commit: row.commit, startedAt: startedAt, armed: armed,
+                                        preview: row.action(kind)?.preview, armDuration: duration)
+        if armed, duration > 2 {
+            // The words are on disk only while the countdown runs: a kill before it ends gives them back as a draft.
+            countdowns.insert(row.id)
+            OutboxFile.add(PersistedSend(id: Self.outboxId(row.id), scope: OutboxRestore.scope(pageId: row.id), text: request.text,
+                                         startedAt: startedAt.timeIntervalSince1970))
+            beginBackground(row.id)
+        }
         tasks[row.id] = Task { [weak self] in
-            if armed { try? await Task.sleep(nanoseconds: UInt64(ArmSpec.duration * 1_000_000_000)) }
+            if armed { try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000)) }
             guard let self, !Task.isCancelled else { return }
             await self.fire(rowId: row.id, request: request, onResult: onResult)
         }
@@ -81,6 +107,13 @@ final class ActionCoordinator: ObservableObject {
         tasks[rowId]?.cancel()
         tasks[rowId] = nil
         pending[rowId] = nil
+        // Undo of a written reply's countdown: nothing was sent, and the words go back to the page's sheet.
+        // From a card the sheet that held them may be gone; only a cancel that landed gives them back.
+        if countdowns.contains(rowId), p.kind == .tellInstead {
+            SessionStore.shared.restoreDraft(scope: OutboxRestore.scope(pageId: rowId), text: p.text, note: RestoredDraft.undoneNote)
+        }
+        endCountdown(rowId)
+        endBackground(rowId)
     }
 
     func isArming(_ rowId: String, now: Date = Date()) -> Bool {
@@ -88,13 +121,48 @@ final class ActionCoordinator: ObservableObject {
         return false
     }
 
+    private func endCountdown(_ rowId: String) {
+        guard countdowns.remove(rowId) != nil else { return }
+        OutboxFile.remove(id: Self.outboxId(rowId))
+    }
+
+    private func beginBackground(_ rowId: String) {
+        #if canImport(UIKit)
+        guard background[rowId] == nil else { return }
+        background[rowId] = UIApplication.shared.beginBackgroundTask(withName: "page-reply-countdown") { [weak self] in
+            Task { @MainActor in self?.endBackground(rowId) }
+        }
+        #endif
+    }
+
+    private func endBackground(_ rowId: String) {
+        #if canImport(UIKit)
+        if let t = background.removeValue(forKey: rowId), t != .invalid { UIApplication.shared.endBackgroundTask(t) }
+        #endif
+    }
+
     private func fire(rowId: String, request: ReplyRequest, onResult: ((ReplyOutcome) -> Void)?) async {
+        let wasCountdown = countdowns.contains(rowId)
+        endCountdown(rowId)
+        defer { endBackground(rowId) }
+        // A countdown Page slept through (suspended with the sheet closed) is not sent late: the words come back.
+        if wasCountdown, let p = pending[rowId],
+           SendCountdown(startedAt: p.startedAt, duration: p.armDuration).verdict(now: Date()) == .stale {
+            pending[rowId] = nil
+            tasks[rowId] = nil
+            SessionStore.shared.restoreDraft(scope: OutboxRestore.scope(pageId: rowId), text: request.text, note: RestoredDraft.slept)
+            return
+        }
         // Still-live check: if the page was answered at the Mac while the ring
         // ran, nothing is sent.
         guard api.inbox.contains(where: { $0.id == rowId }) else {
             pending[rowId] = nil
             tasks[rowId] = nil
             localProblems[rowId] = "Already answered at the Mac"
+            // A message that waited 10 s for nothing isn't lost: it is back in the box.
+            if wasCountdown, request.action == .custom {
+                SessionStore.shared.restoreDraft(scope: OutboxRestore.scope(pageId: rowId), text: request.text)
+            }
             return
         }
         if var p = pending[rowId] { p.armed = false; pending[rowId] = p }

@@ -73,7 +73,7 @@ struct NWHistoryScreen: View {
                 Image(systemName: "xmark").font(.system(.body, weight: .semibold))
                     .foregroundColor(NightWatch.Palette.textPrimary.color)
                     .frame(width: 44, height: 44)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
+                    .nwChromeGlass(in: Circle()) { Circle().fill(Color.white.opacity(0.08)) }
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text("Close"))

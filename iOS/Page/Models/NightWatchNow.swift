@@ -24,6 +24,10 @@ struct DeliveryReceipt: Equatable {
         case unknownState
         /// The Mac was offline: the relay holds the reply until it is back.
         case macOffline
+        /// Held on the Mac until a rate limit resets (`held_until_reset`): not typed, and it can be deleted.
+        case heldUntilReset(String)
+        /// Taken back: nothing was typed.
+        case deleted
         /// A failure the Mac described in its own words.
         case other(String)
 
@@ -39,6 +43,8 @@ struct DeliveryReceipt: Equatable {
             case .answeredAtMac: return "Already answered at the Mac"
             case .unknownState: return "Review again"
             case .macOffline: return "Waiting for your Mac to come back online"
+            case .heldUntilReset(let when): return when
+            case .deleted: return SessionDeliveryState.deletedCopy
             case .other(let why): return why.isEmpty ? "Couldn't deliver the reply" : why
             }
         }
@@ -51,6 +57,8 @@ struct DeliveryReceipt: Equatable {
     let route: String
     let at: Date
     var outcome: Outcome = .delivered
+    /// The page this was a reply to, so a receipt for a reply still waiting can offer Delete.
+    var pageId: String? = nil
 
     /// "Approved npm test → cmux › page · verified 23:47:12"; anything but a
     /// confirmed delivery reads "<subject> · <what went wrong and what to do>".
@@ -70,7 +78,8 @@ enum ReceiptBuilder {
     /// failure, an answered-at-the-Mac or a closed prompt is stamped with it
     /// (or the page's own reply time) rather than the rebuild time, so it ages
     /// out of Now like a delivered receipt does.
-    static func receipt(for iv: Intervention, delivery: ReplyDelivery, route: String?, now: Date, changedAt: Date? = nil) -> DeliveryReceipt? {
+    static func receipt(for iv: Intervention, delivery: ReplyDelivery, route: String?, now: Date, changedAt: Date? = nil,
+                        retractNote: RetractNote? = nil) -> DeliveryReceipt? {
         let verb: DeliveryReceipt.Verb
         switch iv.repliedAction {
         case "approve": verb = .approved
@@ -79,16 +88,24 @@ enum ReceiptBuilder {
         }
         let subject = verb == .replied && iv.kind != .approval ? iv.projectName : NowRowBuilder.summaryLine(for: iv)
         func make(_ outcome: DeliveryReceipt.Outcome, at: Date) -> DeliveryReceipt {
-            DeliveryReceipt(verb: verb, subject: subject, route: route ?? "", at: at, outcome: outcome)
+            DeliveryReceipt(verb: verb, subject: subject, route: route ?? "", at: at, outcome: outcome, pageId: iv.id)
         }
         let stamp = iv.repliedAt ?? changedAt ?? now
         switch delivery {
         case .sending: return nil
-        case .sent(let queued, let at): return queued ? make(.macOffline, at: at) : nil
+        case .sent(let queued, let at):
+            if queued { return make(.macOffline, at: at) }
+            // The relay already gave it to the Mac and Delete went on asking it: that stays on the line until the
+            // Mac answers (a reply with no Delete under way is still just in flight).
+            if let n = retractNote, ForwardedRetract.isChainNote(n) { return make(.other(n.text), at: changedAt ?? at) }
+            return nil
         case .delivered: return make(.delivered, at: iv.repliedAt ?? now)
         case .failed(let why): return make(.other(why), at: stamp)
         case .alreadyReplied: return make(.answeredAtMac, at: stamp)
         case .gone: return make(.promptClosed, at: stamp)
+        case .heldOnMac(let detail):
+            return make(.heldUntilReset(HeldUntilReset.headline(detail: detail, resetsAt: nil, timeZone: .current)), at: iv.repliedAt ?? changedAt ?? now)
+        case .retracted: return make(.deleted, at: stamp)
         }
     }
 }
@@ -268,6 +285,18 @@ struct NowInputs {
     var macName: String
     var timeZone: TimeZone = .current
     var calendar: Calendar = .current
+    /// `GET /status` features (nil until known) and the Mac's `caps`: Delete is offered only when they say so.
+    var relayFeatures: Set<String>? = nil
+    var macCaps: Set<String> = []
+    /// Where each Delete stands, by page id (`SessionStore.retractNotes`).
+    var retractNotes: [String: RetractNote] = [:]
+}
+
+/// The latest receipt is a reply still waiting where it can be taken back: Delete, and which layer holds it.
+struct ReceiptRetract: Equatable {
+    let pageId: String
+    let sessionId: String
+    let layer: ReplyQueueStatus.Layer
 }
 
 struct NowModel: Equatable {
@@ -290,6 +319,9 @@ struct NowModel: Equatable {
     var receiptLine: String?
     /// The latest receipt is not a confirmed delivery (drawn amber, not teal).
     var receiptFailed: Bool
+    /// The latest receipt is a reply queued at the relay (Mac offline) or held on the Mac until a limit resets,
+    /// and the relay or Mac can take it back: its line carries a Delete.
+    var receiptRetract: ReceiptRetract? = nil
     /// An open "paused for battery" page: agents are paused at the cutoff.
     var paused: Bool
     var rings: [RingStat]
@@ -381,18 +413,29 @@ struct NowModel: Equatable {
             guard let d = i.deliveries[iv.id] else { continue }
             let session = i.sessions.first { $0.id == iv.sessionId }
             let route = DeliveryPreview.route(host: session?.host, project: session?.title ?? iv.projectName)
-            if let r = ReceiptBuilder.receipt(for: iv, delivery: d, route: route, now: i.now, changedAt: i.deliveryTimes[iv.id]),
+            if let r = ReceiptBuilder.receipt(for: iv, delivery: d, route: route, now: i.now, changedAt: i.deliveryTimes[iv.id],
+                                              retractNote: i.retractNotes[iv.id]),
                i.now.timeIntervalSince(r.at) < receiptWindow, r.at <= i.now.addingTimeInterval(60) {
                 receipts.append((r, r.at))
             }
         }
         let latest = receipts.max { $0.1 < $1.1 }?.0
+        var retract: ReceiptRetract?
+        if let latest, let id = latest.pageId, let iv = (i.interventions + i.history).first(where: { $0.id == id }), !iv.isBlockingHook {
+            switch latest.outcome {
+            case .macOffline where RelayQueue.canDelete(features: i.relayFeatures):
+                retract = ReceiptRetract(pageId: id, sessionId: iv.sessionId, layer: .relay)
+            case .heldUntilReset where i.macCaps.contains(SendChoicePlan.retractCap):
+                retract = ReceiptRetract(pageId: id, sessionId: iv.sessionId, layer: .macHold)
+            default: break
+            }
+        }
 
         return NowModel(
             mood: mood, headline: headline, subline: subline,
             needYouCount: need, lookCount: look, reviewCount: review, workingCount: working,
             rows: rows, runway: runway, receiptLine: latest?.line(timeZone: tz),
-            receiptFailed: latest.map { $0.outcome != .delivered } ?? false, paused: paused,
+            receiptFailed: latest.map { $0.outcome != .delivered } ?? false, receiptRetract: retract, paused: paused,
             rings: DayStats.today(history: i.history, now: i.now, calendar: i.calendar).rings,
             macName: i.macName, accessibilityLabel: "Page, \(headline)")
     }

@@ -66,7 +66,10 @@ struct NWDispatchScreen: View {
                     Spacer()
                     Button(action: actions.close) {
                         Image(systemName: "xmark").font(.system(.footnote, weight: .bold)).foregroundColor(NightWatch.Palette.textSecondary.color)
-                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                            .frame(width: 44, height: 44)
+                            // A glass disc where there is glass, as a sheet's close button is; bare before it.
+                            .nwChromeGlass(in: Circle()) { Color.clear }
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain).accessibilityLabel(Text("Close"))
                 }

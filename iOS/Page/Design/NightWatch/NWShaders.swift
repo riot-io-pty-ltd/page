@@ -17,18 +17,25 @@ struct NWLivingAurora: View {
     var palette: NightWatch.AuroraPalette
     var seconds: Double
     var stars: Double = 1
+    @Environment(\.nwFixedPhase) private var fixed
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The curtains' phase, accumulated so a change of speed never jumps them.
+    @State private var clock = AuroraPhaseClock()
 
     var body: some View {
         if NWShaders.available {
+            // Read once per draw, outside the GeometryReader (its closure may run more than once).
+            let phase = AuroraPhaseClock.shaderPhase(NWAuroraPhase.at(seconds, palette: palette, clock: clock, still: fixed != nil || reduceMotion))
             GeometryReader { geo in
                 Rectangle()
                     .fill(Color.black)
                     .colorEffect(ShaderLibrary.default.nwAurora(
-                        .float2(geo.size), .float(seconds),
-                        // The boards' u_speed is 0.4 at a palette speed of 1. The GLSL's 0.9
-                        // intensity was drawn for a whole board; behind a phone's Horizon it
-                        // drowns the pulse, so it runs at two thirds of that.
-                        .float(0.4 * palette.speed),
+                        // Wrapped: the raw reference-date clock is frozen at float precision.
+                        .float2(geo.size), .float(ShaderClock.seconds(seconds)),
+                        // The boards' u_speed is 0.4 at a palette speed of 1 (`NWAuroraPhase`).
+                        // The GLSL's 0.9 intensity was drawn for a whole board; behind a phone's
+                        // Horizon it drowns the pulse, so it runs at two thirds of that.
+                        .float(phase),
                         .color(palette.skyTop.color), .color(palette.skyBottom.color),
                         .color(palette.c1.color), .color(palette.c2.color), .color(palette.c3.color),
                         .float(0.6 * palette.intensity), .float(stars)))
@@ -57,7 +64,7 @@ struct NWPulseLight: View {
             Rectangle()
                 .fill(Color.white)
                 .colorEffect(ShaderLibrary.default.nwPulse(
-                    .float2(geo.size), .float(seconds),
+                    .float2(geo.size), .float(ShaderClock.seconds(seconds)),
                     .color(color.mixed(with: NightWatch.RGBA(1, 1, 1), 0.25).color), .color(color.color),
                     .float(0.09), .float(glow),
                     .float4(Float(r[0]), Float(r[1]), Float(r[2]), Float(r[3])), .float(1.0)))

@@ -12,6 +12,8 @@ struct LanesScreenData {
     var standby: [TowerMacRow] = []
     /// The last battery pause: the dusk and the dawn (`NWDuskDawn.swift`).
     var duskDawn = DuskDawnLog()
+    /// The time of day the sky is drawn at (`\.nwDaypart`); nighttime unless set.
+    var daypart: DaypartWeights = .nighttime
 }
 
 struct LanesScreenActions {
@@ -45,6 +47,7 @@ struct NWLanesScreen: View {
         GeometryReader { geo in
             let inset = topInsetOverride ?? geo.safeAreaInsets.top
             ZStack(alignment: .top) {
+                lanesAurora(inset: inset)
                 powerBackdrop
                 dawnLight
                 VStack(spacing: 0) {
@@ -100,6 +103,8 @@ struct NWLanesScreen: View {
                 }
             }
             .padding(.leading, 10).padding(.trailing, 6).frame(minHeight: 44)
+            // On a glass capsule, as Now's Mac chip is; before glass it floats bare.
+            .nwChromeGlass(in: Capsule()) { Color.clear }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -119,11 +124,71 @@ struct NWLanesScreen: View {
         }
     }
 
+    // MARK: The day band
+
+    /// The fleet's mood for the day band: teal while anything works, else the
+    /// quiet sky. A lane paused for battery still counts as working, so the
+    /// band keeps its palette while the dusk rises over it. Never amber: on
+    /// Lanes amber stays in the group heads.
+    private var fleetMood: NowModel.Mood {
+        data.lanes.groups.contains { g in g.rows.contains { $0.state == .working || $0.state == .paused } } ? .working : .quiet
+    }
+
+    /// The living sky behind the header, at the time of day: the Horizon's
+    /// aurora as a crown over the top of Lanes, its curtains glowing above and
+    /// behind the title and gone into the page by the first lane. The scrim is
+    /// weighted onto the caption and the axis, the small dim text, so the glow
+    /// can stay bright where only the bold title sits. It gives way to the
+    /// power story's cover as the dusk rises and comes back as the dawn
+    /// settles, never a cut; a settled pause draws none of it (and runs no clock).
+    @ViewBuilder private func lanesAurora(inset: CGFloat) -> some View {
+        let settledPause = data.fleet.paused && !data.powerStoryMoving(pin: motionPin)
+        if !settledPause {
+            let palette = NightWatch.AuroraPalette(fleetMood, daypart: data.daypart)
+            let height = inset + Self.dayBandDepth
+            NWAnimated(fps: 15) { t in
+                let cover = data.skyLight(at: t, pin: motionPin).cover
+                ZStack(alignment: .top) {
+                    NWLivingAurora(palette: palette, seconds: t, stars: data.daypart.stars)
+                    // The Horizon's own fade into the page.
+                    LinearGradient(stops: [.init(color: .clear, location: 0),
+                                           .init(color: NightWatch.Palette.backgroundDeep.opacity(0).color, location: 0.35),
+                                           .init(color: NightWatch.Palette.backgroundDeep.opacity(0.85).color, location: 0.88),
+                                           .init(color: NightWatch.Palette.backgroundDeep.color, location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                    // The header scrim, deepest behind the caption and the axis.
+                    LinearGradient(stops: [.init(color: NightWatch.Palette.backgroundDeep.opacity(Self.dayBandScrimTop).color, location: 0)]
+                                   + Self.dayBandScrim.map { y, a in .init(color: NightWatch.Palette.backgroundDeep.opacity(a).color, location: (inset + y) / height) }
+                                   + [.init(color: NightWatch.Palette.backgroundDeep.opacity(0).color, location: 1)],
+                                   startPoint: .top, endPoint: .bottom)
+                }
+                .opacity(Self.dayBandOpacity * (1 - cover))
+            }
+            .frame(height: height)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// How far below the status bar the day band reaches, in points.
+    private static let dayBandDepth: CGFloat = 280
+    private static let dayBandOpacity = 0.8
+    /// The scrim at the very top of the screen, behind the status bar.
+    private static let dayBandScrimTop = 0.06
+    /// The scrim's stops between the top and the band's bottom (where it is
+    /// gone): points below the status bar, and how deep the page colour lies
+    /// there. The title's row is light; the caption (+60...+76) and the axis
+    /// (+90...+104) are deep.
+    private static let dayBandScrim: [(CGFloat, Double)] = [
+        (0, 0.12), (20, 0.24), (40, 0.44), (56, 0.64), (66, 0.72), (104, 0.72), (140, 0.6), (190, 0.36),
+    ]
+
     // MARK: The power story
 
     /// The aurora behind the list, only while the power story is on screen: fading to dusk,
     /// settled in the night of a pause, or fading back into the day as the dawn ends. Otherwise
-    /// the shell's own sky shows, as it always has behind Lanes.
+    /// the day band (`lanesAurora`) crowns the header over the shell's own sky.
     private var powerBackdrop: some View {
         let story = data.powerStoryShown(pin: motionPin)
         return Group {

@@ -117,6 +117,9 @@ struct Intervention: Identifiable, Hashable {
     /// v2: short human-readable delivery result from the Mac.
     var deliveryDetail: String?
     var deliveryMethod: String?
+    /// v2: when the relay handed the reply to a Mac socket (not just queued it). A reply that is
+    /// pending without it, on a page no hook owns, is waiting in the relay's queue for an offline Mac.
+    var deliveryForwardedAt: Date?
     /// Worker-managed: a page from a v1 blocking hook (`hook-` id). The hook
     /// polls for the answer itself and can only apply Approve or Deny.
     var hookBlocking: Bool?
@@ -144,7 +147,7 @@ extension Intervention: Decodable {
         case id, sessionId, cwd, projectName, kind, openedAt, context
         case closedAt, closeReason, repliedAt, repliedText, repliedAction
         case backend, source, subtype, deliveryStatus, deliveryDetail, deliveryMethod
-        case hookBlocking
+        case hookBlocking, deliveryForwardedAt
     }
 
     /// Lenient by design: only `id`, `sessionId` and `openedAt` are required.
@@ -173,6 +176,7 @@ extension Intervention: Decodable {
         deliveryStatus = c.lenientString(.deliveryStatus)
         deliveryDetail = c.lenientString(.deliveryDetail)
         deliveryMethod = c.lenientString(.deliveryMethod)
+        deliveryForwardedAt = try? c.decodeIfPresent(Date.self, forKey: .deliveryForwardedAt)
         hookBlocking = (try? c.decodeIfPresent(Bool.self, forKey: .hookBlocking)) ?? nil
     }
 }

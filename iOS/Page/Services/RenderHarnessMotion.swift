@@ -64,6 +64,7 @@ enum RenderHarnessMotion {
 struct HarnessMotion: View {
     let screen: String
     let time: Double
+    @Environment(\.nwDaypart) private var daypart
 
     private var now: Date { RenderHarness.now }
 
@@ -185,6 +186,7 @@ struct HarnessMotion: View {
             log.observe(paused: true, working: active, at: now)
         }
         d.duskDawn = log
+        d.daypart = daypart
         return d
     }
 

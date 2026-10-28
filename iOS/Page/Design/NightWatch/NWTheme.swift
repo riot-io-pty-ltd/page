@@ -162,13 +162,32 @@ enum NightWatch {
             self.intensity = intensity; self.speed = speed
         }
 
-        init(_ mood: NowModel.Mood) {
-            switch mood {
-            case .needsYou: self = .needsYou
-            case .working: self = .working
-            case .quiet: self = .quiet
-            case .dusk: self = .dusk
+        /// The mood's aurora at a time of day (`DaypartTone`): the hour sets the
+        /// curtains and the sky, the mood their strength. Nighttime is the
+        /// statics above, exactly. Needs-you keeps its amber curtains at every
+        /// hour (only its sky takes the hour's hue); dusk is never tinted.
+        init(_ mood: NowModel.Mood, daypart: DaypartWeights = .nighttime) {
+            if mood == .dusk { self = .dusk; return }
+            if daypart.only == .nighttime {
+                switch mood {
+                case .needsYou: self = .needsYou
+                case .working: self = .working
+                default: self = .quiet
+                }
+                return
             }
+            let tone = DaypartTone.blended(daypart)
+            switch mood {
+            case .needsYou: self.init(tone.needsYou)
+            case .working: self.init(tone.working)
+            default: self.init(tone.quiet)
+            }
+        }
+
+        init(_ a: DaypartTone.Aurora) {
+            func c(_ x: DaypartTone.Colour) -> RGBA { RGBA(x.r, x.g, x.b) }
+            self.init(c1: c(a.c1), c2: c(a.c2), c3: c(a.c3), skyTop: c(a.skyTop), skyBottom: c(a.skyBottom),
+                      intensity: a.intensity, speed: a.speed)
         }
     }
 }
@@ -185,6 +204,10 @@ private struct NWAnimationsPausedKey: EnvironmentKey {
 
 private struct NWFixedPhaseKey: EnvironmentKey {
     static let defaultValue: Double? = nil
+}
+
+private struct NWDaypartKey: EnvironmentKey {
+    static let defaultValue: DaypartWeights = .nighttime
 }
 
 private struct NWTopInsetKey: EnvironmentKey {
@@ -241,6 +264,15 @@ extension EnvironmentValues {
     var nwFixedPhase: Double? {
         get { self[NWFixedPhaseKey.self] }
         set { self[NWFixedPhaseKey.self] = newValue }
+    }
+
+    /// The time of day the Now and Lanes skies are drawn at. The app root's
+    /// `NWDaypartTicker` reads the local clock every two minutes; anything
+    /// without one (widgets, previews, the gallery, the macOS proxy) draws
+    /// nighttime, today's aurora, and the harness pins it (`-NWDaypart`).
+    var nwDaypart: DaypartWeights {
+        get { self[NWDaypartKey.self] }
+        set { self[NWDaypartKey.self] = newValue }
     }
 
     /// When set, the signature motion of that kind draws the pinned moment

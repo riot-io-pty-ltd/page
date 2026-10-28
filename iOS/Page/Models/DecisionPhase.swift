@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 // What a Decision sheet is showing, derived from live state on every render.
 // This is the reply screen's phase logic (ReplyView, which it replaces),
@@ -24,10 +25,14 @@ enum DecisionPhase: Equatable {
     case failed(String)
     case alreadyReplied
     case resolved(String)
+    /// The Mac holds the reply until a rate limit resets; it can be deleted while it waits.
+    case heldOnMac(String?)
+    /// Taken back: nothing was typed, and the page takes a new reply.
+    case retracted(String)
 
     var acceptsInput: Bool {
         switch self {
-        case .open, .failed, .unconfirmed: return true
+        case .open, .failed, .unconfirmed, .retracted: return true
         default: return false
         }
     }
@@ -83,6 +88,9 @@ enum DecisionPhase: Equatable {
         case .failed(let message)?: return i.isLive ? .failed(message) : closed(hadOwnReply: true)
         case .alreadyReplied?: return .alreadyReplied
         case .gone?: return .resolved("This page was already resolved.")
+        // Held on the Mac, the page has closed as "replied": the sheet stays, so the reply can still be deleted.
+        case .heldOnMac(let detail)?: return .heldOnMac(detail)
+        case .retracted(let why)?: return i.isLive ? .retracted(why) : closed(hadOwnReply: true)
         case nil:
             if i.isLive { return .open }
             if i.hasSnapshot { return closed(hadOwnReply: false) }
@@ -112,6 +120,8 @@ enum DecisionPhase: Equatable {
         case .unconfirmed: return ("Your Mac never confirmed this. If the session is still waiting, you can answer again.", .warn)
         case .alreadyReplied: return ("Already answered at the Mac", .neutral)
         case .resolved(let why): return ("Resolved · \(why)", .neutral)
+        case .heldOnMac: return ("Held on your Mac until the rate limit resets. Page types it then.", .warn)
+        case .retracted(let why): return (why, .neutral)
         }
     }
 }
@@ -126,5 +136,95 @@ enum DraftQuestion {
         case .carryOn: return "Send your note instead?"
         case .custom: return ""
         }
+    }
+}
+
+// MARK: - The sheet's layout and its draft
+
+/// Which of the Decision sheet's two layouts is drawn, as one pure decision.
+/// The height it is given is the sheet's height with the keyboard ignored:
+/// the keyboard shrinks the space the sheet has, and a layout chosen from
+/// that space would swap while a message is being typed, rebuilding the
+/// field under the person's thumbs. While the composer is up the choice that
+/// was in force when it opened is kept, whatever the height does after.
+enum DecisionLayout {
+    /// Below this sheet height there is no room to pin the command, the preview
+    /// and the controls and still read the headline above them.
+    static let pinnedMinHeight: CGFloat = 580
+
+    /// Pinned when the sheet is tall enough. The answer picker is as tall as a
+    /// screenful: it flows with the rest instead of being pinned.
+    static func pinned(height: CGFloat, questionPicker: Bool) -> Bool {
+        height >= pinnedMinHeight && !questionPicker
+    }
+
+    /// The layout to draw: the latched one while composing, else by height.
+    static func pinned(height: CGFloat, questionPicker: Bool, latched: Bool?, composing: Bool) -> Bool {
+        if composing, let latched { return latched }
+        return pinned(height: height, questionPicker: questionPicker)
+    }
+
+    /// What to remember when the composer opens (the layout in force), and to forget when it closes.
+    static func latch(current: Bool, composing: Bool) -> Bool? { composing ? current : nil }
+
+    /// The same from the sheet's height. A composer that opens before the sheet was ever measured (height 0)
+    /// has no layout in force yet: nothing is latched until the first measurement (`relatch`).
+    static func latch(height: CGFloat, questionPicker: Bool, composing: Bool) -> Bool? {
+        guard composing, height > 0 else { return nil }
+        return pinned(height: height, questionPicker: questionPicker)
+    }
+
+    /// A new height arrived. When the composer is up and nothing was latched because the sheet had not been
+    /// measured, the first real height decides the layout, so it can't swap under the field later.
+    static func relatch(latched: Bool?, composing: Bool, oldHeight: CGFloat, newHeight: CGFloat, questionPicker: Bool) -> Bool? {
+        guard composing else { return nil }
+        if latched != nil { return latched }
+        guard oldHeight <= 0, newHeight > 0 else { return nil }
+        return pinned(height: newHeight, questionPicker: questionPicker)
+    }
+}
+
+/// What happens to a message being written when the sheet is asked to go
+/// away: by a swipe, or because its page resolved underneath it.
+enum DecisionDraftGuard {
+    private static func hasText(_ draft: String) -> Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// A swipe-down must not eat a message: while there is text, or a send is in flight (arming, or on its way to the relay).
+    static func blocksSwipeDismiss(draft: String, sendPending: Bool, phase: DecisionPhase, countdownPending: Bool = false) -> Bool {
+        if countdownPending { return false }
+        if hasText(draft) { return true }
+        if sendPending { return true }
+        if case .sending = phase { return true }
+        return false
+    }
+
+    /// The page resolved (answered at the Mac, superseded) while there is text: the sheet stays, with the text,
+    /// and says so, instead of closing itself after 2.2 s and dropping it. A delivered reply closes as ever
+    /// (its text was handed off and cleared).
+    static func keepsDraft(phase: DecisionPhase, draft: String) -> Bool {
+        guard hasText(draft) else { return false }
+        switch phase {
+        case .resolved, .alreadyReplied: return true
+        default: return false
+        }
+    }
+
+    /// The delay before the sheet closes itself, or nil to stay (a kept draft).
+    static func autoCloseDelay(phase: DecisionPhase, draft: String) -> Double? {
+        keepsDraft(phase: phase, draft: draft) ? nil : phase.autoCloseDelay
+    }
+
+    /// The row stopped offering a reply under a message being written (its actions changed: the session
+    /// moved on, or the page now has to be answered on the Mac): the dock stays, locked, with the
+    /// text and the kept-draft note, rather than the sheet showing no controls at all.
+    static func keepsDock(composerOpen: Bool, draft: String, rowTakesReply: Bool) -> Bool {
+        composerOpen && hasText(draft) && !rowTakesReply
+    }
+
+    /// Leaving the sheet (the X, Open session, View changes, or another sheet asked for by the app)
+    /// asks first while there is a message written that is not on its way. One that is waiting out its
+    /// countdown is already the app's: it sends (or is undone from the receipt) whether the sheet stays.
+    static func needsConfirm(draft: String, countdownPending: Bool) -> Bool {
+        hasText(draft) && !countdownPending
     }
 }

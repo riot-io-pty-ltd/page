@@ -18,8 +18,9 @@ struct HoldRingSpec: Equatable {
     /// Time to fill from empty to full once the dead zone has passed.
     let fill: TimeInterval
 
-    /// Hold the pulse (Stop-all): appears after 300 ms, fills over 1.2 s, full at 1.5 s.
-    static let stopAll = HoldRingSpec(deadZone: 0.3, fill: 1.2)
+    /// Hold the pulse (Stop-all): appears after 300 ms, fills over 9.7 s, full
+    /// at 10 s. Esc in every session is never something to do by accident.
+    static let stopAll = HoldRingSpec(deadZone: 0.3, fill: 9.7)
     /// Hold to approve an Irreversible action: the same ring, the same timing.
     static let irreversible = HoldRingSpec(deadZone: 0.3, fill: 1.2)
 
@@ -49,10 +50,15 @@ struct HoldRingSpec: Equatable {
     }
 
     /// Progress while the ring unwinds after an early release: it runs back
-    /// at the speed it filled. `released` is the progress at release. Pure.
+    /// at the speed it filled, but never slower than an empty-to-full in
+    /// `maxUnwind` (a 10 s Stop ring lets go in about a second, not ten).
+    /// `released` is the progress at release. Pure.
     func unwound(from released: Double, since: TimeInterval) -> Double {
-        max(0, released - since / fill)
+        max(0, released - since / min(fill, Self.maxUnwind))
     }
+
+    /// The longest an unwind from full takes.
+    static let maxUnwind: TimeInterval = 1.2
 
     // MARK: the burst
 

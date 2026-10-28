@@ -12,10 +12,10 @@ enum ArmSpec {
     static let duration: TimeInterval = 1.2
 
     /// 0...1 after `elapsed`. Pure.
-    static func progress(elapsed: TimeInterval) -> Double { min(1, max(0, elapsed / duration)) }
-    static func isComplete(elapsed: TimeInterval) -> Bool { elapsed >= duration }
+    static func progress(elapsed: TimeInterval, duration: TimeInterval = ArmSpec.duration) -> Double { min(1, max(0, elapsed / duration)) }
+    static func isComplete(elapsed: TimeInterval, duration: TimeInterval = ArmSpec.duration) -> Bool { elapsed >= duration }
     /// Seconds left to cancel, never negative.
-    static func remaining(elapsed: TimeInterval) -> TimeInterval { max(0, duration - elapsed) }
+    static func remaining(elapsed: TimeInterval, duration: TimeInterval = ArmSpec.duration) -> TimeInterval { max(0, duration - elapsed) }
 }
 
 /// What a commit gesture needs before the send.
@@ -106,6 +106,11 @@ struct PendingAction: Equatable {
     var armed: Bool
     /// What will be typed, where, on which Mac ("Will press Esc · cmux › builds · Studio MBP").
     var preview: String? = nil
+    /// How long the ring runs: 1.2 s, or the 10 s Undo of a message sent now to a busy session.
+    var armDuration: TimeInterval = ArmSpec.duration
+
+    /// The long Undo (a countdown with a number) rather than the short ring.
+    var isCountdown: Bool { armDuration > 2 }
 
     /// The local phase at `now`.
     enum Phase: Equatable {
@@ -118,13 +123,14 @@ struct PendingAction: Equatable {
     func phase(now: Date) -> Phase {
         guard armed else { return .ready }
         let e = now.timeIntervalSince(startedAt)
-        return ArmSpec.isComplete(elapsed: e) ? .ready : .arming(progress: ArmSpec.progress(elapsed: e))
+        return ArmSpec.isComplete(elapsed: e, duration: armDuration) ? .ready : .arming(progress: ArmSpec.progress(elapsed: e, duration: armDuration))
     }
 
     /// What the card says while the ring runs.
     func armLabel(now: Date) -> String {
         guard case .arming = phase(now: now) else { return "Sending…" }
-        let left = ArmSpec.remaining(elapsed: now.timeIntervalSince(startedAt))
+        let left = ArmSpec.remaining(elapsed: now.timeIntervalSince(startedAt), duration: armDuration)
+        if isCountdown { return SendCountdown(startedAt: startedAt, duration: armDuration).label(now: now) }
         return "Sending in \(String(format: "%.1f", left)) s · tap to cancel"
     }
 }
@@ -149,6 +155,8 @@ enum CardOutcome: Equatable {
         case .failed(let why)?: return .problem(why)
         case .alreadyReplied?: return .problem("Already answered at the Mac")
         case .gone?: return .problem("Prompt closed before your answer")
+        case .heldOnMac?: return .sending
+        case .retracted(let why)?: return .problem(why)
         }
     }
 }

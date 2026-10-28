@@ -24,7 +24,7 @@ struct DiffView: View {
                         Button { dismiss() } label: {
                             Image(systemName: "chevron.down").font(.system(.body, weight: .semibold))
                                 .foregroundColor(NightWatch.Palette.textPrimary.color)
-                                .frame(width: 48, height: 48).background(Circle().fill(Color.white.opacity(0.09)))
+                                .frame(width: 48, height: 48).nwChromeGlass(in: Circle()) { Circle().fill(Color.white.opacity(0.09)) }
                         }
                         .buttonStyle(.plain).accessibilityLabel(Text("Close"))
                         Text(title).font(.system(.title3, design: .monospaced, weight: .semibold))

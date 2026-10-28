@@ -77,6 +77,8 @@ struct DecisionContent: Equatable {
     let informational: String?
     let stoppable: Bool
     let canTell: Bool
+    /// A finished turn's last message ends on a plain yes/no question (`YesNoQuestion`): the sheet offers Yes and No.
+    var yesNo: String? = nil
 
     /// What undoing would look like, per class. A hint, never a "safe" badge. Pure.
     static func undoNote(level: Reversibility?, tags: [Reversibility.Tag]) -> String? {
@@ -100,6 +102,7 @@ struct DecisionContent: Equatable {
         var detail: String? = nil
         var blurb: String? = nil
         var summary: String? = nil
+        var yesNo: String? = nil
         switch iv.kind {
         case .approval:
             if iv.subtype == "plan" { kind = .plan; ask = iv.context.isEmpty ? "Plan ready for review" : iv.context }
@@ -124,6 +127,7 @@ struct DecisionContent: Equatable {
         case .idle:
             let parts = TurnSummaryLine.split(iv.context)
             summary = parts.summary
+            if row.section == .review { yesNo = YesNoQuestion.detect(parts.rest) }
             ask = row.section == .review ? (parts.rest.isEmpty ? (summary ?? "Finished a turn") : parts.rest.trimmingCharacters(in: .whitespacesAndNewlines)) : (iv.context.isEmpty ? row.summary : iv.context)
         case .rateLimit:
             ask = iv.context.isEmpty ? row.summary : iv.context
@@ -157,6 +161,6 @@ struct DecisionContent: Equatable {
             options: iv.kind == .approval ? PromptOption.parse(iv.context) : [],
             screenNote: unknownAgent ? DeliveryPreview.unreadableNote : nil,
             decisionsOnly: iv.acceptsDecisionsOnly, isHook: iv.isBlockingHook, footer: footer, rawContext: iv.context,
-            informational: isInfo, stoppable: PageSubtype.canStop(iv.subtype), canTell: !iv.acceptsDecisionsOnly)
+            informational: isInfo, stoppable: PageSubtype.canStop(iv.subtype), canTell: !iv.acceptsDecisionsOnly, yesNo: yesNo)
     }
 }

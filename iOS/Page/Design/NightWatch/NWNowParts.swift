@@ -23,8 +23,12 @@ struct NWMacChip: View {
                     .foregroundColor(NightWatch.Palette.textTertiary.color)
             }
             .padding(.horizontal, 12).frame(height: 36)
-            .background(Capsule().fill(Color.black.opacity(0.35)))
-            .overlay(Capsule().strokeBorder(model.tone == .warn ? NightWatch.Palette.amber.opacity(0.5).color : Color.white.opacity(0.14), lineWidth: 1))
+            // Glass brings its own rim, so the white hairline is the fallback's; the amber one is the warning's, on both.
+            .nwChromeGlass(in: Capsule()) {
+                Capsule().fill(Color.black.opacity(0.35))
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(model.tone == .warn ? 0 : 0.14), lineWidth: 1))
+            }
+            .overlay(Capsule().strokeBorder(NightWatch.Palette.amber.opacity(model.tone == .warn ? 0.5 : 0).color, lineWidth: 1))
             .frame(minHeight: 44)
             .contentShape(Rectangle())
         }
@@ -67,19 +71,27 @@ struct NWBannerCard: View {
     }
 }
 
+/// When each absence's sunrise first played (reference-date seconds, the
+/// one-shots' clock), so it plays once per absence however often the Brief
+/// is collapsed and reopened, scrolled away or Now is rebuilt.
+@MainActor enum NWBriefSunriseBook {
+    private static var book = OneShotBook()
+
+    static func start(_ key: String) -> Double { book.start(key, now: Date().timeIntervalSinceReferenceDate) }
+}
+
 /// The Return Brief. Collapsed it is one line ("While you were away · 1h
 /// 52m ›"); expanded, a glass card that opens with the dawn's sunrise behind
 /// the title (the same sweep as Dusk and dawn, as bright as the absence was
 /// productive), three counts, a line per thing that happened, and the two
 /// actions. Everything on it is counted from Page's own log. The sunrise
-/// plays once and then holds still.
+/// plays once per absence and then holds still.
 struct NWBriefCard: View {
     var brief: ReturnBrief
     var expanded: Bool
     var onToggle: () -> Void = {}
     var onDismiss: () -> Void = {}
     var onReview: () -> Void = {}
-    @State private var openedAt: Double?
     @Environment(\.nwMotion) private var pin
 
     var body: some View {
@@ -102,7 +114,9 @@ struct NWBriefCard: View {
     }
 
     private var full: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        // Read as it is drawn, so its first frame is already the dark before the sunrise.
+        let openedAt = NWBriefSunriseBook.start(brief.sunriseKey)
+        return VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("WHILE YOU WERE AWAY").nwLabel()
                 Text(brief.awayText)
@@ -162,7 +176,6 @@ struct NWBriefCard: View {
                 .allowsHitTesting(false)
             })
         .accessibilityElement(children: .contain)
-        .onAppear { if openedAt == nil { openedAt = Date().timeIntervalSinceReferenceDate } }
     }
 
     /// `elapsed` nil: the sunrise has risen and holds.
@@ -209,6 +222,7 @@ extension NightWatch.AuroraPalette {
 struct NWNewPill: View {
     var count: Int
     var onTap: () -> Void
+    @Environment(\.nwChromeGlassOn) private var glass
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 6) {
@@ -217,8 +231,9 @@ struct NWNewPill: View {
             }
             .foregroundColor(NightWatch.Palette.onBright.color)
             .padding(.horizontal, 14).frame(height: 34)
-            .background(Capsule().fill(NightWatch.Palette.amber.color))
-            .shadow(color: Color.black.opacity(0.35), radius: 6, y: 2)
+            // Floating over the stream: amber glass (which casts its own shadow), or the amber pill and a shadow.
+            .nwChromeGlass(in: Capsule(), tint: NightWatch.Palette.amber) { Capsule().fill(NightWatch.Palette.amber.color) }
+            .shadow(color: Color.black.opacity(glass ? 0 : 0.35), radius: 6, y: 2)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text("\(count) new, show"))

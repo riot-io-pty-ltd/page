@@ -29,6 +29,8 @@ struct NWHorizon: View {
 
     @Environment(\.nwMotion) private var pin
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The time of day: the stars, and the sky the exhale and the dusk start from.
+    @Environment(\.nwDaypart) private var daypart
     /// When the exhale, dusk or dawn began (reference-date seconds, the clock `NWAnimated` runs on).
     @State private var exhaleAt: Double?
     @State private var duskAt: Double?
@@ -150,19 +152,20 @@ struct NWHorizon: View {
 
     private func sky(_ t: Double) -> some View {
         var pal = palette
-        var stars = 1.0
+        var stars = daypart.stars
         var band = 0.0
         var dawn: DawnModel.Dawn?
         if let e = elapsed(.exhale, since: exhaleAt, at: t) {
             let x = PulseModel.exhale(elapsed: e)
-            if !x.finished { pal = NightWatch.AuroraPalette.needsYou.mixedPerceptual(with: palette, x.aurora) }
+            // From the hour's needs-you sky, so the sky never snaps for a frame.
+            if !x.finished { pal = NightWatch.AuroraPalette(.needsYou, daypart: daypart).mixedPerceptual(with: palette, x.aurora) }
         }
         if isDusk {
             // A pause already under way when the Horizon appeared is drawn settled:
             // through the purple dusk to a near-black night, the stars all but gone.
             let d = DawnModel.dusk(elapsed: elapsed(.dusk, since: duskAt, at: t) ?? DawnModel.duskDuration)
-            pal = (fromPalette ?? .working).towardNight(d.aurora)
-            stars = DawnModel.starField(duskMix: d.aurora)
+            pal = (fromPalette ?? NightWatch.AuroraPalette(.working, daypart: daypart)).towardNight(d.aurora)
+            stars = DawnModel.starField(duskMix: d.aurora, from: daypart.stars)
             band = d.band
         } else if let w = elapsed(.dawn, since: dawnAt, at: t) {
             let d = DawnModel.dawn(elapsed: w, lastRelight: nil)
@@ -171,7 +174,7 @@ struct NWHorizon: View {
                 // The sweep carries the gold; the sky behind it only warms a little.
                 let sunrise = NightWatch.AuroraPalette.night.mixed(with: .dawn, 0.35 * d.warmth)
                 pal = sunrise.mixed(with: palette, 1 - d.aurora)
-                stars = DawnModel.starField(duskMix: d.aurora)
+                stars = DawnModel.starField(duskMix: d.aurora, from: daypart.stars)
                 band = d.band
                 dawn = d
             }
@@ -205,7 +208,9 @@ struct NWHorizon: View {
                              ripples: Array((pulseModel.ripples(at: t) + farewell(e)).prefix(4)),
                              glow: glow(e, t), seconds: t)
                     .frame(width: orbSize * 1.3, height: orbSize * 1.3)
+                // Its own size, not the light's: unframed it would take the ZStack's 1.3x and draw the ring that much bigger.
                 NWPulseOrb(style: pulse, model: pulseModel, exhale: e, halo: false, time: t)
+                    .frame(width: orbSize, height: orbSize)
             }
         } else {
             NWPulseOrb(style: pulse, model: pulseModel, exhale: e, time: t)

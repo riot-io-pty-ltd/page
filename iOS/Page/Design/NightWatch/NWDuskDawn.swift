@@ -31,9 +31,12 @@ extension DawnModel {
     /// What is left of the background star field once paused (it fades with the dusk).
     static let pausedStarField = 0.05
 
-    /// The background star field `duskMix` (0...1) into the dusk.
-    static func starField(duskMix: Double) -> Double {
-        1 - (1 - pausedStarField) * max(0, min(1, duskMix))
+    /// The background star field `duskMix` (0...1) into the dusk, from the
+    /// hour's own (`DaypartWeights.stars`; 1 at night). A lerp, so a settled
+    /// pause shows the same few stars at every hour, even from an afternoon
+    /// that had none.
+    static func starField(duskMix: Double, from day: Double = 1) -> Double {
+        day + (pausedStarField - day) * max(0, min(1, duskMix))
     }
 }
 
@@ -170,23 +173,25 @@ extension LanesScreenData {
     }
 
     /// The sky at `t`: fading to dusk with the band holding; or the gold dawn
-    /// rising back into the day. In the day `cover` is 0 and only the shell's sky shows.
+    /// rising back into the hour's sky. In the day `cover` is 0: the day band
+    /// (`lanesAurora`) shows instead, and hands over to this as the dusk rises.
     func skyLight(at t: Double, pin: NWMotionPin?) -> NWLanesLight {
+        let storyBase = NightWatch.AuroraPalette(.working, daypart: daypart)
         if let d = duskElapsed(at: t, pin: pin) {
             let f = DawnModel.dusk(elapsed: d)
-            return NWLanesLight(palette: NightWatch.AuroraPalette.working.towardNight(f.aurora), band: f.band, dawn: nil,
-                                stars: DawnModel.starField(duskMix: f.aurora), cover: f.aurora)
+            return NWLanesLight(palette: storyBase.towardNight(f.aurora), band: f.band, dawn: nil,
+                                stars: DawnModel.starField(duskMix: f.aurora, from: daypart.stars), cover: f.aurora)
         }
         if let w = dawnElapsed(at: t, pin: pin) {
             let f = DawnModel.dawn(elapsed: w, lastRelight: relights.values.max())
             if !f.finished {
                 // Up from the night; the sweep carries the gold, the sky behind it only warms a little.
                 let sunrise = NightWatch.AuroraPalette.night.mixed(with: .dawn, 0.35 * f.warmth)
-                return NWLanesLight(palette: sunrise.mixed(with: .working, 1 - f.aurora), band: f.band, dawn: f,
-                                    stars: DawnModel.starField(duskMix: f.aurora), cover: f.aurora)
+                return NWLanesLight(palette: sunrise.mixed(with: storyBase, 1 - f.aurora), band: f.band, dawn: f,
+                                    stars: DawnModel.starField(duskMix: f.aurora, from: daypart.stars), cover: f.aurora)
             }
         }
-        return NWLanesLight(palette: .working, band: 0, dawn: nil)
+        return NWLanesLight(palette: storyBase, band: 0, dawn: nil, stars: daypart.stars, cover: 0)
     }
 
     /// A lane's light in the power story: at dusk every working (or paused)

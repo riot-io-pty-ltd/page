@@ -38,6 +38,20 @@ extension SessionRoomData {
         var pageIsHook = false
         /// That page's text, to check it is about the question the session row carries.
         var pageContext: String? = nil
+        /// What the Mac accepts (`list` `caps`): holding and taking back are offered only with these.
+        var caps: Set<String> = []
+        /// The choice made last time for a message to a busy session (kept per device).
+        var lastChoice: SendChoice? = nil
+        /// The one-line explanations under the choice were seen (a message has gone out with the choice shown).
+        var choiceExplained = true
+        /// Where each Delete stands, by held message clientId.
+        var retractNotes: [String: RetractNote] = [:]
+        /// A Yes or No in its 1.2 s arm ring (nothing has been sent; Cancel works).
+        var yesNoArm: YesNoArm? = nil
+        /// The photos in the composer (`images-v1`).
+        var photos: [PhotoDraftItem] = []
+        /// The message (clientId) whose photo bytes are still held, so a refused one can be put back in the composer.
+        var putBackId: String? = nil
         var timeZone: TimeZone = .current
     }
 
@@ -45,11 +59,15 @@ extension SessionRoomData {
         let s = i.session
         let character = AgentCharacter.from(backend: s.backend, provider: s.provider)
         let ready = i.availability == .ready
-        let items = TranscriptTimeline.merge(entries: i.transcript?.entries ?? [], sent: i.sent)
+        // The Mac's held messages this phone has no command for (typed from another device, or before a
+        // relaunch) are pending bubbles too, oldest first.
+        let items = TranscriptTimeline.merge(entries: i.transcript?.entries ?? [],
+                                             sent: HeldTimeline.pending(sent: i.sent, held: s.held, sessionId: s.id))
         let busy = s.state == .active && !i.ended
 
         // What the page and composer do is one pure decision (RoomPlan).
-        let plan = RoomPlan.build(.init(session: s, character: character, pageRow: i.pageRow, ended: i.ended, ready: ready, macName: i.macName))
+        let plan = RoomPlan.build(.init(session: s, character: character, pageRow: i.pageRow, ended: i.ended, ready: ready, macName: i.macName,
+                                        caps: i.caps, lastChoice: i.lastChoice, stagedPhotos: i.photos.count))
         let pinned = plan.pinned
         let review = plan.review
         let mode = plan.mode
@@ -91,11 +109,20 @@ extension SessionRoomData {
         if case .steps(_, _, true)? = data.story.last { trailingLive = true }
         data.liveLine = i.ended ? nil : StoryBuilder.liveLine(session: s, character: character, trailingStepsAreLive: trailingLive)
         data.timingNote = RoomComposerMode.timingNote(character: character, busy: busy)
+        data.choice = plan.choice
+        data.explainChoice = !i.choiceExplained
+        data.canDeleteHeld = i.caps.contains(SendChoicePlan.retractCap)
+        data.retractNotes = i.retractNotes
+        data.yesNoArm = i.yesNoArm
+        data.photoOffer = plan.photos
+        data.photos = i.photos
+        data.putBackId = i.putBackId
         data.pageRow = pinned
         data.pageOutcome = i.pageOutcome
         data.pagePending = i.pagePending
         data.ask = AnswerPicker.ask(for: i.ended ? nil : s, pageIsQuestion: pinned?.chip == .question, hook: i.pageIsHook, pageContext: i.pageContext)
         data.askViaHook = data.ask != nil && i.pageIsHook
+        data.yesNo = YesNoReply.roomOffer(mode: mode, state: s.state, ended: i.ended, ready: ready, hasAsk: data.ask != nil, items: items)
         // A hook page has no `answer` command: its delivery is the page's own outcome.
         data.askDelivery = data.ask.flatMap { ask in
             i.pageIsHook ? AnswerPicker.delivery(from: i.pageOutcome, sessionId: s.id, promptKey: ask.id, now: i.now)
@@ -108,14 +135,22 @@ extension SessionRoomData {
         data.changesLoad = ChangesModel.load(hasDiff: i.diff != nil, error: i.diffError, requestedAt: i.diffRequestedAt, now: i.now)
         data.reviewRow = review
         data.preview = plan.preview
+        // Photos in the box: the line under the field says how they go.
+        if !i.photos.isEmpty, mode.usesSessionInput, let tail = plan.photos.previewTail {
+            let route = DeliveryPreview.route(host: s.host, project: SessionTarget(session: s, macName: i.macName).project)
+            data.preview = DeliveryPreview.line("Your photos and message · \(tail)", route: route, mac: i.macName)
+        }
         data.composerProblem = i.composerProblem
         data.target = SessionTarget(session: s, macName: i.macName)
-        if let r = SendReceipt.build(i.latestInput, agent: character.name, now: i.now), r.id != i.dismissedReceipt { data.receipt = r }
+        if let r = SendReceipt.build(i.latestInput, agent: character.name, now: i.now, canRetract: data.canDeleteHeld,
+                                     note: i.latestInput.flatMap { i.retractNotes[$0.clientId] }), r.id != i.dismissedReceipt { data.receipt = r }
         if let stop = i.latestStop, let line = SendReceipt.stopLine(stop, agent: character.name) {
             switch stop.state {
             case .sending: data.stopNote = (line, .working)
             case .typed, .queued: data.stopNote = (line, .good)
             case .refused, .failed, .noAnswer: data.stopNote = (line, .problem)
+            // A Stop is never counted down, held or taken back.
+            case .counting, .held, .deleted, .unconfirmed: break
             }
         }
         data.stopping = i.latestStop?.state.isPending == true
