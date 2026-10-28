@@ -68,7 +68,7 @@ extension InjectionExecutor {
             }
         case .enter: sent = client.sendKey(surface: target.surfaceId, key: "enter", force: true)
         case .key(let k): sent = client.sendKey(surface: target.surfaceId, key: k.rawValue, force: true)
-        case .escape, .pause, .awaitPromptClosed: return "Page can't press that key in cmux"
+        case .escape, .pause, .awaitPromptClosed, .paste: return "Page can't press that key in cmux"
         }
         if case .failure(let f) = sent { return f.detail }
         return nil

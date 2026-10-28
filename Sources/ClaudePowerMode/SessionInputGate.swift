@@ -6,6 +6,8 @@ import Foundation
 struct SessionCommandResult: Equatable, Error {
     enum Code: String {
         case delivered, queued, refused, failed
+        /// Only the final result of a held message that was deleted (`fromHold`).
+        case cancelled
     }
 
     enum Reason: String {
@@ -25,6 +27,23 @@ struct SessionCommandResult: Equatable, Error {
         case questionChanged = "question_changed"
         /// An `answer` Page won't press (previews, a host it can't read, a hook holds it).
         case answerUnsupported = "answer_unsupported"
+        /// A held message tried while the session was still working: kept
+        /// held, never sent to a phone.
+        case busy
+        /// A held message deleted before it was typed.
+        case cancelled
+        /// A held message whose turn never ended within its lifetime.
+        case expired
+        /// A `retract` for a message that was already typed.
+        case tooLate = "too_late"
+        /// `inputImages` (`images-v1`): pieces of a photo never arrived (`missing` lists them).
+        case attachmentMissing = "attachment_missing"
+        /// `inputImages`: a photo failed its hash, size, type or location check.
+        case attachmentInvalid = "attachment_invalid"
+        /// `inputImages`: Page can't send photos to this session or terminal.
+        case attachUnsupported = "attach_unsupported"
+        /// `inputImages`: Claude is working; photos go in once the turn ends.
+        case attachBusy = "attach_busy"
         case error
     }
 
@@ -35,6 +54,17 @@ struct SessionCommandResult: Equatable, Error {
     let detail: String
     /// The open page, when `reason == .waiting`.
     var interventionId: String? = nil
+    /// `hold-v1`: the message is held until the turn ends (not the last word on it).
+    var held = false
+    /// `hold-v1`: the final result of a held message.
+    var fromHold = false
+    /// `retract-v1`: the answer to a `retract` ("deleted", "too_late", "not_found").
+    var retract: String? = nil
+    /// `images-v1`: how many photos Claude received as images (0: sent as
+    /// file locations, or pasted but taken as text). nil when not known.
+    var attached: Int? = nil
+    /// `images-v1`: photos whose pieces never arrived (their ids).
+    var missing: [String]? = nil
 
     static func refused(_ reason: Reason, _ detail: String, interventionId: String? = nil) -> SessionCommandResult {
         SessionCommandResult(code: .refused, reason: reason, detail: detail, interventionId: interventionId)
@@ -55,6 +85,11 @@ struct SessionCommandResult: Equatable, Error {
         ]
         if let reason { o["reason"] = reason.rawValue }
         if let interventionId, reason == .waiting { o["interventionId"] = interventionId }
+        if held { o["held"] = true }
+        if fromHold { o["fromHold"] = true }
+        if let retract { o["retract"] = retract }
+        if let attached { o["attached"] = attached }
+        if let missing, !missing.isEmpty { o["missing"] = missing }
         return o
     }
 }
@@ -115,9 +150,11 @@ enum SessionInputGate {
 
     /// Pure. `status` is the fresh sessions-file status (nil: unreadable);
     /// `interventionId` the session's open page, for a `waiting` refusal.
+    /// `requireIdle`: a held message (`hold-v1`), typed only once the turn is
+    /// over: a busy session is refused (`busy`) instead of queued.
     static func claudePlan(target: ClaudeTargetState, status: ClaudeSessionStatus?, hasSessionFile: Bool,
                            host: InjectionExecutor.TerminalHost?, text: String, interventionId: String?,
-                           squadPaused: Bool = false) -> ClaudeStep {
+                           squadPaused: Bool = false, requireIdle: Bool = false) -> ClaudeStep {
         switch target {
         case .ended: return .refuse(.refused(.ended, endedMessage))
         case .failed(let why): return .refuse(.refused(.notTypable, why))
@@ -140,6 +177,7 @@ enum SessionInputGate {
             return .refuse(.refused(.notTypable, "Couldn't find the session's terminal"))
         }
         if squadPaused { return .refuse(.refused(.notTypable, ClaudeSquad.pausedMessage)) }
+        if requireIdle && status == .busy { return .refuse(.refused(.busy, HeldOutbox.stillBusyMessage)) }
         if status == .busy && startsWithDigit(text) {
             return .refuse(.refused(.digitWhileBusy, digitWhileBusyMessage))
         }
@@ -160,6 +198,8 @@ enum SessionInputGate {
             return .refused(.waiting, r.detail, interventionId: interventionId)
         case digitWhileBusyMessage:
             return .refused(.digitWhileBusy, r.detail)
+        case InjectionExecutor.busyAgainMessage:
+            return .refused(.busy, r.detail)
         case InjectionExecutor.notForegroundMessage:
             return .refused(.notTypable, r.detail)
         case InjectionExecutor.sessionExitedMessage:
@@ -173,13 +213,17 @@ enum SessionInputGate {
     /// (kind idle, closed-page semantics: never Esc, never a prompt answer,
     /// refused while a menu may be up), with the input box required empty
     /// and the digit rule checked again right before the text key.
-    static func claudeRequest(sessionId: String, clientId: String, text: String) -> InjectionExecutor.ClaudeReplyRequest {
-        InjectionExecutor.ClaudeReplyRequest(
+    /// `requireIdle` (a held message): refused before every key once Claude is busy.
+    static func claudeRequest(sessionId: String, clientId: String, text: String,
+                              requireIdle: Bool = false) -> InjectionExecutor.ClaudeReplyRequest {
+        var req = InjectionExecutor.ClaudeReplyRequest(
             interventionId: "\(sessionId)-phone-\(clientId)", sessionId: sessionId,
             action: "custom", text: text, kind: .idle,
             pagePid: nil, pageStateStart: nil, pagePromptKey: nil, hookCreatedAt: nil,
             closedPage: true, requireEmptyInput: true, refuseDigitWhileBusy: true
         )
+        req.refuseWhileBusy = requireIdle
+        return req
     }
 
     /// I/O for the Claude runners (the registry, ps, the terminal).
@@ -195,14 +239,17 @@ enum SessionInputGate {
     }
 
     /// Fresh lookup → gate → `deliverToLiveSession`. Blocking.
+    /// `held`: a held message (`hold-v1`): only into an idle session, and only
+    /// if the switch is still the delivery's right before the keys (a delete
+    /// that got there first wins, and nothing is typed).
     static func runClaudeInput(sessionId: String, clientId: String, text raw: String,
-                               interventionId: String?, io: ClaudeIO) -> SessionCommandResult {
+                               interventionId: String?, io: ClaudeIO, held: HeldClaim? = nil) -> SessionCommandResult {
         let text: String
         switch validateText(raw) {
         case .failure(let refusal): return refusal
         case .success(let t): text = t
         }
-        let req = claudeRequest(sessionId: sessionId, clientId: clientId, text: text)
+        let req = claudeRequest(sessionId: sessionId, clientId: clientId, text: text, requireIdle: held != nil)
         let target = io.resolve(req)
         var session: ClaudeLiveSession?
         var table: [ProcessRunner.ProcessInfoRow] = []
@@ -220,12 +267,14 @@ enum SessionInputGate {
         }
         let paused = session.flatMap { s in host.map { io.squadPaused(s, $0) } } ?? false
         let step = claudePlan(target: state, status: status, hasSessionFile: session?.hasSessionFile ?? false,
-                              host: host, text: text, interventionId: interventionId, squadPaused: paused)
+                              host: host, text: text, interventionId: interventionId, squadPaused: paused,
+                              requireIdle: held != nil)
         switch step {
         case .refuse(let r):
             return r
         case .deliver(let queued):
             guard let session else { return .refused(.ended, endedMessage) }
+            if let held, !held.commit() { return .refused(.cancelled, HeldOutbox.deletedDetail) }
             return claudeResult(io.deliver(req, session, table), queued: queued, interventionId: interventionId)
         }
     }

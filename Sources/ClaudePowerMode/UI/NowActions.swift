@@ -42,6 +42,8 @@ enum ReplyOutcomeMapper {
     static func outcome(for f: ReplyFinished) -> DeliveryReceipt.Outcome {
         if f.method == "timeout" { return .timedOut }
         let d = f.detail.lowercased()
+        // Held on the Mac until a rate limit resets: not typed yet.
+        if f.success && f.method == InjectionMethod.heldUntilReset.rawValue { return .queued }
         if f.success { return d.contains("queued") ? .queued : .delivered }
 
         if d.contains("session ended") || d.contains("session has ended") || d.contains("the session exited") {
@@ -109,7 +111,8 @@ struct HoldGesture: Equatable {
     static let approveDeadZone: TimeInterval = HoldRingModel.deadZone
     static let approveDuration: TimeInterval = HoldRingModel.deadZone + HoldRingModel.fill
     static let stopDeadZone: TimeInterval = HoldRingModel.deadZone
-    static let stopDuration: TimeInterval = HoldRingModel.deadZone + HoldRingModel.fill
+    /// Stop-all presses Esc in every session: a 10 s hold, never an accident.
+    static let stopDuration: TimeInterval = 10
 
     var deadZone: TimeInterval { kind == .stopAll ? Self.stopDeadZone : Self.approveDeadZone }
     var duration: TimeInterval { kind == .stopAll ? Self.stopDuration : Self.approveDuration }
@@ -222,6 +225,9 @@ enum NowEffect: Equatable {
     case more
     /// A finished Stop-all hold.
     case stopAll
+    /// Delete a message a phone asked to hold until its session's turn ends
+    /// (the phone's `retract`); nothing is typed.
+    case deleteHeld(clientId: String)
 }
 
 enum NowKeys {
@@ -428,6 +434,11 @@ enum NowKeys {
         case .steer:
             return .none
         }
+    }
+
+    /// Pure. A click on Delete beside a held message: only one the row shows.
+    static func effect(forHeldDelete clientId: String, row: InFlightRow) -> NowEffect {
+        row.held.contains { $0.clientId == clientId } ? .deleteHeld(clientId: clientId) : .none
     }
 
     /// Pure. A row's key by action, for a click on a key cap (same checks as

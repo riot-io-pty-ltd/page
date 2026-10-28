@@ -305,8 +305,9 @@ final class NowActionsTests: XCTestCase {
 
     func testStopAllCompletesToStopAll() {
         let hold = HoldGesture(kind: .stopAll, startedAt: now)
-        XCTAssertEqual(NowKeys.tick(state: state(hold: hold), now: now.addingTimeInterval(1.0)).effect, .none)
-        let done = NowKeys.tick(state: state(hold: hold), now: now.addingTimeInterval(1.5))
+        XCTAssertEqual(NowKeys.tick(state: state(hold: hold), now: now.addingTimeInterval(1.5)).effect, .none, "1.5 s is not enough to stop everything")
+        XCTAssertEqual(NowKeys.tick(state: state(hold: hold), now: now.addingTimeInterval(9.9)).effect, .none)
+        let done = NowKeys.tick(state: state(hold: hold), now: now.addingTimeInterval(10))
         XCTAssertEqual(done.effect, .stopAll)
         XCTAssertNil(done.state.hold)
     }
@@ -341,9 +342,9 @@ final class NowActionsTests: XCTestCase {
     func testStopHoldHasADeadZone() {
         let h = HoldGesture(kind: .stopAll, startedAt: now)
         XCTAssertEqual(h.progress(now: now.addingTimeInterval(0.2)), 0)
-        XCTAssertEqual(h.progress(now: now.addingTimeInterval(0.9)), 0.5, accuracy: 1e-5)
-        XCTAssertFalse(h.isComplete(now: now.addingTimeInterval(1.49)))
-        XCTAssertTrue(h.isComplete(now: now.addingTimeInterval(1.5)))
+        XCTAssertEqual(h.progress(now: now.addingTimeInterval(5.15)), 0.5, accuracy: 1e-5)
+        XCTAssertFalse(h.isComplete(now: now.addingTimeInterval(9.99)))
+        XCTAssertTrue(h.isComplete(now: now.addingTimeInterval(10)))
     }
 
     func testProgressIsClampedAndRedOnlyInTheLastThird() {

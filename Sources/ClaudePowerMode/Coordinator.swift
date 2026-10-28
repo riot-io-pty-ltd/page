@@ -76,6 +76,8 @@ final class Coordinator {
         /// 5-hour window runs out at the current pace (for the runway).
         var usage: UsageSnapshot? = nil
         var usageHitAt: Date? = nil
+        /// Messages a phone asked to type once their session's turn ends.
+        var held: [HeldMessageInfo] = []
 
         var relayConnected: Bool { relayState == .connected }
         var boosting: Bool { awake.preventIdleSleep }
@@ -320,10 +322,15 @@ final class Coordinator {
         }
         replyQueues = queues
         liveBackends = LiveSessionBackends(claude: claudeBackend, codex: codexBackend)
-        sessionRemote = SessionRemote(backends: liveBackends, replayStore: PairingTokenManager.sessionReplayFileURL)
+        sessionRemote = SessionRemote(backends: liveBackends, replayStore: PairingTokenManager.sessionReplayFileURL,
+                                      outboxStore: PairingTokenManager.heldOutboxFileURL, imageStore: .standard)
         // Delivery results reach the Mac panel whether or not a relay is up.
         for b in backends {
             b.onReplyFinished = { [weak self] finished in self?.finishMacReply(finished) }
+        }
+        // A held message came, went or was typed: the panel shows it at once.
+        sessionRemote.onHeldChanged = { [weak self] in
+            self?.tickQueue.async { guard self?.hasTicked == true else { return }; self?.publishSnapshot() }
         }
     }
 
@@ -1417,7 +1424,8 @@ final class Coordinator {
             batteryForecast: lastPower.onAC ? nil : forecastEstimate,
             usageLines: usage.menuLines(now: Date()),
             usage: usage.latest,
-            usageHitAt: usage.hitAt(now: Date())
+            usageHitAt: usage.hitAt(now: Date()),
+            held: sessionRemote.heldMessages()
         )
         onStateChange?(snap)
     }
@@ -1602,6 +1610,16 @@ final class Coordinator {
     /// reads after its current step). Never a reply to a page, never Esc.
     func typeIntoSession(_ target: InFlightTarget, text: String, completion: @escaping (SessionCommandResult) -> Void) {
         sessionRemote.performLocal(target.command(text: text, ts: Date().timeIntervalSince1970 * 1000), completion: completion)
+    }
+
+    /// Deletes a message a phone asked to hold until its session's turn ends,
+    /// through the phone's `retract` op (the same race rule: typed first means
+    /// too late, deleted first means never typed).
+    func deleteHeldMessage(clientId: String, completion: @escaping (SessionCommandResult) -> Void) {
+        var cmd = SessionCommand(op: "retract", clientId: "mac-\(UUID().uuidString)", ts: Date().timeIntervalSince1970 * 1000,
+                                 viewer: nil, sessionId: nil, text: nil)
+        cmd.heldId = clientId
+        sessionRemote.performLocal(cmd, completion: completion)
     }
 
     /// What each working session's card shows: its last steps and model (the

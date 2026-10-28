@@ -17,11 +17,15 @@ struct SessionTranscriptEntry: Equatable {
     let at: Date?
     /// Tool name, for `tool` rows.
     var tool: String? = nil
+    /// Photos the user's message carried (`images-v1`), so the phone can draw
+    /// a "2 photos" chip. Only the count: image data is never sent.
+    var images: Int? = nil
 
     var jsonObject: [String: Any] {
         var o: [String: Any] = ["id": id, "role": role.rawValue, "text": text]
         if let at { o["at"] = SessionTranscript.isoFormatter.string(from: at) }
         if let tool { o["tool"] = tool }
+        if let images, images > 0 { o["images"] = images }
         return o
     }
 }
@@ -134,19 +138,23 @@ enum SessionTranscript {
         switch obj["type"] as? String {
         case "user":
             var texts: [String] = []
+            var images = 0
             if let s = content as? String {
                 texts = [s]
             } else if let parts = content as? [[String: Any]] {
-                // Tool results are the tool's output: never shown.
+                // Tool results are the tool's output: never shown. Pasted
+                // images (base64 blocks, megabytes) are only counted.
                 texts = parts.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+                images = parts.filter { $0["type"] as? String == "image" }.count
             }
-            let joined = texts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            var joined = texts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if joined.isEmpty && images > 0 { joined = images == 1 ? "[Image]" : "[\(images) images]" }
             guard !joined.isEmpty else { return [] }
             if joined.hasPrefix("[Request interrupted by user") {
                 return [SessionTranscriptEntry(id: base, role: .system, text: "Interrupted", at: at)]
             }
             guard let prompt = userPromptText(joined) else { return [] }
-            return [SessionTranscriptEntry(id: base, role: .user, text: clean(prompt), at: at)]
+            return [SessionTranscriptEntry(id: base, role: .user, text: clean(prompt), at: at, images: images > 0 ? images : nil)]
 
         case "assistant":
             let isError = obj["isApiErrorMessage"] as? Bool == true

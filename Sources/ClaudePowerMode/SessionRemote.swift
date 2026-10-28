@@ -67,6 +67,19 @@ protocol SessionRemoteBackends: AnyObject {
     /// turn and the session began, the workflows running in it. Blocking; probe
     /// queue only (one caller at a time). Defaults to nothing.
     func flightFacts(_ sessions: [AgentSession]) -> [String: InFlightFacts]
+    /// Types a held message (`hold-v1`) now that the turn looks over: the
+    /// input gate, refusing anything but an idle session (`busy`, never
+    /// queued behind a turn, never into a prompt), with `claim.commit()` right
+    /// before the keys. `completion` may run on any queue.
+    func typeHeld(_ session: AgentSession, clientId: String, text: String, claim: HeldClaim,
+                  completion: @escaping (SessionCommandResult) -> Void)
+    /// Takes back a reply a backend is holding for relay page `interventionId`
+    /// (`retract-v1`): locks only, safe on the sessions queue.
+    func retractReply(interventionId: String) -> HeldRetract
+    /// Sends photos with a caption (`images-v1`, `ImageDelivery`), on the
+    /// backend's own queue. `completion` may run on any queue.
+    func inputImages(_ session: AgentSession, clientId: String, images: [AssembledImage], text: String,
+                     interventionId: String?, completion: @escaping (SessionCommandResult) -> Void)
 }
 
 extension SessionRemoteBackends {
@@ -95,6 +108,17 @@ struct SessionCommand: Equatable {
     /// `answer` only: the tool_use id of the question the phone showed, and its answers.
     var promptKey: String? = nil
     var answers: [AnswerPick]? = nil
+    /// `input` only (`hold-v1`): type it once the session's turn ends.
+    var hold = false
+    /// `retract` only (`retract-v1`): the held `input`'s clientId, or the
+    /// relay page whose reply the Mac is holding. Exactly one of the two.
+    var heldId: String? = nil
+    var interventionId: String? = nil
+    /// `imagePart` only (`images-v1`): one piece of a photo.
+    var imagePart: ImagePart? = nil
+    /// `inputImages` only (`images-v1`): the photos the message carries
+    /// (nil when absent or malformed: the whole list is dropped).
+    var images: [ImageRef]? = nil
     /// Typed or clicked at this Mac (`SessionRemote.performLocal`), never
     /// parsed from the wire: `parse` cannot set it, so a phone command can
     /// never claim to be local.
@@ -120,6 +144,14 @@ struct SessionCommand: Equatable {
         cmd.expectTitle = (obj["expectTitle"] as? String).flatMap { $0.isEmpty || $0.count > 1024 ? nil : $0 }
         cmd.promptKey = (obj["promptKey"] as? String).flatMap { $0.isEmpty || $0.count > maxIdLength ? nil : $0 }
         cmd.answers = AnswerRequest.parseAnswers(obj["answers"])
+        cmd.hold = obj["hold"] as? Bool == true
+        cmd.heldId = (obj["heldId"] as? String).flatMap { $0.isEmpty || $0.count > maxIdLength ? nil : $0 }
+        cmd.interventionId = (obj["interventionId"] as? String).flatMap { $0.isEmpty || $0.count > 256 ? nil : $0 }
+        switch op {
+        case "imagePart": cmd.imagePart = ImagePart.parse(obj)
+        case "inputImages": cmd.images = ImageRef.parseList(obj["images"])
+        default: break
+        }
         return cmd
     }
 }
@@ -134,6 +166,15 @@ extension SessionRemoteBackends {
     }
     func screenSource(for session: AgentSession) -> SessionScreen.Source? { nil }
     func readScreen(_ source: SessionScreen.Source) -> String? { SessionScreen.read(source) }
+    func typeHeld(_ session: AgentSession, clientId: String, text: String, claim: HeldClaim,
+                  completion: @escaping (SessionCommandResult) -> Void) {
+        completion(.refused(.notTypable, "Page can't hold messages for this session"))
+    }
+    func retractReply(interventionId: String) -> HeldRetract { .notFound }
+    func inputImages(_ session: AgentSession, clientId: String, images: [AssembledImage], text: String,
+                     interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
+        completion(.refused(.attachUnsupported, "Page can't send photos to this session"))
+    }
 }
 
 /// Client ids seen in the last 15 minutes (at most 2000): a replayed
@@ -311,6 +352,17 @@ struct RemoteSessionRow: Equatable {
     /// Optional fields of a working session (busySince, startedAt, model,
     /// recentSteps, workflows, health…): see `InFlightWire`.
     var working: WireFields? = nil
+    /// Messages held until the turn ends, and recent outcomes (`hold-v1`).
+    var held: WireList? = nil
+    /// Page can type into this session's terminal once the turn ends, so the
+    /// phone may offer "Send when it finishes" (`hold-v1`), even where
+    /// `canType` is false only because Codex is mid-turn outside cmux.
+    var canHold = false
+    /// How a photo from the phone would reach this session (`images-v1`):
+    /// "image" (attached) or "path" (its location typed). nil: no photo button.
+    var attach: String? = nil
+    /// Why not, when the row can be typed into but takes no photos.
+    var attachBlocker: String? = nil
 
     var jsonObject: [String: Any] {
         var o: [String: Any] = [
@@ -324,9 +376,29 @@ struct RemoteSessionRow: Equatable {
         if let interventionId { o["interventionId"] = interventionId }
         if let preview, !preview.isEmpty { o["preview"] = preview }
         if let ask { o["ask"] = ask.phoneObject }
+        if let held { o["held"] = held.items }
+        if canHold { o["canHold"] = true }
+        if let attach { o["attach"] = attach }
+        if let attachBlocker { o["attachBlocker"] = attachBlocker }
         // Added keys never replace one the row already has.
         if let working { o.merge(working.object) { mine, _ in mine } }
         return o
+    }
+}
+
+/// A JSON-ready list in a row; equal when its JSON is.
+struct WireList: Equatable {
+    let items: [[String: Any]]
+
+    /// nil for an empty list.
+    init?(_ items: [[String: Any]]) {
+        guard !items.isEmpty else { return nil }
+        self.items = items
+    }
+
+    static func == (a: WireList, b: WireList) -> Bool {
+        func bytes(_ o: [[String: Any]]) -> Data? { try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) }
+        return bytes(a.items) == bytes(b.items)
     }
 }
 
@@ -378,6 +450,15 @@ final class SessionRemote {
     /// The list plaintext's budget: sealed and base64url-encoded (×4/3 plus
     /// the envelope) it stays under the Worker's 256 KiB frame limit.
     static let maxListPlaintextBytes = 180 * 1024
+    /// The list header's `caps`: what this Mac accepts beyond the base ops
+    /// (SESSIONS-PROTOCOL.md §4). Features append their name here.
+    static let capabilities = ["hold-v1", "retract-v1", "images-v1"]
+    /// Held sessions' state is re-read this often while anything is held.
+    static let outboxInterval: TimeInterval = 2
+    /// How long an `inputImages` waits for its photos' last pieces (`images-v1`).
+    static let imagePartWait: TimeInterval = 3
+    /// Photos written for Claude are cleaned up this often (and on the first tick).
+    static let imageCleanupInterval: TimeInterval = 3600
 
     let boot: String
     private let backends: SessionRemoteBackends
@@ -441,6 +522,30 @@ final class SessionRemote {
     private var stopped = false
     /// Where the result of a `performLocal` command goes (confined to `queue`).
     private var localResponders: [String: (SessionCommandResult) -> Void] = [:]
+    /// Messages held until their session's turn ends (`hold-v1`), saved to
+    /// `outboxStore` on every change. Worked on whether or not a phone is looking.
+    private var outbox: HeldOutbox
+    private let outboxStore: HeldOutboxStore?
+    private var outboxTimer: DispatchSourceTimer?
+    /// The panel's copy of the held messages (any thread, under `heldLock`).
+    private let heldLock = NSLock()
+    private var heldShared: [HeldMessageInfo] = []
+    private var _onHeldChanged: (() -> Void)?
+    /// Photos arriving in pieces (`images-v1`), and the `inputImages`
+    /// commands waiting (at most `imagePartWait`) for their last pieces.
+    private var images = ImageAssembler()
+    private var imageWaits: [String: ImageWait] = [:]
+    private let imagePartWait: TimeInterval
+    /// Where photos are written for Claude (nil in tests: nothing is cleaned or wiped).
+    private let imageStore: ImageStore?
+    private var imageCleanedAt: Date?
+
+    private struct ImageWait {
+        let cmd: SessionCommand
+        let refs: [ImageRef]
+        let sessionId: String
+        let text: String
+    }
 
     struct FileStamp: Equatable {
         let size: UInt64
@@ -450,20 +555,39 @@ final class SessionRemote {
     /// `autoTimer` false (tests) leaves the periodic work to `step()`.
     /// `replayStore`: where seen command ids survive a restart (nil keeps
     /// them in memory only, for tests).
+    /// `outboxStore`: where held messages survive a restart (nil keeps them
+    /// in memory only, for tests).
+    /// `imageStore`: the folder photos from the phone are written to, cleaned
+    /// up hourly and wiped when the pairing changes (nil: left alone, for tests).
     init(backends: SessionRemoteBackends, now: @escaping () -> Date = Date.init, autoTimer: Bool = true,
          macName: @escaping () -> String = { Host.current().localizedName ?? "Mac" }, replayStore: URL? = nil,
+         outboxStore: URL? = nil, imageStore: ImageStore? = nil, imagePartWait: TimeInterval = SessionRemote.imagePartWait,
          heldSessions: @escaping () -> Set<String> = { HookHoldMarkers.heldSessions(in: HookHoldMarkers.defaultDirectory) }) {
         self.heldSessions = heldSessions
+        self.imageStore = imageStore
+        self.imagePartWait = imagePartWait
         self.backends = backends
         self.replay = SessionReplayGuard(storeURL: replayStore, now: now())
         self.now = now
         self.autoTimer = autoTimer
         self.macNameProvider = macName
+        let store = outboxStore.map(HeldOutboxStore.init(url:))
+        self.outboxStore = store
+        self.outbox = store?.load(now: now()) ?? HeldOutbox()
         var bytes = [UInt8](repeating: 0, count: 8)
         if SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) != errSecSuccess {
             bytes = (0..<8).map { _ in UInt8.random(in: 0...255) }
         }
         boot = SessionCrypto.base64URLEncode(Data(bytes))
+        if !outbox.isEmpty || !outbox.settled.isEmpty {
+            Logger.shared.log("Sessions: \(outbox.messages.count) held message(s) restored")
+            // A try that was under way when Page quit settled as unconfirmed: save that.
+            store?.save(outbox)
+        }
+        queue.async {
+            self.publishHeld()
+            self.updateOutboxTimer()
+        }
     }
 
     // MARK: inputs (any thread)
@@ -475,8 +599,31 @@ final class SessionRemote {
             self.sink = sink
             self.keys = rootKey.flatMap(SessionKeys.init(root:))
             if sink != nil && self.keys == nil { Logger.shared.log("Sessions: no session key — the live sessions view is off") }
+            if let rootKey, self.keys != nil {
+                let before = self.outbox.keyTag
+                let dropped = self.outbox.adopt(keyTag: HeldOutbox.keyTag(root: rootKey))
+                if dropped > 0 { Logger.shared.log("Sessions: the pairing changed — dropped \(dropped) held message(s) untyped") }
+                if self.outbox.keyTag != before {
+                    self.outboxChanged()
+                    // A new pairing: photos from the old phone go too, received or half-received.
+                    if before != nil { self.forgetImages() }
+                }
+            }
             self.setPhonesLocked(0)
         }
+    }
+
+    /// Called (on any queue, never under a lock) when the held messages change.
+    var onHeldChanged: (() -> Void)? {
+        get { heldLock.lock(); defer { heldLock.unlock() }; return _onHeldChanged }
+        set { heldLock.lock(); _onHeldChanged = newValue; heldLock.unlock() }
+    }
+
+    /// The messages held until their turn ends, for the Mac's panel. Any thread.
+    func heldMessages() -> [HeldMessageInfo] {
+        heldLock.lock()
+        defer { heldLock.unlock() }
+        return heldShared
     }
 
     func setEnabled(_ on: Bool) {
@@ -528,6 +675,9 @@ final class SessionRemote {
             self.statuses = self.statuses.filter { ids.contains($0.key) }
             self.lastTranscriptCheck = self.lastTranscriptCheck.filter { ids.contains($0.key) }
             self.lastTranscriptBody = self.lastTranscriptBody.filter { ids.contains($0.key) }
+            // A fresh list: held messages may be due, or their session gone.
+            self.drainOutbox(tick: true)
+            self.cleanImagesIfDue()
         }
     }
 
@@ -540,7 +690,8 @@ final class SessionRemote {
     /// same gates and the same backend calls. There is no envelope to check
     /// (nothing crossed the relay), and the result comes back to `completion`
     /// instead of being sealed for a phone. Only ops that answer with a
-    /// result ("input", "answer", "interrupt", "interruptAll", "start") belong here.
+    /// result ("input", "answer", "interrupt", "interruptAll", "start", "retract")
+    /// belong here. A local `input` never holds: it is typed at once.
     func performLocal(_ cmd: SessionCommand, completion: @escaping (SessionCommandResult) -> Void) {
         queue.async {
             guard !self.stopped else {
@@ -559,6 +710,8 @@ final class SessionRemote {
             self.stopped = true
             self.timer?.cancel()
             self.timer = nil
+            self.outboxTimer?.cancel()
+            self.outboxTimer = nil
             self.sink = nil
         }
     }
@@ -566,6 +719,12 @@ final class SessionRemote {
     /// Runs the periodic work once (tests; production uses the timer).
     func step() {
         queue.sync { self.stepLocked() }
+    }
+
+    /// Runs the held-message work once (tests; production uses its timer and
+    /// the tick). `tick`: as if a fresh list had just come in.
+    func stepOutbox(tick: Bool = false) {
+        queue.sync { self.drainOutbox(tick: tick) }
     }
 
     /// Waits until queued work, including a host probe, has run (tests).
@@ -579,6 +738,15 @@ final class SessionRemote {
 
     /// The spec's order: decrypt (else drop), fresh (else `stale`), not a
     /// replay (else drop), enabled (else `disabled`).
+    ///
+    /// An `imagePart` (`images-v1`) never gets a `result`: a stale or
+    /// disabled piece is dropped silently, and pieces skip the replay guard.
+    /// That guard writes its whole table to disk on every id, and a photo's
+    /// dozens of piece ids would push genuine commands' ids out while they
+    /// are still fresh enough to replay. Pieces are idempotent instead
+    /// (`ImageAssembler` keys them by photo and index, and remembers used
+    /// photos for 15 minutes); the `inputImages` that uses them goes through
+    /// the guard like every other command.
     static func accept(_ envelope: SessionEnvelope, keys: SessionKeys?, enabled: Bool, now: Date,
                        replay: inout SessionReplayGuard) -> SessionCommandAcceptance {
         guard let keys else { return .drop("no session key") }
@@ -586,12 +754,17 @@ final class SessionRemote {
             return .drop("undecryptable")
         }
         guard let cmd = SessionCommand.parse(plain) else { return .drop("malformed") }
+        let isPart = cmd.op == "imagePart"
         let age = now.timeIntervalSince1970 - cmd.ts / 1000
         guard abs(age) <= freshness else {
+            if isPart { return .drop("stale image part") }
             return .reply(clientId: cmd.clientId, .refused(.stale, "That command is too old — check your phone's clock"))
         }
-        guard replay.admit(cmd.clientId, now: now) else { return .drop("replay") }
+        if !isPart {
+            guard replay.admit(cmd.clientId, now: now) else { return .drop("replay") }
+        }
         guard enabled else {
+            if isPart { return .drop("image part while disabled") }
             return .reply(clientId: cmd.clientId, .refused(.disabled, "Live sessions are turned off in Page's settings on your Mac"))
         }
         return .accept(cmd)
@@ -908,7 +1081,9 @@ final class SessionRemote {
         var held: Set<String>?   // read once per list, and only if a session is working
         for s in sessions where seen.insert(s.sessionId).inserted {
             let st = state(of: s)
-            let host = Self.effectiveHost(hosts[s.sessionId]?.info ?? .checking, backend: s.backend, state: st)
+            let probed = hosts[s.sessionId]?.info
+            let host = Self.effectiveHost(probed ?? .checking, backend: s.backend, state: st)
+            let photos = ImageDelivery.rowFields(backend: s.backend, host: host)
             rows.append(RemoteSessionRow(
                 id: s.sessionId,
                 backend: s.backend.rawValue,
@@ -926,7 +1101,11 @@ final class SessionRemote {
                 working: st == .active
                     ? Self.workingFields(facts: flightFacts[s.sessionId], pending: pending, sessionId: s.sessionId,
                                          rateLimitResetsAt: rateLimited[s.sessionId], now: t)
-                    : nil
+                    : nil,
+                held: WireList(outbox.rowEntries(sessionId: s.sessionId, now: t)),
+                canHold: Self.canHold(backend: s.backend, probed: probed),
+                attach: photos.attach,
+                attachBlocker: photos.blocker
             ))
         }
         return Self.ordered(rows)
@@ -1022,6 +1201,7 @@ final class SessionRemote {
         if macName == nil { macName = macNameProvider() }
         var head = header("list", at: t)
         head["macName"] = macName ?? "Mac"
+        head["caps"] = Self.capabilities
         // Not in the spec: tells a phone that knows it why the list is
         // empty (others ignore unknown fields).
         if !enabled { head["disabled"] = true }
@@ -1163,10 +1343,14 @@ final class SessionRemote {
                 Logger.shared.log("Sessions: input \(sid) → refused/target_mismatch (\(length) chars)")
                 return sendResult(cmd.clientId, refusal)
             }
-            if case .failure(let refusal) = SessionInputGate.validateText(cmd.text ?? "") {
+            let text: String
+            switch SessionInputGate.validateText(cmd.text ?? "") {
+            case .failure(let refusal):
                 Logger.shared.log("Sessions: input \(sid) → refused/\(refusal.reason?.rawValue ?? "error") (\(length) chars)")
                 return sendResult(cmd.clientId, refusal)
+            case .success(let t): text = t
             }
+            if cmd.hold && !cmd.local { return holdInput(cmd, session: s, text: text, at: t) }
             Logger.shared.log("Sessions: input \(sid) (\(length) chars)")
             let clientId = cmd.clientId
             backends.input(s, clientId: clientId, text: cmd.text ?? "", interventionId: openPage(for: s)?.id) { [weak self] r in
@@ -1306,9 +1490,315 @@ final class SessionRemote {
                     _ = self.seal(data)
                 }
             }
+        case "imagePart":
+            receiveImagePart(cmd, at: t)
+        case "inputImages":
+            let length = cmd.text?.count ?? 0
+            guard let id = cmd.sessionId, let s = sessions.first(where: { $0.sessionId == id }) else {
+                Logger.shared.log("Sessions: inputImages \(sid) → refused/not_found")
+                return sendResult(cmd.clientId, .refused(.notFound, "That session isn't running any more"))
+            }
+            if let refusal = SessionTargetCheck.verify(cmd, against: s) {
+                Logger.shared.log("Sessions: inputImages \(sid) → refused/target_mismatch")
+                return sendResult(cmd.clientId, refusal)
+            }
+            guard let refs = cmd.images else {
+                Logger.shared.log("Sessions: inputImages \(sid) → refused/attachment_invalid (no usable photo list)")
+                return sendResult(cmd.clientId, .refused(.attachmentInvalid, "The photos didn't arrive in a form Page understands"))
+            }
+            let text = (cmd.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count <= SessionInputGate.maxTextLength else {
+                return sendResult(cmd.clientId, .refused(.error, "The message is too long (8000 characters at most)"))
+            }
+            Logger.shared.log("Sessions: inputImages \(sid) (\(refs.count) photo(s), \(refs.reduce(0) { $0 + $1.bytes }) B, \(length) chars)")
+            let clientId = cmd.clientId
+            imageWaits[clientId] = ImageWait(cmd: cmd, refs: refs, sessionId: id, text: text)
+            deliverImagesIfReady(clientId, final: false, at: t)
+            if imageWaits[clientId] != nil {
+                // The relay forwards in order, so the pieces are normally here already; stragglers get a moment.
+                queue.asyncAfter(deadline: .now() + imagePartWait) { [weak self] in
+                    guard let self, !self.stopped else { return }
+                    self.deliverImagesIfReady(clientId, final: true, at: self.now())
+                }
+            }
+        case "retract":
+            switch (cmd.heldId, cmd.interventionId) {
+            case (let heldId?, nil):
+                retractHeld(heldId, by: cmd.clientId)
+            case (nil, let pageId?):
+                let r = backends.retractReply(interventionId: pageId)
+                Logger.shared.log("Sessions: retract reply → \(r.result.retract ?? "-")")
+                sendResult(cmd.clientId, r.result)
+            default:
+                Logger.shared.log("Sessions: retract → refused/error (names \(cmd.heldId == nil ? "nothing" : "two messages"))")
+                sendResult(cmd.clientId, .refused(.error, "Say which one message to delete"))
+            }
         default:
             // Unknown ops are ignored (forward compatibility).
             Logger.shared.log("Sessions: ignoring unknown op")
+        }
+    }
+
+    // MARK: photos (queue)
+
+    /// One piece of a photo: kept, never answered (a phone gets one `result`
+    /// per message, for its `inputImages`). Logged only when it completes a
+    /// photo or is dropped: ids and sizes, never data.
+    private func receiveImagePart(_ cmd: SessionCommand, at t: Date) {
+        let sid = cmd.sessionId.map { String($0.prefix(8)) } ?? "-"
+        guard let part = cmd.imagePart, let sessionId = cmd.sessionId else {
+            Logger.shared.log("Sessions: image part \(sid) dropped (malformed)")
+            return
+        }
+        let tag = "\(sid)/\(part.imageId.prefix(6)) \(part.index + 1)/\(part.total)"
+        switch images.add(part, sessionId: sessionId, viewer: cmd.viewer, now: t) {
+        case .stored, .duplicate:
+            break
+        case .complete:
+            Logger.shared.log("Sessions: image \(tag) complete (\(part.bytes) B)")
+            for (clientId, wait) in imageWaits where images.hasAllPieces(wait.refs) {
+                deliverImagesIfReady(clientId, final: false, at: t)
+            }
+        case .dropped(let why):
+            Logger.shared.log("Sessions: image part \(tag) dropped (\(why), \(part.data.count) B)")
+        case .spoiled(let why):
+            Logger.shared.log("Sessions: image \(tag) spoiled (\(why))")
+        }
+    }
+
+    /// Hands a waiting `inputImages` its photos once every piece is in; a
+    /// `final` look (the wait is over) answers `attachment_missing` instead.
+    private func deliverImagesIfReady(_ clientId: String, final: Bool, at t: Date) {
+        guard let w = imageWaits[clientId] else { return }
+        let sid = String(w.sessionId.prefix(8))
+        switch images.take(w.refs, sessionId: w.sessionId, viewer: w.cmd.viewer, now: t) {
+        case .missing(let ids):
+            guard final else { return }
+            imageWaits[clientId] = nil
+            Logger.shared.log("Sessions: inputImages \(sid) → refused/attachment_missing (\(ids.count) of \(w.refs.count))")
+            var r = SessionCommandResult.refused(.attachmentMissing, "Part of a photo didn't reach your Mac — send it again")
+            r.missing = ids
+            sendResult(clientId, r)
+        case .invalid(let why):
+            imageWaits[clientId] = nil
+            Logger.shared.log("Sessions: inputImages \(sid) → refused/attachment_invalid")
+            sendResult(clientId, .refused(.attachmentInvalid, why))
+        case .ready(let photos):
+            imageWaits[clientId] = nil
+            guard let s = sessions.first(where: { $0.sessionId == w.sessionId }) else {
+                Logger.shared.log("Sessions: inputImages \(sid) → refused/not_found")
+                return sendResult(clientId, .refused(.notFound, "That session isn't running any more"))
+            }
+            backends.inputImages(s, clientId: clientId, images: photos, text: w.text, interventionId: openPage(for: s)?.id) { [weak self] r in
+                guard let self else { return }
+                self.queue.async {
+                    Logger.shared.log("Sessions: inputImages \(sid) → \(r.code.rawValue)\(r.reason.map { "/\($0.rawValue)" } ?? "")"
+                                      + (r.attached.map { " (attached \($0))" } ?? ""))
+                    self.sendResult(clientId, r)
+                }
+            }
+        }
+    }
+
+    /// Drops every photo, piece and waiting command, and deletes the files (a new pairing).
+    private func forgetImages() {
+        images.reset()
+        imageWaits = [:]
+        guard let store = imageStore else { return }
+        Logger.shared.log("Sessions: the pairing changed — deleting photos received from the phone")
+        probeQueue.async { store.wipeAll() }
+    }
+
+    /// Deletes old photos (24 h) and ended sessions' folders, hourly.
+    private func cleanImagesIfDue() {
+        guard let store = imageStore else { return }
+        let t = now()
+        if let last = imageCleanedAt, t.timeIntervalSince(last) < Self.imageCleanupInterval { return }
+        imageCleanedAt = t
+        let live = Set(sessions.map { ImageStore.folderName(forSession: $0.sessionId) })
+        probeQueue.async { store.cleanup(now: t, live: live) }
+    }
+
+    // MARK: held messages (queue)
+
+    /// `input` with `hold` (SESSIONS-PROTOCOL.md §5 "Holding a message until
+    /// the turn ends"). Answers at once: held, or (the turn already over, and
+    /// nothing else waiting for the session) the result of typing it now.
+    /// Pure. Whether a phone may ask Page to hold a message for this session: the probed host, before the
+    /// Codex mid-turn rule. Not Codex in Terminal.app: that path brings Terminal to the front to press Return,
+    /// and a held message is typed unattended, maybe hours later.
+    static func canHold(backend: AgentBackendID, probed: SessionHostInfo?) -> Bool {
+        guard let probed, probed.canType else { return false }
+        return !(backend == .codex && probed.host == "Terminal")
+    }
+
+    private func holdInput(_ cmd: SessionCommand, session s: AgentSession, text: String, at t: Date) {
+        let sid = String(s.sessionId.prefix(8))
+        // A terminal Page can't type into would only refuse it later.
+        if let info = hosts[s.sessionId]?.info, !info.canType {
+            Logger.shared.log("Sessions: input \(sid) hold → refused/not_typable (\(text.count) chars)")
+            return sendResult(cmd.clientId, .refused(.notTypable, info.typeBlocker ?? "Page can't type into this session"))
+        }
+        if let info = hosts[s.sessionId]?.info, !Self.canHold(backend: s.backend, probed: info) {
+            Logger.shared.log("Sessions: input \(sid) hold → refused/not_typable (Codex in Terminal)")
+            return sendResult(cmd.clientId, .refused(.notTypable,
+                "Page can't hold messages for Codex in Terminal — it would bring Terminal to the front later. Send it now instead"))
+        }
+        var m = HeldOutbox.Message(clientId: cmd.clientId, sessionId: s.sessionId, backend: s.backend, text: text, heldAt: t)
+        m.expectCwd = cmd.expectCwd
+        m.expectTitle = cmd.expectTitle
+        if let refusal = outbox.add(m) {
+            Logger.shared.log("Sessions: input \(sid) hold → refused (\(outbox.waiting(sessionId: s.sessionId).count) held)")
+            return sendResult(cmd.clientId, refusal)
+        }
+        if heldReadiness()[s.sessionId] == .ready, let (first, claim) = outbox.claimFirstTry(cmd.clientId, now: t) {
+            outboxChanged()
+            Logger.shared.log("Sessions: input \(sid) hold → the turn is over, typing now (\(text.count) chars)")
+            startHeldTry(first, claim: claim)
+        } else {
+            outboxChanged()
+            Logger.shared.log("Sessions: input \(sid) → held \(cmd.clientId.prefix(8)) (\(text.count) chars)")
+            sendResult(cmd.clientId, HeldOutbox.heldResult(backend: s.backend))
+        }
+        updateOutboxTimer()
+    }
+
+    /// Pure. Whether a session's turn is over, for a held message. Claude by
+    /// its sessions file (`idle` or `shell`), not by the list state: an idle
+    /// page is open after every finished turn. Codex by its state. Never
+    /// while the session is rate limited.
+    static func heldReadiness(backend: AgentBackendID, state: AgentSessionState, fresh: ClaudeSessionStatus?,
+                              rateLimitedUntil: Date?, now: Date) -> HeldOutbox.Readiness {
+        if state == .rateLimited || (rateLimitedUntil.map { $0 > now } ?? false) { return .wait }
+        switch backend {
+        case .claude:
+            switch fresh {
+            case .idle?, .shell?: return .ready
+            case .busy?, .waiting?, .unknown?, nil: return .wait
+            }
+        case .codex:
+            return state == .idle || state == .interrupted || state == .failed ? .ready : .wait
+        }
+    }
+
+    /// The held sessions' readiness, from a fresh read of their sessions
+    /// files (one small file each). A session not in the list is `gone`;
+    /// nothing is ready while live sessions are turned off.
+    private func heldReadiness() -> [String: HeldOutbox.Readiness] {
+        let ids = Set(outbox.sessionIds)
+        guard !ids.isEmpty else { return [:] }
+        var seen = Set<String>()
+        let held = sessions.filter { ids.contains($0.sessionId) && seen.insert($0.sessionId).inserted }
+        let fresh = backends.liveStatuses(held.filter { $0.backend == .claude })
+        let t = now()
+        var out: [String: HeldOutbox.Readiness] = [:]
+        for s in held {
+            out[s.sessionId] = enabled
+                ? Self.heldReadiness(backend: s.backend, state: s.state, fresh: fresh[s.sessionId],
+                                     rateLimitedUntil: rateLimited[s.sessionId], now: t)
+                : .wait
+        }
+        return out
+    }
+
+    /// Types what is due, and settles what expired or lost its session.
+    private func drainOutbox(tick: Bool) {
+        guard !stopped, !outbox.isEmpty || !outbox.settled.isEmpty else { return updateOutboxTimer() }
+        let settledBefore = outbox.settled.count
+        let steps = outbox.plan(readiness: heldReadiness(), tick: tick, now: now())
+        // Saved before any try starts: a restart mid-try must never retype it.
+        if !steps.isEmpty || outbox.settled.count != settledBefore { outboxChanged() }
+        for step in steps {
+            switch step {
+            case .settle(let m, let r):
+                Logger.shared.log("Sessions: held \(m.sessionId.prefix(8))/\(m.clientId.prefix(8)) → \(r.reason?.rawValue ?? r.code.rawValue)")
+                sendResult(m.clientId, r)
+            case .type(let m, let claim):
+                startHeldTry(m, claim: claim)
+            }
+        }
+        updateOutboxTimer()
+    }
+
+    private func startHeldTry(_ m: HeldOutbox.Message, claim: HeldClaim) {
+        let tag = "\(m.sessionId.prefix(8))/\(m.clientId.prefix(8))"
+        guard let s = sessions.first(where: { $0.sessionId == m.sessionId }) else {
+            return finishHeldTry(m.clientId, .refused(.notFound, SessionInputGate.endedMessage))
+        }
+        // The folder and title the phone showed, checked again now.
+        if let refusal = SessionTargetCheck.verify(expectCwd: m.expectCwd, expectTitle: m.expectTitle, cwd: s.cwd,
+                                                   title: s.title ?? Self.folderTitle(s.cwd) ?? s.backend.rawValue) {
+            return finishHeldTry(m.clientId, refusal)
+        }
+        Logger.shared.log("Sessions: held \(tag) → typing (\(m.text.count) chars)")
+        backends.typeHeld(s, clientId: m.clientId, text: m.text, claim: claim) { [weak self] r in
+            guard let self else { return }
+            self.queue.async { self.finishHeldTry(m.clientId, r) }
+        }
+    }
+
+    private func finishHeldTry(_ clientId: String, _ r: SessionCommandResult) {
+        let f = outbox.finish(clientId: clientId, result: r, now: now())
+        outboxChanged()
+        Logger.shared.log("Sessions: held \(clientId.prefix(8)) → \(r.code.rawValue)\(r.reason.map { "/\($0.rawValue)" } ?? "")"
+                          + " (\(HeldOutbox.verdict(r)))")
+        if let (cid, result) = f.result { sendResult(cid, result) }
+        for (rid, result) in f.retracts { sendResult(rid, result) }
+        updateOutboxTimer()
+    }
+
+    /// `retract` with a `heldId`.
+    private func retractHeld(_ heldId: String, by retractId: String) {
+        let tag = heldId.prefix(8)
+        switch outbox.retract(heldId: heldId, by: retractId, now: now()) {
+        case .deleted(let final):
+            outboxChanged()
+            Logger.shared.log("Sessions: held \(tag) → deleted")
+            sendResult(final.clientId, final.result)
+            sendResult(retractId, HeldOutbox.retractResult(.deleted))
+        case .alreadyDeleted:
+            sendResult(retractId, HeldOutbox.retractResult(.alreadyDeleted))
+        case .waits:
+            // Answered when the try under way finishes.
+            Logger.shared.log("Sessions: held \(tag) → delete waits for the try under way")
+        case .tooLate:
+            Logger.shared.log("Sessions: held \(tag) → delete too late")
+            sendResult(retractId, HeldOutbox.retractResult(.tooLate))
+        case .notFound:
+            sendResult(retractId, HeldOutbox.retractResult(.notFound))
+        }
+        updateOutboxTimer()
+    }
+
+    /// Saves the outbox and tells the panel.
+    private func outboxChanged() {
+        outboxStore?.save(outbox)
+        publishHeld()
+    }
+
+    private func publishHeld() {
+        let items = outbox.panelItems()
+        heldLock.lock()
+        let changed = items != heldShared
+        heldShared = items
+        let callback = _onHeldChanged
+        heldLock.unlock()
+        if changed { callback?() }
+    }
+
+    /// Re-reads held sessions every `outboxInterval` while anything is held,
+    /// phone or no phone (the tick alone can be minutes apart).
+    private func updateOutboxTimer() {
+        let wanted = autoTimer && !stopped && !outbox.isEmpty
+        if wanted, outboxTimer == nil {
+            let t = DispatchSource.makeTimerSource(queue: queue)
+            t.schedule(deadline: .now() + Self.outboxInterval, repeating: Self.outboxInterval, leeway: .milliseconds(250))
+            t.setEventHandler { [weak self] in self?.drainOutbox(tick: false) }
+            t.resume()
+            outboxTimer = t
+        } else if !wanted, let t = outboxTimer {
+            t.cancel()
+            outboxTimer = nil
         }
     }
 }
@@ -1559,6 +2049,34 @@ final class LiveSessionBackends: SessionRemoteBackends {
         case .codex:
             codex.remoteInterrupt(threadId: session.sessionId, interventionId: interventionId, completion: completion)
         }
+    }
+
+    func typeHeld(_ session: AgentSession, clientId: String, text: String, claim: HeldClaim,
+                  completion: @escaping (SessionCommandResult) -> Void) {
+        switch session.backend {
+        case .claude:
+            claude.remoteInput(sessionId: session.sessionId, clientId: clientId, text: text, interventionId: nil,
+                               held: claim, completion: completion)
+        case .codex:
+            codex.remoteInput(threadId: session.sessionId, text: text, interventionId: nil, held: claim, completion: completion)
+        }
+    }
+
+    func inputImages(_ session: AgentSession, clientId: String, images: [AssembledImage], text: String,
+                     interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
+        switch session.backend {
+        case .claude:
+            claude.remoteImages(sessionId: session.sessionId, clientId: clientId, images: images, text: text,
+                                interventionId: interventionId, completion: completion)
+        case .codex:
+            completion(.refused(.attachUnsupported, ImageDelivery.codexMessage))
+        }
+    }
+
+    func retractReply(interventionId: String) -> HeldRetract {
+        let claudeSays = claude.retractHeld(interventionId: interventionId)
+        guard claudeSays == .notFound else { return claudeSays }
+        return codex.retractHeld(interventionId: interventionId)
     }
 
     func knownFolders(live: [AgentSession]) -> [SessionStarter.Folder] {

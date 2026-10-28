@@ -119,16 +119,16 @@ final class NowMotionStoreTests: XCTestCase {
         var ticks: [Double] = []
         st.haptic = { ticks.append($0) }
         st.beginHold(.stopAll)
-        // 0.95 s in: 0.3 s dead zone, then (0.95 - 0.3) / 1.2 of the fill. Off the
-        // exact tick so the Date's rounding cannot decide the crossing.
-        later(0.95)
+        // 5.5 s in: 0.3 s dead zone, then (5.5 - 0.3) / 9.7 of the 10 s Stop-all
+        // fill. Off the exact tick so the Date's rounding cannot decide the crossing.
+        later(5.5)
         st.tick()
         XCTAssertEqual(ticks, [0.25, 0.5], "the quarter and half ticks have passed")
-        XCTAssertEqual(st.holdProgress, 0.65 / 1.2, accuracy: 1e-3)
+        XCTAssertEqual(st.holdProgress, 5.2 / 9.7, accuracy: 1e-3)
 
         st.endHold()
         let unwind = try XCTUnwrap(st.motion.unwind, "letting go unwinds the ring")
-        XCTAssertEqual(unwind.from, 0.65 / 1.2, accuracy: 1e-3, "from where it was let go")
+        XCTAssertEqual(unwind.from, 5.2 / 9.7, accuracy: 1e-3, "from where it was let go")
         XCTAssertEqual(ticks, [0.25, 0.5], "an unwind buzzes nothing")
     }
 

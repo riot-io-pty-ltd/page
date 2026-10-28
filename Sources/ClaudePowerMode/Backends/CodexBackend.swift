@@ -132,6 +132,9 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
     private var notifiedRateLimitKeys: Set<String> = []
     private var loggedUnhandledMethods: Set<String> = []
     private var lastSnapshot: AgentBackendSnapshot
+    /// Replies waiting for their `exec resume` to start, which the phone may
+    /// still take back (`retractHeld`).
+    private var heldReplies = HeldReplies()
 
     // MARK: Queue-confined
 
@@ -987,9 +990,16 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
             break
         }
         Logger.shared.log("CodexBackend: reply \(id.prefix(48)) → background resume queued for thread \(job.threadId.prefix(8))")
+        locked { heldReplies.queueLaunch(id) }
         execQueue.async { [weak self] in
             guard let self else { return }
             defer { self.execGate.end(threadId: job.threadId, interventionId: id) }
+            // Claimed right before launching: a delete that came first has
+            // already reported the reply.
+            guard self.locked({ self.heldReplies.claimLaunch(id) }) else {
+                Logger.shared.log("CodexBackend: reply \(id.prefix(48)) deleted from the phone before its background resume started")
+                return
+            }
             // Re-checked right before launching: the turn must still be over
             // (runExecResume re-checks that no live codex owns the thread).
             let outcome: CodexDeliveryOutcome
@@ -1129,12 +1139,29 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
         locked { threads[id] }
     }
 
+    /// The phone takes back a reply waiting for its `exec resume` (`retract`
+    /// with an `interventionId`). Decided under `lock` against the run's own
+    /// claim, so exactly one side wins; a deleted reply is reported as
+    /// `retracted`.
+    func retractHeld(interventionId id: String) -> HeldRetract {
+        switch locked({ heldReplies.retract(id) }) {
+        case .launchDeleted:
+            finishReply(id, outcome: CodexDeliveryOutcome(method: InjectionMethod.retracted.rawValue, success: false,
+                                                          detail: HeldOutbox.deletedDetail, output: nil))
+            return .deleted(HeldOutbox.deletedDetail)
+        case .resetDeleted, .resetTaken, .notHeld:
+            return execGate.isReplyInFlight(id) ? .tooLate(HeldRetract.alreadyRunning) : .notFound
+        }
+    }
+
     /// Text typed on the phone's Sessions screen, on `replyQueue` (one at a
     /// time with replies and the battery pause). After the turn: typed
     /// with the composer verified empty. Mid-turn: only into a cmux pane
     /// whose composer cmux reads as empty (the battery queue path). Never
-    /// `exec resume`. `completion` runs on `replyQueue`.
-    func remoteInput(threadId: String, text raw: String, interventionId: String?,
+    /// `exec resume`. `completion` runs on `replyQueue`. `held`: a held
+    /// message (`hold-v1`): only once the turn is over (never the mid-turn
+    /// queue), and only if no delete got there first.
+    func remoteInput(threadId: String, text raw: String, interventionId: String?, held: HeldClaim? = nil,
                      completion: @escaping (SessionCommandResult) -> Void) {
         replyQueue.async { [weak self] in
             guard let self else { return completion(.failed("Codex isn't being watched any more")) }
@@ -1170,9 +1197,12 @@ final class CodexBackend: AgentBackend, @unchecked Sendable {
                                                                    interventionId: interventionId))
                 }
                 if let changed = recheck() { return completion(changed) }
+                if let held, !held.commit() { return completion(.refused(.cancelled, HeldOutbox.deletedDetail)) }
                 completion(SessionInputGate.codexResult(CodexInjector.type(clean, into: terminal), queued: false,
                                                         interventionId: interventionId))
             case .queueMidTurn:
+                // A held message waits for the turn to end instead.
+                if held != nil { return completion(.refused(.busy, HeldOutbox.stillBusyMessage)) }
                 guard let terminal = reach.terminal, let pid = reach.pid, ProcessRunner.isForeground(pid: pid) == true else {
                     return completion(.refused(.notTypable, CodexInjector.notForegroundDetail))
                 }

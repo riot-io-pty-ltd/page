@@ -89,6 +89,44 @@ final class SessionTmuxTransportTests: XCTestCase {
         XCTAssertEqual(screen(pane), "also lint^M")
     }
 
+    func testAHeldMessageIsTypedOnlyIntoAnIdleSession() throws {
+        let pane = try paneId()
+        let busy = SessionInputGate.runClaudeInput(sessionId: sid, clientId: "h1", text: "then lint", interventionId: nil,
+                                                   io: io(status: "busy", pane: pane), held: HeldClaim())
+        XCTAssertEqual(busy.reason, .busy)
+        let deleted = HeldClaim()
+        XCTAssertTrue(deleted.cancel())
+        XCTAssertEqual(SessionInputGate.runClaudeInput(sessionId: sid, clientId: "h2", text: "then lint", interventionId: nil,
+                                                       io: io(status: "idle", pane: pane), held: deleted).reason, .cancelled)
+        XCTAssertEqual(screen(pane), "", "busy, or deleted first: nothing typed")
+        let r = SessionInputGate.runClaudeInput(sessionId: sid, clientId: "h3", text: "then lint", interventionId: nil,
+                                                io: io(status: "idle", pane: pane), held: HeldClaim())
+        XCTAssertEqual(r.code, .delivered, r.detail)
+        XCTAssertEqual(screen(pane), "then lint^M", "text and one Enter, no Esc")
+    }
+
+    /// A photo's paste (`Keystroke.paste`): bracketed even for one line, and
+    /// with its line feeds kept (tmux would turn them into CRs, and Claude
+    /// Code splits a paste into lines on LF when it looks for image paths).
+    func testAPasteIsBracketedAndKeepsItsLineFeeds() throws {
+        let start = ProcessRunner.run(wrapper, ["new-session", "-d", "-s", "b", "-x", "200", "-y", "20",
+                                                "sh -c 'stty raw -echo; printf \"\\033[?2004h\"; exec cat -v'"], timeout: 5)
+        guard start.succeeded else { throw XCTSkip("couldn't start a second pane: \(start.stderr)") }
+        usleep(400_000)
+        let pane = try XCTUnwrap(ProcessRunner.run(wrapper, ["list-panes", "-t", "b", "-F", "#{pane_id}"], timeout: 3).stdout
+            .split(separator: "\n").first.map(String.init))
+        let r = InjectionExecutor.sendViaTmux([.paste("/tmp/a.png\nwhat is it?")], tmuxPath: wrapper, paneId: pane, inMode: false,
+                                              awaitClosed: { false })
+        XCTAssertTrue(r.success, r.detail)
+        let shown = screen(pane)
+        XCTAssertTrue(shown.hasPrefix("^[[200~/tmp/a.png"), shown)
+        XCTAssertTrue(shown.hasSuffix("what is it?^[[201~"), shown)
+        XCTAssertFalse(shown.contains("^M"), "no CR in place of the line feed")
+        let single = InjectionExecutor.sendViaTmux([.paste("/tmp/b.png")], tmuxPath: wrapper, paneId: pane, inMode: false, awaitClosed: { false })
+        XCTAssertTrue(single.success)
+        XCTAssertTrue(screen(pane).hasSuffix("^[[200~/tmp/b.png^[[201~"), "one line is still a paste")
+    }
+
     func testInterruptPressesALoneEsc() throws {
         let pane = try paneId()
         let r = SessionInputGate.runClaudeInterrupt(sessionId: sid, interventionId: nil, io: io(status: "busy", pane: pane))

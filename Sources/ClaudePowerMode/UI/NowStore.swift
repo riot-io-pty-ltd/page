@@ -53,6 +53,8 @@ final class NowStore: ObservableObject {
     /// What happened to a message typed from an In-flight row, by row id:
     /// shown in the row itself (typed, queued, or refused with the reason).
     @Published private(set) var flightReceipts: [String: InFlightReceipt] = [:]
+    /// Held messages whose Delete is on its way (their button waits).
+    @Published private(set) var deletingHeld: Set<String> = []
     /// The first-run tip was dismissed (remembered in UserDefaults).
     @Published private(set) var tipDismissed = false
     /// Bumped by "N working" in the header: the cards scroll to the top.
@@ -337,6 +339,22 @@ final class NowStore: ObservableObject {
             }
         }
         if now() > w.until { wantedComposer = nil }
+    }
+
+    /// Delete beside a message a phone asked to hold until the turn ends.
+    func deleteHeld(_ clientId: String, on row: InFlightRow) {
+        let effect = NowKeys.effect(forHeldDelete: clientId, row: row)
+        guard effect != .none, !deletingHeld.contains(clientId) else { return }
+        deletingHeld.insert(clientId)
+        apply(state, effect: effect)
+    }
+
+    /// The delete answered: deleted (nothing typed), too late, or gone already.
+    func finishDeletingHeld(_ clientId: String, result: SessionCommandResult) {
+        deletingHeld.remove(clientId)
+        let deleted = result.retract == "deleted"
+        let detail = result.detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        notice = Notice(text: detail.isEmpty ? (deleted ? HeldOutbox.deletedDetail : "Couldn't delete it") : detail, failed: !deleted)
     }
 
     /// The input path answered (or timed out): the receipt goes in the row.

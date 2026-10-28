@@ -121,7 +121,7 @@ final class FakeQuestionDialog {
         case .enter: enter()
         case .escape: cancelled = true
         case .key(let k): nav(k)
-        case .pause, .awaitPromptClosed: break
+        case .pause, .awaitPromptClosed, .paste: break
         }
     }
 

@@ -509,16 +509,19 @@ final class SignatureMotionTests: XCTestCase {
         XCTAssertTrue(end.finished)
     }
 
-    func testStopAllAndApproveHoldShareTheBoardTiming() {
+    func testApproveHoldKeepsTheBoardTimingAndStopAllHoldsForTenSeconds() {
         let start = Date(timeIntervalSinceReferenceDate: 500)
-        for kind in [HoldGesture.Kind.stopAll, .approve(rowId: "r")] {
-            let hold = HoldGesture(kind: kind, startedAt: start)
-            XCTAssertEqual(hold.deadZone, 0.3, accuracy: 1e-9, "a 0.3 s dead zone, for \(kind)")
-            XCTAssertEqual(hold.duration, 1.5, accuracy: 1e-9, "a 1.2 s fill after it, for \(kind)")
-            XCTAssertEqual(hold.progress(now: start.addingTimeInterval(0.2)), 0, "nothing before the dead zone")
-            near(hold.progress(now: start.addingTimeInterval(0.9)), 0.5)
-            XCTAssertTrue(hold.isComplete(now: start.addingTimeInterval(1.5)))
-        }
+        let approve = HoldGesture(kind: .approve(rowId: "r"), startedAt: start)
+        XCTAssertEqual(approve.deadZone, 0.3, accuracy: 1e-9, "a 0.3 s dead zone")
+        XCTAssertEqual(approve.duration, 1.5, accuracy: 1e-9, "a 1.2 s fill after it")
+        XCTAssertEqual(approve.progress(now: start.addingTimeInterval(0.2)), 0, "nothing before the dead zone")
+        near(approve.progress(now: start.addingTimeInterval(0.9)), 0.5)
+        XCTAssertTrue(approve.isComplete(now: start.addingTimeInterval(1.5)))
+        let stop = HoldGesture(kind: .stopAll, startedAt: start)
+        XCTAssertEqual(stop.deadZone, 0.3, accuracy: 1e-9, "the same dead zone")
+        XCTAssertEqual(stop.duration, 10, accuracy: 1e-9, "Esc in every session takes a 10 s hold")
+        XCTAssertFalse(stop.isComplete(now: start.addingTimeInterval(1.5)))
+        XCTAssertTrue(stop.isComplete(now: start.addingTimeInterval(10)))
     }
 
     // MARK: dusk and dawn

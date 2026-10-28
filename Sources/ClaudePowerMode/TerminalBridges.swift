@@ -85,11 +85,12 @@ enum WezTermBridge {
 
     /// Pure. The CLI arguments for one keystroke (text comes on stdin).
     /// Single-line text and keys are sent as typed (`--no-paste`) so "1"
-    /// picks a menu option; multi-line text is one bracketed paste so its
-    /// newlines don't submit.
+    /// picks a menu option; multi-line text and `.paste` are one bracketed
+    /// paste (send-text's default) so newlines don't submit.
     static func sendArgs(paneId: String, key: Keystroke) -> (args: [String], stdin: Data)? {
         let base = ["send-text", "--pane-id", paneId]
         switch key {
+        case .paste(let s): return s.isEmpty ? nil : (base, Data(s.utf8))
         case .text(let s) where s.contains("\n"): return (base, Data(s.utf8))
         case .text(let s): return (base + ["--no-paste"], Data(s.utf8))
         case .enter: return (base + ["--no-paste"], Data("\r".utf8))
@@ -190,11 +191,13 @@ enum KittyBridge {
 
     /// Pure. The kitten arguments for one keystroke (text comes on stdin,
     /// taken literally). Single-line text is typed so "1" picks a menu
-    /// option; multi-line text is one bracketed paste.
+    /// option; multi-line text and `.paste` are one bracketed paste.
     static func sendArgs(target: Target, key: Keystroke) -> (args: [String], stdin: Data?)? {
         let base = ["@", "--to", target.socket]
         let match = ["--match", "id:\(target.windowId)"]
         switch key {
+        case .paste(let s):
+            return s.isEmpty ? nil : (base + ["send-text"] + match + ["--bracketed-paste", "enable", "--stdin"], Data(s.utf8))
         case .text(let s) where s.contains("\n"):
             return (base + ["send-text"] + match + ["--bracketed-paste", "enable", "--stdin"], Data(s.utf8))
         case .text(let s):

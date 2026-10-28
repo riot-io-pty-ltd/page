@@ -7,14 +7,24 @@ import Foundation
 ///     .build/debug/ClaudePowerMode --probe-answer --session <id> --answers '<json>' \
 ///         [--caps arrows|plain|terminalReturn] [--tmux-socket <name>] [--dry-run]
 ///     .build/debug/ClaudePowerMode --probe-screen --session <id> [--tmux-socket <name>]
+///     .build/debug/ClaudePowerMode --probe-image --session <id> --image <file> [--image <file>…] \
+///         [--caption <text>] [--attach paste|path] [--early-return] [--keep] [--store <dir>] [--tmux-socket <name>]
 ///
 /// `--probe-answer` runs the real `AnswerDelivery.run` with `liveIO` (registry, transcript, screen reader,
 /// `sendOneKey`). Only the one thing `capabilities(of:)` gates is overridable (`--caps`), plus, for
 /// `terminalReturn`, Terminal.app's `do script` transport. It never presses a key unless the session's cwd
 /// is under `allowedRoot` (throwaway sessions started by `ask.sh`), and it never sends Esc.
+///
+/// `--probe-image` runs the real `ImageDelivery.run` with `liveIO` against such a session, printing every
+/// read of the input box (and, once, the styled rows, to see how a chip is drawn) and every key. `--attach`
+/// overrides TerminalCatalog's word on the host (to measure a host that isn't marked yet); `--early-return`
+/// also presses Enter straight after the paste, the way `paste --submit` or `do script` would, to see whether
+/// Claude drops it while the photo loads. The image files must be under `allowedRoot` too, and the copies
+/// Page wrote for Claude are deleted at the end.
 enum AnswerProbe {
     static let answerFlag = "--probe-answer"
     static let screenFlag = "--probe-screen"
+    static let imageFlag = "--probe-image"
     /// `PAGE_PROBE_ROOT`, else `$TMPDIR/page-answer-probe`: start throwaway sessions under it.
     static let allowedRoot: String = {
         if let r = ProcessInfo.processInfo.environment["PAGE_PROBE_ROOT"], r.hasPrefix("/") { return r }
@@ -40,7 +50,77 @@ enum AnswerProbe {
         var tmuxSocket: String?
     }
 
-    static func isRequested(_ args: [String]) -> Bool { args.contains(answerFlag) || args.contains(screenFlag) }
+    static func isRequested(_ args: [String]) -> Bool {
+        args.contains(answerFlag) || args.contains(screenFlag) || args.contains(imageFlag)
+    }
+
+    // MARK: --probe-image options (pure)
+
+    enum AttachMode: String, Equatable {
+        case paste, path
+    }
+
+    struct ImageOptions: Equatable {
+        var sessionId = ""
+        var images: [String] = []
+        var caption = ""
+        var attach: AttachMode?
+        var earlyReturn = false
+        var tmuxSocket: String?
+        /// Write Page's copies under this folder instead of the temporary folder (it must be under `allowedRoot`).
+        var store: String?
+        /// Leave Page's copies for Claude to open (the path route); `ImageStore.cleanup` removes them later.
+        var keep = false
+    }
+
+    static func parseImage(_ args: [String]) -> Swift.Result<ImageOptions, ProbeError> {
+        if args.contains(answerFlag) || args.contains(screenFlag) { return .failure(.init("--probe-image runs on its own")) }
+        var o = ImageOptions()
+        var i = 1
+        func value() -> String? {
+            guard i + 1 < args.count, !args[i + 1].hasPrefix("--") else { return nil }
+            i += 1
+            return args[i]
+        }
+        while i < args.count {
+            switch args[i] {
+            case imageFlag: break
+            case "--session":
+                guard let v = value() else { return .failure(.init("--session needs a session id")) }
+                o.sessionId = v
+            case "--image":
+                guard let v = value(), v.hasPrefix("/") else { return .failure(.init("--image needs an absolute path")) }
+                o.images.append(v)
+            case "--caption":
+                // The caption may be empty or start with anything but "--".
+                guard i + 1 < args.count, !args[i + 1].hasPrefix("--") else { return .failure(.init("--caption needs text")) }
+                i += 1
+                o.caption = args[i]
+            case "--attach":
+                guard let v = value(), let m = AttachMode(rawValue: v) else { return .failure(.init("--attach is paste or path")) }
+                o.attach = m
+            case "--early-return": o.earlyReturn = true
+            case "--keep": o.keep = true
+            case "--store":
+                guard let v = value(), v.hasPrefix("/") else { return .failure(.init("--store needs an absolute folder")) }
+                o.store = v
+            case "--tmux-socket":
+                guard let v = value(), v.range(of: #"^[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil else {
+                    return .failure(.init("--tmux-socket needs a tmux -L socket name"))
+                }
+                o.tmuxSocket = v
+            default: return .failure(.init("unknown argument \(args[i])"))
+            }
+            i += 1
+        }
+        if o.sessionId.isEmpty { return .failure(.init("--session <id> is required")) }
+        if !(1...ImageRef.maxImages).contains(o.images.count) { return .failure(.init("1 to 4 --image files")) }
+        if let st = o.store, !cwdAllowed(st) { return .failure(.init("--store must be under \(allowedRoot)/")) }
+        return .success(o)
+    }
+
+    /// Escape characters made visible, for the styled dump.
+    static func visibleEscapes(_ s: String) -> String { s.replacingOccurrences(of: "\u{1B}", with: "␛") }
 
     // MARK: Pure parts (unit-tested)
 
@@ -119,6 +199,7 @@ enum AnswerProbe {
         case .key(let k): return "key(\(k.rawValue))"
         case .pause(let t): return "pause(\(t))"
         case .awaitPromptClosed: return "awaitPromptClosed"
+        case .paste(let s): return "paste(\(s.count) chars)"
         }
     }
 
@@ -169,8 +250,151 @@ enum AnswerProbe {
 
     // MARK: Entry point
 
+    /// Points every tmux call at the probe's own server, never the user's. False when there is none.
+    private static func pointTmux(at name: String?) -> Bool {
+        unsetenv("TMUX_TMPDIR")
+        guard let name else { return true }
+        guard let tmux = ProcessRunner.findExecutable("tmux") else { say("probe: tmux not found"); return false }
+        unsetenv("TMUX")
+        let r = ProcessRunner.run(tmux, ["-L", name, "display-message", "-p", "#{socket_path}"], timeout: 3)
+        let path = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard r.succeeded, !path.isEmpty else { say("probe: no tmux server on -L \(name) (\(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)))"); return false }
+        setenv("TMUX", "\(path),0,0", 1)
+        say("probe: tmux calls go to socket \(path)")
+        return true
+    }
+
+    /// The pane as Page's readers see it, styled (escapes kept) or plain.
+    private static func probeScreen(_ host: InjectionExecutor.TerminalHost, styled: Bool) -> String? {
+        switch host {
+        case .tmux(let tmux, let pane, _, _):
+            let r = ProcessRunner.run(tmux, ["capture-pane", "-p"] + (styled ? ["-e"] : []) + ["-t", pane], timeout: 3)
+            return r.succeeded ? r.stdout : nil
+        case .wezterm(let target): return WezTermBridge.screen(target, styled: styled)
+        default: return InjectionExecutor.answerScreenReader(for: host)?()
+        }
+    }
+
+    private static func describe(_ box: InjectionExecutor.ClaudeInputContent?) -> String {
+        guard let box else { return "box: nil (not on screen / unreadable)" }
+        return "box: chips=\(box.chips) typed=\"\(box.typed)\" plain=\"\(box.plain)\""
+    }
+
+    /// `--probe-image`. Exit code: 0 delivered, 1 not delivered, 2 refused / bad usage.
+    static func runImage(arguments: [String]) -> Int32 {
+        let opts: ImageOptions
+        switch parseImage(arguments) {
+        case .failure(let e):
+            say("probe: \(e.message)")
+            say("usage: ClaudePowerMode --probe-image --session <id> --image <file> [--image <file>…] [--caption <text>] [--attach paste|path] [--early-return] [--keep] [--store <dir>] [--tmux-socket <name>]")
+            return 2
+        case .success(let o): opts = o
+        }
+        guard pointTmux(at: opts.tmuxSocket) else { return 2 }
+
+        var photos: [AssembledImage] = []
+        for (n, path) in opts.images.enumerated() {
+            guard cwdAllowed(path) else { say("probe: REFUSED: \(path) is not under \(allowedRoot)/"); return 2 }
+            guard let data = BoundedFileRead.read(path, maxBytes: ImageAssembler.maxBytes) else { say("probe: can't read \(path) (1 MiB at most)"); return 2 }
+            let kind = ImageCheck.sniff(data)
+            say("probe: image \(n + 1): \(data.count) B, sniffed \(kind?.rawValue ?? "neither JPEG nor PNG"), check: \(ImageCheck.check(data))")
+            photos.append(AssembledImage(id: "probe-image-\(n + 1)", data: data, mime: kind?.mime ?? "image/png"))
+        }
+
+        let registry = ClaudeSessionRegistry(projectsDirectory: "~/.claude/projects")
+        let store = opts.store.map { ImageStore(base: URL(fileURLWithPath: $0, isDirectory: true)) } ?? .standard
+        let live = ImageDelivery.liveIO(registry: registry, store: store)
+        let session: ClaudeLiveSession
+        let table: [ProcessRunner.ProcessInfoRow]
+        switch live.resolve(opts.sessionId) {
+        case .ended: say("probe: REFUSED: no live Claude process for session \(opts.sessionId)"); return 2
+        case .failed(let f): say("probe: REFUSED: \(f.detail)"); return 2
+        case .live(let s, let t): session = s; table = t
+        }
+        let host = live.resolveHost(session, table)
+        say("probe: session \(session.sessionId) pid=\(session.pid) tty=\(session.tty ?? "nil") status=\(session.status) cwd=\(session.cwd ?? "nil")")
+        say("probe: host = \(host.label)  (\(host))")
+        guard cwdAllowed(session.cwd) else {
+            say("probe: REFUSED: this session's cwd is not under \(allowedRoot)/ — the probe only touches throwaway sessions")
+            return 2
+        }
+        say("probe: catalog attach for \(host.label): \(ImageDelivery.attachSupport(of: host))")
+
+        var io = live
+        if let mode = opts.attach {
+            io.attach = { _ in mode == .paste ? .paste : .pathOnly(TerminalCatalog.pathOnlyReason) }
+            say("probe: --attach \(mode.rawValue) overrides the catalog")
+        }
+        var written: [String] = []
+        io.write = { data, kind, sid in
+            let r = live.write(data, kind, sid)
+            if case .success(let p) = r { written.append(p) }
+            say("probe: wrote \(data.count) B → \(r)")
+            return r
+        }
+        var lastBox: String?
+        var dumpedStyled = false
+        var reads = 0
+        let started = Date()
+        io.readBox = { h in
+            let box = live.readBox(h)
+            reads += 1
+            let line = describe(box)
+            if line != lastBox {
+                let at = String(format: "%.2f", Date().timeIntervalSince(started))
+                let status = live.currentRecord(session.pid).flatMap { $0.status } ?? "?"
+                say("[\(at)s read #\(reads) status=\(status)] \(line)")
+                lastBox = line
+                if !dumpedStyled, let b = box, b.chips > 0 || !b.typed.isEmpty, let styled = probeScreen(h, styled: true) {
+                    dumpedStyled = true
+                    say("--- styled rows (last 12) at the first non-empty box ---")
+                    var rows = styled.components(separatedBy: "\n")
+                    while let r = rows.last, r.trimmingCharacters(in: .whitespaces).isEmpty { rows.removeLast() }
+                    for row in rows.suffix(12) { say("    | " + visibleEscapes(row)) }
+                }
+            }
+            return box
+        }
+        io.sendKey = { h, key in
+            let at = String(format: "%.2f", Date().timeIntervalSince(started))
+            say(">>> [\(at)s] key \(describe(key)) -> \(h.label)")
+            let why = live.sendKey(h, key)
+            say(why == nil ? "    sent" : "    NOT sent: \(why!)")
+            if why == nil, case .paste = key, opts.earlyReturn {
+                say(">>> --early-return: Enter straight after the paste")
+                let e = live.sendKey(h, .enter)
+                say(e == nil ? "    sent" : "    NOT sent: \(e!)")
+            }
+            return why
+        }
+        io.receipt = { s, offset in
+            let r = live.receipt(s, offset)
+            say("probe: transcript forward read from \(offset): \(r.map { "user record with imagePasteIds, \($0.images) image block(s)" } ?? "nothing yet")")
+            return r
+        }
+
+        let result = ImageDelivery.run(sessionId: opts.sessionId, clientId: "probe", images: photos, caption: opts.caption,
+                                       interventionId: nil, io: io)
+        let took = String(format: "%.1f", Date().timeIntervalSince(started))
+        say("--- final screen (last 15) ---")
+        say(indent(probeScreen(host, styled: false).map { screen -> String in
+            var rows = screen.components(separatedBy: "\n")
+            while let r = rows.last, r.trimmingCharacters(in: .whitespaces).isEmpty { rows.removeLast() }
+            return rows.suffix(15).joined(separator: "\n")
+        }))
+        say("probe: RESULT code=\(result.code.rawValue) reason=\(result.reason?.rawValue ?? "-") attached=\(result.attached.map(String.init) ?? "-") detail=\"\(result.detail)\" in \(took)s")
+        if opts.keep {
+            say("probe: --keep: left \(written.count) copy/copies for Claude to open")
+        } else if !written.isEmpty {
+            store.remove(written)
+            say("probe: deleted Page's \(written.count) copy/copies (Claude keeps its own in the transcript)")
+        }
+        return result.code == .delivered ? 0 : 1
+    }
+
     /// Returns the process exit code: 0 delivered (or a clean dry run / screen read), 1 not delivered, 2 refused / bad usage.
     static func run(arguments: [String]) -> Int32 {
+        if arguments.contains(imageFlag) { return runImage(arguments: arguments) }
         let opts: Options
         switch parse(arguments) {
         case .failure(let e):
@@ -181,17 +405,7 @@ enum AnswerProbe {
         case .success(let o): opts = o
         }
 
-        // Point every tmux call at the probe's own server, never the user's.
-        unsetenv("TMUX_TMPDIR")
-        if let name = opts.tmuxSocket {
-            guard let tmux = ProcessRunner.findExecutable("tmux") else { say("probe: tmux not found"); return 2 }
-            unsetenv("TMUX")
-            let r = ProcessRunner.run(tmux, ["-L", name, "display-message", "-p", "#{socket_path}"], timeout: 3)
-            let path = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard r.succeeded, !path.isEmpty else { say("probe: no tmux server on -L \(name) (\(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)))"); return 2 }
-            setenv("TMUX", "\(path),0,0", 1)
-            say("probe: tmux calls go to socket \(path)")
-        }
+        guard pointTmux(at: opts.tmuxSocket) else { return 2 }
 
         let registry = ClaudeSessionRegistry(projectsDirectory: "~/.claude/projects")
         let live = AnswerDelivery.liveIO(registry: registry)

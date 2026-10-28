@@ -16,6 +16,11 @@ enum InjectionMethod: String {
     /// Typed through Herdr's socket API (`pane.send_text` / `pane.send_keys`), by pane id.
     case herdr
     case headlessResume = "claude_resume_print"
+    /// A written reply to a rate-limit page, held on the Mac until the limit
+    /// resets (`reply.injected` says so; nothing was typed yet).
+    case heldUntilReset = "held_until_reset"
+    /// A held reply the phone took back before it was typed.
+    case retracted
     /// Nothing was typed (refused, or no target found).
     case none
 }
@@ -74,6 +79,12 @@ enum Keystroke: Equatable {
     /// A navigation key. Only the question-answering plan sends these
     /// (`AnswerDriver`); approvals and replies never do.
     case key(NavKey)
+    /// One bracketed paste, even for a single line (`.text` types a single
+    /// line as keys). Claude Code looks for image paths only in pasted text,
+    /// so only photo delivery (`ImageDelivery`) sends this. Never empty: an
+    /// empty bracketed paste makes Claude Code read the Mac's clipboard.
+    /// Hosts without a measured paste route refuse it.
+    case paste(String)
 }
 
 /// The keys Page presses to move around a question dialog.
@@ -144,6 +155,7 @@ enum InjectionExecutor {
     static let notForegroundMessage = "The session is suspended or in the background — reply at the Mac"
     static let unverifiedPromptMessage = "Can't confirm which prompt is showing — answer it at the Mac"
     static let closedPageMessage = "That page already closed — answer at the Mac, or wait for the next page"
+    static let busyAgainMessage = "Claude started working again before Page typed it"
     static let inputUnverifiedMessage = "Couldn't confirm the session's input box is empty — carry on at the Mac"
     static let backgroundJobMessage = "This session is running as a Claude Code background job — reply at the Mac"
     static let sessionExitedMessage = "The session exited"
@@ -356,6 +368,9 @@ enum InjectionExecutor {
         /// busy since the gate looked (a menu opening first would take the
         /// digit as an answer).
         var refuseDigitWhileBusy: Bool = false
+        /// A message the phone asked to hold until the turn ends: refused,
+        /// before every key, once Claude is busy (never queued behind a turn).
+        var refuseWhileBusy: Bool = false
     }
 
     enum ClaudeTarget {
@@ -558,7 +573,8 @@ enum InjectionExecutor {
             } else if now == .waiting {
                 return newPageMessage
             }
-            return digitWhileBusyRefusal(key: key, status: now, enabled: req.refuseDigitWhileBusy)
+            return busyAgainRefusal(status: now, enabled: req.refuseWhileBusy)
+                ?? digitWhileBusyRefusal(key: key, status: now, enabled: req.refuseDigitWhileBusy)
         }
         Logger.shared.log("Injection.claude session=\(session.sessionId.prefix(8)) pid=\(session.pid) status=\(session.status.rawValue) host=\(host.label) plan=\(steps.count) step(s)")
 
@@ -806,7 +822,55 @@ enum InjectionExecutor {
     /// suggestion text, never what the user typed) are ignored. Anything
     /// that doesn't fit the shape is `.unknown`.
     static func claudeInputRow(screen: String, styled: Bool) -> ClaudeInputRow {
-        let rows = screen.components(separatedBy: "\n").suffix(40).map { styled ? styledCells($0) : $0.map { ($0, false) } }
+        guard let box = claudeInputBox(screen: screen, styled: styled) else { return .unknown }
+        return box.typed.isEmpty ? .empty : .draft
+    }
+
+    /// Claude Code's input box with what is in it (`claudeInputContent`).
+    struct ClaudeInputContent: Equatable {
+        /// What was typed or pasted, dim / grey cells left out (`styled`
+        /// reads only), frame trimmed, the box's rows joined by spaces.
+        let typed: String
+        /// Every character in the box, dim ones included, rows joined by spaces.
+        let plain: String
+        /// `[Image #n]` chips in the box (counted on `plain`, so a chip drawn
+        /// dim still counts).
+        let chips: Int
+
+        /// Nothing typed and no chip: a box Page may paste into.
+        var isEmpty: Bool { typed.isEmpty && chips == 0 }
+
+        /// `typed` without its chips and without any whitespace, so text
+        /// that wrapped across rows compares equal to the text pasted.
+        var textWithoutChips: String {
+            let stripped = typed.replacingOccurrences(of: ClaudeInputContent.chipPattern, with: "", options: .regularExpression)
+            return String(stripped.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.map(Character.init))
+        }
+
+        /// Claude Code's chip for a pasted image (measured on 2.1.312: `[Image #1]`, numbered per session).
+        static let chipPattern = #"\[Image #[0-9]+\]"#
+
+        static func countChips(_ s: String) -> Int {
+            guard let re = try? NSRegularExpression(pattern: chipPattern) else { return 0 }
+            return re.numberOfMatches(in: s, range: NSRange(s.startIndex..., in: s))
+        }
+    }
+
+    /// Pure. The input box as `claudeInputRow` finds it, with its text and
+    /// the image chips in it; nil when the box isn't on screen (another
+    /// mode, a menu, a layout Page doesn't know).
+    static func claudeInputContent(screen: String, styled: Bool) -> ClaudeInputContent? {
+        guard let box = claudeInputBox(screen: screen, styled: styled) else { return nil }
+        return ClaudeInputContent(typed: box.typed, plain: box.plain, chips: ClaudeInputContent.countChips(box.plain))
+    }
+
+    /// The box's typed and plain text, rows joined by single spaces.
+    private static func claudeInputBox(screen: String, styled: Bool) -> (typed: String, plain: String)? {
+        // The blank rows a terminal pads its screen with don't count towards the 40: in a tall pane
+        // a fresh session's box sits near the top, above them.
+        var all = screen.components(separatedBy: "\n").map { styled ? styledCells($0) : $0.map { ($0, false) } }
+        while let last = all.last, last.allSatisfy({ $0.0.isWhitespace }) { all.removeLast() }
+        let rows = Array(all.suffix(40))
         let plain = rows.map { String($0.map(\.0)) }
         let frame = CharacterSet(charactersIn: "│┃║").union(.whitespaces)
 
@@ -826,23 +890,29 @@ enum InjectionExecutor {
             guard next == chars.count || chars[next] == " " || chars[next] == "\u{00A0}" else { return nil }
             return next
         }
-        /// Typed (non-placeholder) characters of `cells` from `from` on, frame trimmed.
-        func typed(_ cells: [(Character, Bool)], from: Int) -> String {
-            let s = String(cells.dropFirst(from).filter { !$0.1 }.map(\.0))
+        /// Characters of `cells` from `from` on (only typed, non-placeholder
+        /// ones unless `all`), frame trimmed.
+        func cellsText(_ cells: [(Character, Bool)], from: Int, all: Bool) -> String {
+            let s = String(cells.dropFirst(from).filter { all || !$0.1 }.map(\.0))
             return s.trimmingCharacters(in: frame.union(CharacterSet(charactersIn: "\u{00A0}")))
         }
+        func joined(_ parts: [String]) -> String { parts.filter { !$0.isEmpty }.joined(separator: " ") }
 
         var i = rows.count - 1
         while i >= 1 {
             if let offset = promptOffset(plain[i]), isRule(plain[i - 1]),
                let close = ((i + 1)..<min(rows.count, i + 21)).first(where: { isRule(plain[$0]) }) {
-                var content = typed(rows[i], from: offset)
-                for j in (i + 1)..<close { content += typed(rows[j], from: 0) }
-                return content.isEmpty ? .empty : .draft
+                var typed = [cellsText(rows[i], from: offset, all: false)]
+                var all = [cellsText(rows[i], from: offset, all: true)]
+                for j in (i + 1)..<close {
+                    typed.append(cellsText(rows[j], from: 0, all: false))
+                    all.append(cellsText(rows[j], from: 0, all: true))
+                }
+                return (joined(typed), joined(all))
             }
             i -= 1
         }
-        return .unknown
+        return nil
     }
 
     /// Splits one line of `tmux capture-pane -e` output into characters,
@@ -1168,19 +1238,22 @@ enum InjectionExecutor {
         var sentSomething = false
         for step in steps {
             switch step {
-            case .text, .enter, .escape, .key:
+            case .text, .enter, .escape, .key, .paste:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
                 break
             }
             var r: ProcessRunner.Result
             switch step {
-            case .text(let s) where s.contains("\n"):
-                // Multi-line: one bracketed paste, so newlines don't submit.
+            case .paste(let s) where s.isEmpty:
+                return fail("refused empty paste", partialDetail(sentSomething, "Couldn't type into tmux pane \(paneId)"))
+            case .text(let s) where s.contains("\n"), .paste(let s):
+                // Multi-line (or a paste): one bracketed paste, so newlines don't submit.
                 let buffer = "page-\(UUID().uuidString.prefix(8))"
                 let load = ProcessRunner.run(tmuxPath, ["load-buffer", "-b", buffer, "-"], timeout: 3, stdin: Data(s.utf8))
                 guard load.succeeded else { return fail("load-buffer: \(load.stderr)", partialDetail(sentSomething, "Couldn't type into tmux pane \(paneId)")) }
-                r = ProcessRunner.run(tmuxPath, ["paste-buffer", "-p", "-d", "-b", buffer, "-t", paneId], timeout: 3)
+                r = ProcessRunner.run(tmuxPath, tmuxPasteArgs(buffer: buffer, paneId: paneId, keepNewlines: { if case .paste = step { return true }; return false }()),
+                                      timeout: 3)
                 if !r.succeeded { ProcessRunner.run(tmuxPath, ["delete-buffer", "-b", buffer], timeout: 3) }
             case .text(let s):
                 // `--` so a reply starting with "-" isn't parsed as flags;
@@ -1214,6 +1287,15 @@ enum InjectionExecutor {
         return InjectionResult(method: .tmux, success: true, output: "ok \(paneId)")
     }
 
+    /// Pure. `paste-buffer` for one bracketed paste. tmux turns each LF into
+    /// CR unless `-r`; Claude Code shows either as a new line, but splits a
+    /// paste into lines on LF alone when it looks for image paths (measured on
+    /// 2.1.312: with CRs, a path followed by a caption stayed text), so a
+    /// `.paste` keeps its LFs (`keepNewlines`).
+    static func tmuxPasteArgs(buffer: String, paneId: String, keepNewlines: Bool) -> [String] {
+        ["paste-buffer", "-p"] + (keepNewlines ? ["-r"] : []) + ["-d", "-b", buffer, "-t", paneId]
+    }
+
     /// One keystroke at a time through a terminal's own control CLI
     /// (WezTerm, kitty, Herdr), with the same rules as tmux: `precheck` before
     /// every key, `.awaitPromptClosed` honoured, a partial send reported.
@@ -1234,7 +1316,9 @@ enum InjectionExecutor {
                     return fail("prompt still open after Esc", "Denied, but the prompt didn't close — your message wasn't sent")
                 }
                 continue
-            case .text, .enter, .escape, .key:
+            case .paste(let s) where s.isEmpty:
+                return fail("refused empty paste", partialDetail(sentSomething, "Couldn't type into \(label)"))
+            case .text, .enter, .escape, .key, .paste:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             }
             guard let r = send(step), r.succeeded else {
@@ -1243,6 +1327,12 @@ enum InjectionExecutor {
             sentSomething = true
         }
         return InjectionResult(method: method, success: true, output: "ok \(label)")
+    }
+
+    /// Pure. A held phone message (`refuseWhileBusy`) is never typed into a
+    /// turn: checked before every key, since the gate's look.
+    static func busyAgainRefusal(status: ClaudeSessionStatus, enabled: Bool) -> String? {
+        enabled && status == .busy ? busyAgainMessage : nil
     }
 
     /// Pure. Phone text starting with a digit, about to be typed while
@@ -1256,6 +1346,11 @@ enum InjectionExecutor {
 
     private static func partialDetail(_ sentSomething: Bool, _ base: String) -> String {
         sentSomething ? base + " (part of the reply was typed)" : base
+    }
+
+    /// A `.paste` into a host whose paste route Page hasn't measured.
+    static func pasteUnsupportedMessage(_ app: String) -> String {
+        "Page can't paste a photo into \(app) yet"
     }
 
     // MARK: Terminal.app transport
@@ -1277,7 +1372,7 @@ enum InjectionExecutor {
         while i < steps.count {
             let step = steps[i]
             switch step {
-            case .text, .enter, .escape, .key:
+            case .text, .enter, .escape, .key, .paste:
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
                 break
@@ -1287,6 +1382,9 @@ enum InjectionExecutor {
                 // `do script` always appends Return, which would select the next row.
                 return fail("terminal_app cannot press navigation keys",
                             "Terminal.app can't press the arrow or Tab keys — answer at your Mac, or use tmux or iTerm2")
+            case .paste:
+                // No paste route, and `do script` adds a Return (dropped while a photo loads).
+                return fail("terminal_app cannot paste", pasteUnsupportedMessage("Terminal"))
             case .text(let s):
                 let r = runTerminalCommand(tty: tty, body: "do script \(ProcessRunner.appleScriptQuote(flattenLines(s))) in t\nreturn \"ok\"")
                 guard r.ok else { return fail(r.output, partialDetail(sentSomething, r.detail)) }
@@ -1376,7 +1474,7 @@ enum InjectionExecutor {
         var sentSomething = false
         for step in steps {
             switch step {
-            case .text, .enter, .escape, .key:
+            case .text, .enter, .escape, .key, .paste:
                 // After the text's pause, so the Return is checked last.
                 if let why = precheck(step) { return fail("precheck: \(why)", partialDetail(sentSomething, why)) }
             case .pause, .awaitPromptClosed:
@@ -1384,6 +1482,9 @@ enum InjectionExecutor {
             }
             let payload: String
             switch step {
+            case .paste:
+                // Whether a `write text` wrapped in ESC [200~ … ESC [201~ reads as a paste is unmeasured.
+                return fail("iterm paste not measured", pasteUnsupportedMessage("iTerm2"))
             case .text(let s): payload = ProcessRunner.appleScriptQuote(flattenLines(s))
             case .enter: payload = "(character id 13)"
             case .escape: payload = "(character id 27)"
@@ -1552,7 +1653,7 @@ enum InjectionExecutor {
         var dismissedMenu = false
         while i < steps.count {
             switch steps[i] {
-            case .text, .enter, .escape, .key:
+            case .text, .enter, .escape, .key, .paste:
                 if let why = precheck(steps[i]) {
                     return fail("precheck: \(why)", dismissedMenu ? "Denied, but your message wasn't sent — \(why)" : partialDetail(sentSomething, why))
                 }
@@ -1560,6 +1661,9 @@ enum InjectionExecutor {
                 break
             }
             switch steps[i] {
+            case .paste:
+                // A paste without --submit, then Enter once the photo shows, is unmeasured in cmux.
+                return fail("cmux paste not measured", pasteUnsupportedMessage("cmux"))
             case .escape:
                 switch client.inputState(surface: surface) {
                 case .failure(let f): return fail(f.output, f.detail)

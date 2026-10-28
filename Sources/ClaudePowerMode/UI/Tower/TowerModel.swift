@@ -480,7 +480,7 @@ enum ShortcutCatalog {
             TowerShortcut(keys: [PanelKeys.open], title: "Open the session’s terminal", detail: "Pages and sessions in flight. Claude: the session’s own Terminal, iTerm2, cmux or tmux pane. Codex: brings your terminal forward. Never types"),
             TowerShortcut(keys: [PanelKeys.help], title: "Show every shortcut", detail: "The ? button in the panel’s footer does the same"),
             TowerShortcut(keys: ["click"], title: "Click a card in flight to open it", detail: "Its Open and Steer buttons do what O and T do. “N working” in the header jumps to the cards, and the pulse opens Settings"),
-            TowerShortcut(keys: ["hold", "⌘", "."], title: "Stop all agents", detail: "Hold for a moment; sends Esc to every busy session"),
+            TowerShortcut(keys: ["hold", "⌘", "."], title: "Stop all agents", detail: "Hold for 10 seconds; sends Esc to every busy session"),
             TowerShortcut(keys: ["M"], title: "More…", detail: "The classic menu: Pair phone, Open Log, Reload Config, Quit"),
             TowerShortcut(keys: ["tab"], title: "Move between the buttons", detail: "With Full Keyboard Access on; space presses the focused one")
         ]),

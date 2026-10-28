@@ -575,6 +575,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             run(.more)
         case .stopAll:
             stopAllAgents()
+        case .deleteHeld(let clientId):
+            deleteHeld(clientId)
+        }
+    }
+
+    /// Delete beside a held message: the phone's `retract`, so typed first
+    /// means too late and deleted first means never typed.
+    private func deleteHeld(_ clientId: String) {
+        coordinator.deleteHeldMessage(clientId: clientId) { [weak self] result in
+            DispatchQueue.main.async { self?.nowStore.finishDeletingHeld(clientId, result: result) }
         }
     }
 

@@ -57,6 +57,37 @@ final class AnswerProbeTests: XCTestCase {
         XCTAssertThrowsError(try AnswerProbe.parse(["x", "--probe-answer", "--session", "a", "--answers", "[]", "--bogus"]).get())
     }
 
+    func testParseImageMode() throws {
+        let a = ["ClaudePowerMode", "--probe-image", "--session", "s1", "--image", root + "/assets/red.png",
+                 "--image", root + "/assets/blue.jpg", "--caption", "", "--attach", "paste", "--early-return", "--keep",
+                 "--tmux-socket", "pageimgprobe"]
+        let o = try AnswerProbe.parseImage(a).get()
+        XCTAssertEqual(o.sessionId, "s1")
+        XCTAssertEqual(o.images.count, 2)
+        XCTAssertEqual(o.caption, "", "an empty caption is a caption")
+        XCTAssertEqual(o.attach, .paste)
+        XCTAssertTrue(o.earlyReturn)
+        XCTAssertTrue(o.keep)
+        XCTAssertEqual(o.tmuxSocket, "pageimgprobe")
+        XCTAssertTrue(AnswerProbe.isRequested(a))
+    }
+
+    func testParseImageModeErrors() {
+        func fails(_ extra: [String]) -> Bool {
+            if case .failure = AnswerProbe.parseImage(["ClaudePowerMode", "--probe-image"] + extra) { return true }
+            return false
+        }
+        XCTAssertTrue(fails(["--image", "/a.png"]), "--session is required")
+        XCTAssertTrue(fails(["--session", "s1"]), "at least one --image")
+        XCTAssertTrue(fails(["--session", "s1", "--image", "rel.png"]), "absolute image paths only")
+        XCTAssertTrue(fails(["--session", "s1", "--image", "/a.png", "--attach", "maybe"]))
+        XCTAssertTrue(fails(["--session", "s1", "--image", "/a.png", "--store", "/tmp/elsewhere"]), "the store stays under the probe root")
+        XCTAssertTrue(fails(["--session", "s1", "--image", "/a.png", "--tmux-socket", "a b"]))
+        XCTAssertTrue(fails(["--session", "s1"] + (0..<5).flatMap { ["--image", "/a\($0).png"] }), "4 images at most")
+        XCTAssertTrue(fails(["--session", "s1", "--image", "/a.png", "--probe-answer"]))
+        XCTAssertEqual(AnswerProbe.visibleEscapes("\u{1B}[39mx"), "␛[39mx")
+    }
+
     func testCapsOverrideChangesOnlyTheGate() {
         let iterm = InjectionExecutor.TerminalHost.iTerm(tty: "/dev/ttys001")
         // Page's own gate refuses Terminal.app; --caps overrides it, and nothing else about the host.

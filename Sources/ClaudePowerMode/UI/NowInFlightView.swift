@@ -146,6 +146,9 @@ struct NWInFlightRowView: View {
             if let c = composer {
                 NWFlightComposer(store: store, row: row, composer: c)
             }
+            if !row.held.isEmpty {
+                heldList
+            }
             if let r = receipt {
                 receiptLine(r)
             }
@@ -382,6 +385,31 @@ struct NWInFlightRowView: View {
         if !row.actions.canOpen, let why = row.actions.openBlocker { return why }
         if !row.actions.canType, let why = row.actions.typeBlocker { return "Can't steer here · \(why)" }
         return nil
+    }
+
+    // MARK: held messages
+
+    /// Messages a phone asked to type once this turn ends, each with a Delete.
+    private var heldList: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(row.held) { h in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Image(systemName: h.typing ? "keyboard" : "clock")
+                        .font(Font.system(size: 10, weight: .bold))
+                        .foregroundColor(NightWatch.Palette.sky.color)
+                    Text(h.line(now: store.now()))
+                        .font(NightWatch.Typo.monoMicro)
+                        .foregroundColor(NightWatch.Palette.textSecondary.color)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    NWActionButton(title: "Delete", enabled: !store.deletingHeld.contains(h.clientId), help: h.deleteHelp) {
+                        store.deleteHeld(h.clientId, on: row)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
     }
 
     // MARK: receipt

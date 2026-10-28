@@ -216,12 +216,14 @@ enum HerdrBridge {
 
     /// Pure. The request that types one keystroke into `paneId`. Single-line
     /// text is sent as typed (`pane.send_text`: no paste, no Enter) so "1"
-    /// picks a menu option; multi-line text goes through `pane.send_input`,
-    /// which pastes it when the app asked for bracketed paste, so its
-    /// newlines don't submit. Enter and Esc are keys of their own. Never
+    /// picks a menu option; multi-line text and `.paste` go through
+    /// `pane.send_input`, which pastes it when the app asked for bracketed
+    /// paste, so its newlines don't submit. Enter and Esc are keys of their own. Never
     /// `agent.prompt`: it refuses while the agent is blocked.
     static func sendRequest(id: String, paneId: String, key: Keystroke) -> String? {
         switch key {
+        case .paste(let s):
+            return s.isEmpty ? nil : request(id: id, method: "pane.send_input", params: ["pane_id": paneId, "text": s])
         case .text(let s) where s.contains("\n"):
             return request(id: id, method: "pane.send_input", params: ["pane_id": paneId, "text": s])
         case .text(let s):

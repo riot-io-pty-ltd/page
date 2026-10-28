@@ -51,6 +51,13 @@ enum PairingTokenManager {
         storageDirectory.appendingPathComponent("session_replay.json")
     }
 
+    /// Messages a phone asked to type once a session's turn ends
+    /// (`HeldOutbox`), so they survive a restart: the text, the session id and
+    /// times, 0600. Dropped when the session key changes.
+    static var heldOutboxFileURL: URL {
+        storageDirectory.appendingPathComponent("held_outbox.json")
+    }
+
     private static var storageDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let dir = appSupport.appendingPathComponent("ClaudePowerMode", isDirectory: true)

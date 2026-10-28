@@ -189,6 +189,8 @@ struct InFlightRow: Equatable, Identifiable {
     var working = true
     /// What the card shows: the step in words, the times, workflows, health.
     var card: InFlightCardInfo = .empty
+    /// Messages a phone asked to type once this turn ends, oldest first.
+    var held: [InFlightHeld] = []
 
     /// A session's card (a local model has only a compact row).
     var hasCard: Bool { kind == .session }
@@ -208,7 +210,35 @@ struct InFlightRow: Equatable, Identifiable {
     var finished: InFlightRow {
         InFlightRow(id: id, sessionId: sessionId, kind: kind, project: project, backend: backend, route: route,
                     doing: "no longer working", since: since, elapsed: elapsed, actions: actions, target: target,
-                    working: false, card: card)
+                    working: false, card: card, held: held)
+    }
+}
+
+/// A message a phone asked Page to type once the session's turn ends, as
+/// its card shows it, with a Delete (the phone's `retract`).
+struct InFlightHeld: Equatable, Identifiable {
+    let clientId: String
+    /// Redacted and clipped.
+    let text: String
+    let heldAt: Date
+    /// Being typed right now: Delete may come too late.
+    var typing = false
+
+    var id: String { clientId }
+
+    static let maxText = 60
+
+    /// Pure. "Held from your phone · “Then run the linter” · 4m".
+    func line(now: Date) -> String {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\n", with: " ")
+        let quoted = "“" + (t.count <= Self.maxText ? t : String(t.prefix(Self.maxText - 1)) + "…") + "”"
+        let head = typing ? "Typing it now" : "Held from your phone"
+        return [head, quoted, InFlightRows.elapsed(since: heldAt, now: now)].joined(separator: " · ")
+    }
+
+    var deleteHelp: String {
+        typing ? "Delete · Page is typing it now, so this may be too late"
+               : "Delete · Page won't type it when the turn ends"
     }
 }
 
@@ -243,7 +273,9 @@ enum InFlightRows {
                 doing: doing, since: since, elapsed: since.map { elapsed(since: $0, now: now) },
                 actions: .resolve(host: host), target: InFlightTarget(session: a),
                 card: .make(facts: known, backend: a.backend, stuckDetail: signals.stuck, rateLimitResetsAt: signals.rateLimit,
-                            fallbackStep: step, now: now))
+                            fallbackStep: step, now: now),
+                held: s.held.filter { $0.sessionId == a.sessionId }
+                    .map { InFlightHeld(clientId: $0.clientId, text: $0.text, heldAt: $0.heldAt, typing: $0.typing) })
         }
         rows += s.localModels.filter(\.busy).map { l in
             InFlightRow(
@@ -453,7 +485,7 @@ struct InFlightReceipt: Equatable {
         switch r.code {
         case .delivered: return InFlightReceipt(outcome: .typed, route: route, at: at)
         case .queued: return InFlightReceipt(outcome: .queued, route: route, at: at)
-        case .refused, .failed:
+        case .refused, .failed, .cancelled:
             return InFlightReceipt(outcome: .refused(r.detail.trimmingCharacters(in: .whitespacesAndNewlines)), route: route, at: at)
         }
     }

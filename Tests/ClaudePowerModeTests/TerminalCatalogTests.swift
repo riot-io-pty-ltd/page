@@ -215,6 +215,23 @@ final class TerminalCatalogTests: XCTestCase {
         XCTAssertEqual(C.Capabilities(reply: false).line, "")
     }
 
+    /// Photos attach only over the transport `--probe-image` proved headless: tmux (Claude Squad's agents are
+    /// tmux panes, not probed separately). Every other terminal sends the file's location until it is measured.
+    func testPhotosAttachOnlyOverTheMeasuredTmuxTransport() {
+        let pasted = C.entries.filter { $0.capabilities.attach == .paste }.map(\.id)
+        XCTAssertEqual(pasted, [.tmux, .claudeSquad])
+        for entry in C.entries where !pasted.contains(entry.id) {
+            XCTAssertEqual(entry.capabilities.attach, .pathOnly(C.pathOnlyReason), entry.name)
+        }
+        XCTAssertEqual(C.AttachSupport.paste.wire, "image")
+        XCTAssertEqual(C.AttachSupport.pathOnly("x").wire, "path")
+        XCTAssertNil(C.AttachSupport.notYet("x").wire)
+        XCTAssertEqual(C.AttachSupport.paste.line, "Photos from your phone: attached")
+        XCTAssertEqual(C.entry(.terminal).capabilities.attach.line,
+                       "Photos from your phone: as a file location — Claude gets the file's location and opens it itself")
+        for r in C.rows([:]) { XCTAssertEqual(r.attach, C.entry(r.id).capabilities.attach, r.name) }
+    }
+
     func testNamesLineListsTheHostsInCatalogOrder() {
         XCTAssertEqual(C.namesLine, "Terminal, iTerm2, tmux, cmux, WezTerm, kitty, Herdr and Claude Squad")
     }

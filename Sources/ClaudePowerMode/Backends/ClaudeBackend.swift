@@ -124,9 +124,10 @@ final class ClaudeBackend: AgentBackend {
     /// Rate limits to auto-resume in the live session once they reset.
     private var pendingAutoResumes: [String: RateLimitEvent] = [:]
     /// Text the phone asked to send when a limit resets (a reply to its
-    /// rate-limit page), by event id. Typed instead of the carry-on prompt,
-    /// even with auto-resume off.
-    private var queuedResetMessages: [String: String] = [:]
+    /// rate-limit page), by event id: typed instead of the carry-on prompt,
+    /// even with auto-resume off. And replies waiting for their background
+    /// resume to start. Either can be taken back (`retractHeld`).
+    private var heldReplies = HeldReplies()
     /// Prime the rate-limit watcher before the next scan (watcher just
     /// enabled), so the backlog of old events doesn't fire at once.
     private var needsRateLimitPrime = false
@@ -564,20 +565,41 @@ final class ClaudeBackend: AgentBackend {
             if !expired && UserPresence.isActive(within: max(120, cfg.idlePageOnlyWhenAwaySeconds)) { continue }
             lock.lock()
             pendingAutoResumes.removeValue(forKey: key)
-            let queued = queuedResetMessages.removeValue(forKey: key)
+            // Taken under the lock: a delete after this is too late, one before it wins.
+            let queued = heldReplies.takeForReset(eventId: key)
             lock.unlock()
-            guard cfg.autoResumeEnabled || queued != nil, !expired,
-                  !Self.rateLimitCleared(event, sessions: sessions) else { continue }
+            guard cfg.autoResumeEnabled || queued != nil else { continue }
+            if expired {
+                if let queued { reportHeldReset(queued.interventionId, success: false, detail: Self.resetExpiredDetail) }
+                continue
+            }
+            if Self.rateLimitCleared(event, sessions: sessions) {
+                if let queued { reportHeldReset(queued.interventionId, success: false, detail: Self.resetClearedDetail) }
+                continue
+            }
             guard let live = sessions.first(where: { $0.sessionId == event.sessionId }) else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) no longer running — leaving it to the scheduled job")
+                if let queued { reportHeldReset(queued.interventionId, success: false, detail: HeldOutbox.endedDetail) }
                 continue
             }
             guard live.status == .idle || live.status == .shell || live.status == .unknown else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) is \(live.status.rawValue) — not typing")
+                if let queued { reportHeldReset(queued.interventionId, success: false, detail: Self.resetBusyDetail) }
                 continue
             }
-            autoResumeLiveSession(event, prompt: queued ?? cfg.carryOnPrompt)
+            autoResumeLiveSession(event, prompt: queued?.text ?? cfg.carryOnPrompt, heldReplyId: queued?.interventionId)
         }
+    }
+
+    static let resetExpiredDetail = "Not sent — the limit reset over 2 hours ago and Page didn't type it"
+    static let resetClearedDetail = "Not sent — the session got going again before the limit reset"
+    static let resetBusyDetail = "Not sent — the session was busy when the limit reset"
+
+    /// The late word on a reply held until a rate limit reset (its first
+    /// `reply.injected` said `held_until_reset`): typed, or why not.
+    private func reportHeldReset(_ id: String, success: Bool, method: String = InjectionMethod.none.rawValue, detail: String) {
+        Logger.shared.log("Rate limit: held reply \(id) → success=\(success) \(detail)")
+        relay?.sendReplyInjected(interventionId: id, method: method, success: success, detail: detail, output: nil)
     }
 
     /// A written reply to a rate-limit page while the limit is still on:
@@ -588,17 +610,19 @@ final class ClaudeBackend: AgentBackend {
         lock.lock()
         defer { lock.unlock() }
         guard !text.isEmpty, let event = rateLimitEventsByPage[page.id], event.resetTime > Date() else { return nil }
-        queuedResetMessages[event.uniqueId] = text
+        heldReplies.holdForReset(eventId: event.uniqueId, text: text, interventionId: reply.interventionId)
         pendingAutoResumes[event.uniqueId] = event
         let f = DateFormatter()
         f.timeStyle = .short
         f.dateStyle = Calendar.current.isDateInToday(event.resetTime) ? .none : .short
         Logger.shared.log("Rate limit: queued a \(text.count)-char message for \(event.sessionId.prefix(8)) at reset")
-        return InjectionResult(method: .none, success: true, output: "queued for reset",
+        // `held_until_reset`: still on the Mac, and the phone can take it back (`retractHeld`).
+        return InjectionResult(method: .heldUntilReset, success: true, output: "queued for reset",
                                detail: "Will send it when the limit resets at \(f.string(from: event.resetTime))")
     }
 
-    private func autoResumeLiveSession(_ event: RateLimitEvent, prompt: String) {
+    /// `heldReplyId`: the phone's reply this types (held until the reset), told the outcome.
+    private func autoResumeLiveSession(_ event: RateLimitEvent, prompt: String, heldReplyId: String? = nil) {
         let req = InjectionExecutor.ClaudeReplyRequest(
             interventionId: "\(event.sessionId)-autoresume", sessionId: event.sessionId,
             action: "custom", text: prompt, kind: .idle,
@@ -606,15 +630,17 @@ final class ClaudeBackend: AgentBackend {
         )
         let registry = self.registry
         let scheduler = self.scheduler
-        injectionQueue.async {
+        injectionQueue.async { [weak self] in
             guard case .live(let session, let table) = InjectionExecutor.resolveClaudeTarget(req, registry: registry) else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) gone before typing")
+                if let id = heldReplyId { self?.reportHeldReset(id, success: false, detail: HeldOutbox.endedDetail) }
                 return
             }
             // Re-checked on the injection queue: only type into an idle
             // session, never over a prompt or a turn the user started.
             guard session.status == .idle || session.status == .shell || session.status == .unknown else {
                 Logger.shared.log("Auto-resume: session \(event.sessionId.prefix(8)) became \(session.status.rawValue) — skipped")
+                if let id = heldReplyId { self?.reportHeldReset(id, success: false, detail: Self.resetBusyDetail) }
                 return
             }
             let r = InjectionExecutor.deliverToLiveSession(req, session: session, processTable: table, registry: registry)
@@ -622,6 +648,11 @@ final class ClaudeBackend: AgentBackend {
             // Resumed live — make sure the launchd fallback can't also fire
             // (e.g. if the terminal is closed before its run time).
             if r.success { scheduler.cancel(sessionId: event.sessionId) }
+            if let id = heldReplyId {
+                self?.reportHeldReset(id, success: r.success, method: r.method.rawValue,
+                                      detail: r.success ? "Typed when the limit reset — \(r.detail.isEmpty ? "Sent" : r.detail)"
+                                                        : HeldOutbox.notSent(r.detail.isEmpty ? "Couldn't type it" : r.detail))
+            }
         }
     }
 
@@ -693,12 +724,26 @@ final class ClaudeBackend: AgentBackend {
                     self?.finishReply(id, InjectionResult(method: .none, success: false, output: "session ended",
                                                           detail: "Session has ended"))
                 } else if let text = Self.headlessText(for: reply) {
+                    // Waiting for its run: the phone may still take it back (`retractHeld`).
+                    self?.lock.lock()
+                    self?.heldReplies.queueLaunch(id)
+                    self?.lock.unlock()
                     self?.headlessQueue.async {
+                        // Claimed right before launching: a delete that came first
+                        // has already reported the reply, so nothing more is said.
+                        guard let self else { return }
+                        self.lock.lock()
+                        let wanted = self.heldReplies.claimLaunch(id)
+                        self.lock.unlock()
+                        guard wanted else {
+                            Logger.shared.log("Reply for \(id): deleted from the phone before its background resume started")
+                            return
+                        }
                         // Re-checked here, right before launching: the queue
                         // may have waited behind another 15-minute resume,
                         // and the user may have reopened the session since.
                         guard case .ended = InjectionExecutor.resolveClaudeTarget(req, registry: registry) else {
-                            self?.finishReply(id, InjectionResult(method: .none, success: false, output: "session live again",
+                            self.finishReply(id, InjectionResult(method: .none, success: false, output: "session live again",
                                                                   detail: "The session is running again — reply again to type into it"))
                             return
                         }
@@ -709,11 +754,11 @@ final class ClaudeBackend: AgentBackend {
                             cmuxEntry: CmuxBridge.readHookSessions(agent: .claude)?.entries[req.sessionId.lowercased()],
                             backgroundOwnerPids: registry.liveBackgroundOwnerPids(forSessionId: req.sessionId, processTable: table),
                             providerEvidence: ResumeProviderGate.evidence(sessionId: req.sessionId, transcript: transcript)) {
-                            self?.finishReply(id, InjectionResult(method: .none, success: false, output: "headless blocked: \(why)", detail: why))
+                            self.finishReply(id, InjectionResult(method: .none, success: false, output: "headless blocked: \(why)", detail: why))
                             return
                         }
                         let r = InjectionExecutor.injectHeadless(sessionId: req.sessionId, text: text, transcript: transcript)
-                        self?.finishReply(id, r)
+                        self.finishReply(id, r)
                     }
                 } else {
                     self?.finishReply(id, InjectionResult(method: .none, success: false, output: "empty reply",
@@ -868,13 +913,53 @@ final class ClaudeBackend: AgentBackend {
     /// Text typed on the phone's Sessions screen. Runs the input gate and
     /// delivers on the injection queue (one at a time with replies and the
     /// battery pause). Never a background resume. `completion` runs on
-    /// the injection queue.
+    /// the injection queue. `held`: a held message (`hold-v1`), typed only
+    /// into an idle session and only if no delete got there first.
     func remoteInput(sessionId: String, clientId: String, text: String, interventionId: String?,
-                     completion: @escaping (SessionCommandResult) -> Void) {
+                     held: HeldClaim? = nil, completion: @escaping (SessionCommandResult) -> Void) {
         let io = remoteIO()
         injectionQueue.async {
             completion(SessionInputGate.runClaudeInput(sessionId: sessionId, clientId: clientId, text: text,
-                                                       interventionId: interventionId, io: io))
+                                                       interventionId: interventionId, io: io, held: held))
+        }
+    }
+
+    /// The phone takes back a reply this backend is holding for page `id`
+    /// (`retract` with an `interventionId`): a written reply to a rate-limit
+    /// page waiting for the reset, or one waiting for its background resume.
+    /// Decided under `lock`, against the paths that would type it, so exactly
+    /// one side wins. A deleted reply is reported to the relay as `retracted`.
+    func retractHeld(interventionId id: String) -> HeldRetract {
+        lock.lock()
+        let decision = heldReplies.retract(id)
+        let carryOn: Bool
+        switch decision {
+        case .resetDeleted(let eventId):
+            // A fresh reply to the page isn't a duplicate of one never typed.
+            deliveredReplies.remove(id)
+            repliedIds.remove(id)
+            // Without the phone's text the reset falls back to the usual rule.
+            carryOn = _config.autoResumeEnabled && pendingAutoResumes[eventId] != nil
+        case .launchDeleted, .resetTaken, .notHeld:
+            carryOn = false
+        }
+        let inFlight = inFlightReplies.contains(id)
+        let delivered = deliveredReplies.contains(id)
+        lock.unlock()
+        switch decision {
+        case .resetDeleted:
+            Logger.shared.log("Rate limit: held reply \(id) deleted from the phone")
+            finishReply(id, InjectionResult(method: .retracted, success: false, output: "retracted", detail: HeldOutbox.deletedDetail))
+            return .deleted(carryOn ? HeldRetract.resetDeletedWithCarryOn : HeldRetract.resetDeletedNothing)
+        case .launchDeleted:
+            finishReply(id, InjectionResult(method: .retracted, success: false, output: "retracted", detail: HeldOutbox.deletedDetail))
+            return .deleted(HeldOutbox.deletedDetail)
+        case .resetTaken:
+            return .tooLate(HeldRetract.resetTooLate)
+        case .notHeld:
+            if inFlight { return .tooLate(HeldRetract.alreadyRunning) }
+            if delivered { return .tooLate(HeldRetract.alreadyDelivered) }
+            return .notFound
         }
     }
 
@@ -885,6 +970,18 @@ final class ClaudeBackend: AgentBackend {
         let io = AnswerDelivery.liveIO(registry: registry)
         injectionQueue.async {
             completion(AnswerDelivery.run(sessionId: sessionId, request: request, io: io))
+        }
+    }
+
+    /// Photos from the phone's session chat (`images-v1`): pasted where the
+    /// terminal's paste route is measured, else sent as file locations
+    /// (`ImageDelivery`). On the injection queue; `completion` runs there.
+    func remoteImages(sessionId: String, clientId: String, images: [AssembledImage], text: String,
+                      interventionId: String?, completion: @escaping (SessionCommandResult) -> Void) {
+        let io = ImageDelivery.liveIO(registry: registry)
+        injectionQueue.async {
+            completion(ImageDelivery.run(sessionId: sessionId, clientId: clientId, images: images, caption: text,
+                                         interventionId: interventionId, io: io))
         }
     }
 

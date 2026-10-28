@@ -79,6 +79,28 @@ final class SessionTranscriptTests: XCTestCase {
         XCTAssertNotNil(snap.entries[0].at)
     }
 
+    /// A message pasted with photos (`images-v1`): Claude Code stores each image inline as base64, a line of
+    /// megabytes. The phone gets the text and a count, never the image data.
+    func testPastedImagesAreCountedNeverSent() throws {
+        let base64 = String(repeating: "iVBORw0KGgo", count: 140_000)   // ~1.5 MB
+        let path = write([
+            user("u1", [["type": "text", "text": "[Image #1] [Image #2]what are these?"],
+                        ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": base64]],
+                        ["type": "image", "source": ["type": "base64", "media_type": "image/jpeg", "data": base64]]],
+                 extra: ["imagePasteIds": [1, 2]]),
+            user("u2", [["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "QQ=="]]]),
+            user("u3", "plain words"),
+        ])
+        let snap = try XCTUnwrap(SessionTranscript.read(path: path, format: .claude, tailBytes: 8 * 1024 * 1024))
+        XCTAssertEqual(snap.entries.map(\.text), ["[Image #1] [Image #2]what are these?", "[Image]", "plain words"])
+        XCTAssertEqual(snap.entries.map(\.images), [2, 1, nil])
+        XCTAssertEqual(snap.entries[0].jsonObject["images"] as? Int, 2)
+        XCTAssertNil(snap.entries[2].jsonObject["images"])
+        let data = try XCTUnwrap(SessionTranscript.plaintext(header: ["kind": "transcript"], snapshot: snap))
+        XCTAssertLessThanOrEqual(data.count, SessionTranscript.maxPlaintextBytes)
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("iVBORw0KGgo"), "no image data in the plaintext")
+    }
+
     func testToolRowsAreOneLiners() {
         XCTAssertEqual(SessionTranscript.toolLine(InterventionDetector.describeToolUse(
             name: "Edit", input: ["file_path": "Sources/App.swift", "old_string": "a\nb", "new_string": "c"])), "Edit: Sources/App.swift")

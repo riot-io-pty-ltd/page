@@ -15,6 +15,9 @@ import Foundation
 ///   - answer a question dialog by pressing its keys: `AnswerDelivery.capabilities(of:)`, each host measured
 ///     end to end on Claude Code 2.1.311 (docs/SESSIONS-PROTOCOL.md). `AnswerSupport` here is the same fact in
 ///     words, and `AnswerDelivery.takesAnswerKeys` reads it, so the phone's list can't drift from the gate.
+///   - photos from the phone (`attach`): `ImageDelivery` reads it for both the gate and the list's `attach`
+///     field. `.paste` only where a headless probe on a throwaway session proved the photo attaches
+///     (docs/SESSIONS-PROTOCOL.md "Images"); every other terminal sends the file's location.
 enum TerminalCatalog {
     enum ID: String, CaseIterable, Identifiable, Equatable {
         case terminal, iTerm, tmux, cmux, wezterm, kitty, herdr, claudeSquad
@@ -55,12 +58,44 @@ enum TerminalCatalog {
         }
     }
 
+    /// How a photo from the phone reaches Claude in this terminal (`images-v1`).
+    enum AttachSupport: Equatable {
+        /// Pasted as a path, so Claude attaches it as an image (`[Image #1]`); measured.
+        case paste
+        /// Its location is typed as text and Claude opens the file itself (short reason).
+        case pathOnly(String)
+        /// No photos here, with why (short reason).
+        case notYet(String)
+
+        /// The list row's `attach`: "image", "path", or nil (no photo button).
+        var wire: String? {
+            switch self {
+            case .paste: return "image"
+            case .pathOnly: return "path"
+            case .notYet: return nil
+            }
+        }
+
+        /// "Photos: attached" / "Photos: as a file location — why" / "Photos: not yet — why".
+        var line: String {
+            switch self {
+            case .paste: return "Photos from your phone: attached"
+            case .pathOnly(let why): return "Photos from your phone: as a file location — \(why)"
+            case .notYet(let why): return "Photos from your phone: not yet — \(why)"
+            }
+        }
+    }
+
+    /// Not measured: Claude gets the file's location and opens it itself.
+    static let pathOnlyReason = "Claude gets the file's location and opens it itself"
+
     struct Capabilities: Equatable {
         var reply = true
         var viewScreen = false
         var interrupt = false
         var startSessions = false
         var answer: AnswerSupport = .notYet("not measured here yet")
+        var attach: AttachSupport = .pathOnly(TerminalCatalog.pathOnlyReason)
 
         /// "Reply · see the screen · stop a turn · start sessions".
         var line: String {
@@ -103,38 +138,52 @@ enum TerminalCatalog {
 
     static let nothingToSetUp = "Nothing to set up — run Claude inside it"
 
+    /// tmux and Claude Squad panes (the same transport). Measured in tmux with `--probe-image` on throwaway Claude
+    /// Code 2.1.312 sessions in a detached tmux server: one `paste-buffer -p -r` of the paths and the caption shows
+    /// one `[Image #n]` chip per photo, and the transcript's user record carries the image blocks. Claude Squad
+    /// rides on the same transport; no Squad pane was probed.
+    static let tmuxAttach: AttachSupport = .paste
+
     static let entries: [Entry] = [
         Entry(id: .terminal, name: "Terminal", symbol: "macwindow",
               capabilities: Capabilities(reply: true, viewScreen: false, interrupt: false, startSessions: false,
-                                         answer: .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2")),
+                                         answer: .notYet("Terminal adds a Return to every key Page types; use tmux or iTerm2"),
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .automation, wireHost: "Terminal", downloadURL: URL(string: "https://support.apple.com/guide/terminal/welcome/mac")!,
               nothingToSetUp: "Built into macOS"),
         Entry(id: .iTerm, name: "iTerm2", symbol: "terminal",
-              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: false, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .automation, wireHost: "iTerm", downloadURL: URL(string: "https://iterm2.com")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .tmux, name: "tmux", symbol: "rectangle.split.3x1",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: tmuxAttach),
               setup: .none, wireHost: "tmux", downloadURL: URL(string: "https://github.com/tmux/tmux/wiki")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .cmux, name: "cmux", symbol: "square.grid.2x2",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: true, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: true, answer: .yes,
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .cmuxSocket, wireHost: "cmux", downloadURL: URL(string: "https://cmux.com")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .wezterm, name: "WezTerm", symbol: "terminal.fill",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .none, wireHost: "WezTerm", downloadURL: URL(string: "https://wezterm.org")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .kitty, name: "kitty", symbol: "pawprint",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .kittyConfig, wireHost: "kitty", downloadURL: URL(string: "https://sw.kovidgoyal.net/kitty/")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .herdr, name: "Herdr", symbol: "rectangle.3.group",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: .pathOnly(pathOnlyReason)),
               setup: .none, wireHost: "Herdr", downloadURL: URL(string: "https://github.com/herdrdev/herdr")!,
               nothingToSetUp: nothingToSetUp),
         Entry(id: .claudeSquad, name: "Claude Squad", symbol: "person.3",
-              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes),
+              capabilities: Capabilities(reply: true, viewScreen: true, interrupt: true, startSessions: false, answer: .yes,
+                                         attach: tmuxAttach),
               setup: .none, wireHost: ClaudeSquad.hostName, downloadURL: URL(string: "https://github.com/smtg-ai/claude-squad")!,
               nothingToSetUp: nothingToSetUp),
     ]
@@ -300,6 +349,8 @@ enum TerminalCatalog {
         let capabilityLine: String
         /// Answering a question dialog from the phone: yes, with limits, or not yet.
         let answer: AnswerSupport
+        /// Photos from the phone: attached, as a file location, or not yet.
+        var attach: AttachSupport = .pathOnly(TerminalCatalog.pathOnlyReason)
         /// What is true now: the setup state, or what to do.
         let note: String
         let status: Status
@@ -322,6 +373,7 @@ enum TerminalCatalog {
             return Row(id: entry.id, name: entry.name, symbol: entry.symbol,
                        capabilityLine: entry.capabilities.line,
                        answer: entry.capabilities.answer,
+                       attach: entry.capabilities.attach,
                        note: note(entry, f, status, pageAddedKittyLines: pageAddedKittyLines),
                        status: status,
                        action: action(entry, f, status, pageAddedKittyLines: pageAddedKittyLines),
