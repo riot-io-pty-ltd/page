@@ -388,17 +388,21 @@ extension WorkflowOrbit.NodeState {
     static func start(_ run: String, at t: Double) -> Double { book.start(run, now: t) }
 }
 
-/// The Workflows lens's clock: seconds since `origin` (the entrance),
-/// redrawn at most 30 times a second while `until` is ahead (for ever while
-/// the run runs, else until the entrance and any one-shot have played),
-/// then one settled frame with the clock paused. The harness pins it
-/// (`.workflow`); it holds still while the room is covered or the app is not
-/// active. Ticking or not it is the one view, so what it draws keeps its
-/// identity (a text selection, VoiceOver's place) as the clock starts and stops.
-private struct NWWorkflowClock<Content: View>: View {
+/// The Workflows lens's clock (and Now's In flight cards'): seconds since
+/// `origin` (the entrance), redrawn at most `fps` (≤ 30) times a second
+/// while `until` is ahead (for ever while the run runs, else until the
+/// entrance and any one-shot have played), then one settled frame with the
+/// clock paused. The harness pins it (`.workflow`, `.inflight`); it holds
+/// still while its screen is covered, the app is not active, or `holding`
+/// (a card scrolled out of sight). Ticking or not it is the one view, so
+/// what it draws keeps its identity (a text selection, VoiceOver's place)
+/// as the clock starts and stops.
+struct NWWorkflowClock<Content: View>: View {
     var origin: Double
     var until: Double
     var pinned: Double?
+    var fps: Double = 30
+    var holding = false
     @ViewBuilder var content: (Double) -> Content
     @State private var stopped: Key?
     @Environment(\.nwAnimationsPaused) private var covered
@@ -412,7 +416,7 @@ private struct NWWorkflowClock<Content: View>: View {
     var body: some View {
         let key = Key(origin: origin, until: until)
         let ticking = pinned == nil && stopped != key && Date().timeIntervalSinceReferenceDate - origin < until
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !ticking || covered || scenePhase != .active)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / max(1, min(fps, 30)), paused: !ticking || holding || covered || scenePhase != .active)) { tl in
             content(pinned ?? ((ticking ? tl.date : Date()).timeIntervalSinceReferenceDate - origin))
         }
         .task(id: key) {

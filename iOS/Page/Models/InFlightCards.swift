@@ -279,6 +279,30 @@ enum FlightHealth: Equatable {
 
 // MARK: - Card
 
+/// Where a workflow line stands, as a feed says: running, or ended done,
+/// failed or stopped. Only ever read from a status the Mac (or an older
+/// phone) sent: a line that is simply no longer listed has none, because it
+/// also leaves when its run failed, the card folds under Show fewer or a
+/// reconnect sends a partial list.
+enum FlightLineStatus: String, Equatable {
+    case running, done, failed, stopped
+
+    var isEnded: Bool { self != .running }
+
+    /// A run's status word: completed, failed, killed (and the like). A
+    /// stalled run has not ended (it may go on), and a word Page does not
+    /// know is no status at all. Pure.
+    static func from(run status: String) -> FlightLineStatus? {
+        switch status.lowercased() {
+        case "running": return .running
+        case "completed", "complete", "done", "finished", "succeeded": return .done
+        case "failed", "error", "errored": return .failed
+        case "killed", "stopped", "cancelled", "canceled": return .stopped
+        default: return nil
+        }
+    }
+}
+
 /// One workflow line on a card: "Review changes · 3/5 agents".
 struct FlightWorkflowLine: Equatable, Identifiable {
     let id: String
@@ -288,8 +312,25 @@ struct FlightWorkflowLine: Equatable, Identifiable {
     let progress: String?
     /// 0...1 for the thin bar; nil with no total.
     let fraction: Double?
+    /// Running, or how it ended (an ended line is only shown for a moment, by Now's grace).
+    var status: FlightLineStatus = .running
+    /// The run's own id, when the line came from the watched session's full runs.
+    var runId: String? = nil
 
     var text: String { [name, phase, progress].compactMap { $0 }.joined(separator: " · ") }
+    /// Who the line is from one look to the next: its run's id where there
+    /// is one, else its name (the list's ids are positions, which shift).
+    var key: String { runId ?? name }
+}
+
+/// A workflow line seen ending a moment ago, kept on its card for Now's
+/// grace window (`NowMotion.FlightGrace`): as it was last drawn, now with
+/// how it ended, where it stood among the card's lines, and when the phone
+/// saw it end.
+struct FlightClosingLine: Equatable {
+    let line: FlightWorkflowLine
+    let index: Int
+    let endedAt: Date
 }
 
 /// What a working session shows beyond its row: the step in words, the
@@ -312,6 +353,13 @@ struct InFlightCard: Equatable {
     var workflows: [FlightWorkflowLine] = []
     /// How many workflows run in all; the list sends at most 3 lines of them.
     var workflowTotal: Int = 0
+    /// Lines a feed says have ended (done, failed, stopped). Never drawn as
+    /// they are: Now's grace reads them, and keeps one on the card for a
+    /// moment only when it saw that line running just before.
+    var ended: [FlightWorkflowLine] = []
+    /// The lines in that grace window, put back by `NowMotion.FlightGrace`.
+    /// Not counted in the heading or the spoken line.
+    var closing: [FlightClosingLine] = []
 
     /// The time line's text: "working 12m · session 2h 10m" or "active 4m ago".
     var timeText: String? {
@@ -347,9 +395,18 @@ struct InFlightCard: Equatable {
         }
         let health = FlightHealth.classify(state: s.state, flight: f, hasStuckPage: hasStuckPage, lastActivityAt: s.lastActivityAt, now: now)
         let running = runs.filter(\.isRunning)
+        let briefs = f?.workflows ?? []
         let lines: [FlightWorkflowLine] = running.isEmpty
-            ? (f?.workflows ?? []).filter(\.running).enumerated().map { i, w in line(id: "\(i)-\(w.name)", name: w.name, phase: w.phase, done: w.done, total: w.total) }
-            : running.map { r in line(id: r.id, name: r.name, phase: r.phase, done: r.done, total: r.total) }
+            ? briefs.filter(\.running).enumerated().map { i, w in line(id: "\(i)-\(w.name)", name: w.name, phase: w.phase, done: w.done, total: w.total) }
+            : running.map { r in line(id: r.id, name: r.name, phase: r.phase, done: r.done, total: r.total, runId: r.id) }
+        // How lines ended, where a feed says so: the full runs' status, else an older phone's word on the list.
+        let ended = runs.compactMap { r -> FlightWorkflowLine? in
+            guard let st = FlightLineStatus.from(run: r.status), st.isEnded else { return nil }
+            return line(id: r.id, name: r.name, phase: r.phase, done: r.done, total: r.total, runId: r.id, status: st)
+        } + (running.isEmpty ? briefs.compactMap { w -> FlightWorkflowLine? in
+            guard let st = w.status.flatMap(FlightLineStatus.from(run:)), st.isEnded else { return nil }
+            return line(id: "ended-\(w.name)", name: w.name, phase: w.phase, done: w.done, total: w.total, status: st)
+        } : [])
         let turn = FlightClock.turn(since: f?.busySince, now: now)
         return InFlightCard(
             now: nowLine, previous: previous, turn: turn, session: FlightClock.session(since: f?.startedAt, now: now),
@@ -357,12 +414,13 @@ struct InFlightCard: Equatable {
             model: f?.model.map(modelName), health: health,
             healthLine: healthLine(health, note: f?.healthNote, quietFor: (f?.stepSince ?? s.lastActivityAt).map { now.timeIntervalSince($0) },
                                    resetsAt: f?.resetsAt, now: now, explicitQuiet: f?.stepSince != nil),
-            workflows: lines, workflowTotal: running.isEmpty ? (f?.workflowsRunning ?? 0) : 0)
+            workflows: lines, workflowTotal: running.isEmpty ? (f?.workflowsRunning ?? 0) : 0, ended: ended)
     }
 
-    private static func line(id: String, name: String, phase: String?, done: Int, total: Int) -> FlightWorkflowLine {
+    private static func line(id: String, name: String, phase: String?, done: Int, total: Int, runId: String? = nil,
+                             status: FlightLineStatus = .running) -> FlightWorkflowLine {
         FlightWorkflowLine(id: id, name: name, phase: phase, progress: total > 0 ? "\(min(done, total))/\(total) agents" : nil,
-                           fraction: total > 0 ? min(1, Double(done) / Double(total)) : nil)
+                           fraction: total > 0 ? min(1, Double(done) / Double(total)) : nil, status: status, runId: runId)
     }
 
     /// "Looks stuck · no progress for 15 min", "Rate limited · resets 03:00",

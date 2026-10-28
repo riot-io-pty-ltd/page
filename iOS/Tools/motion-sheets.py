@@ -79,6 +79,65 @@ SHEETS = {
         ("motion-brief@1.2", "1.2 s"),
         ("motion-brief@2.6", "holds"),
     ]),
+    # In flight: the section scrolled to the top (the strip, then the first card).
+    "6a-inflight-enter": ((0, 20, 394, 506), [
+        ("motion-inflight-enter@0.0", "0 ms · rises"),
+        ("motion-inflight-enter@0.35", "350 ms · arcs sweep"),
+        ("motion-inflight-enter@0.7", "700 ms"),
+        ("motion-inflight-enter@1.4", "settled · breathing"),
+        ("motion-inflight-enter@3.0", "glint, comet"),
+    ]),
+    "6b-inflight-advance": ((0, 20, 394, 506), [
+        ("motion-inflight-advance@1.4", "3/5"),
+        ("motion-inflight-advance@2.0", "4/5 · flare, new step"),
+        ("motion-inflight-advance@2.2", "spring"),
+        ("motion-inflight-advance@2.5", "timeline moves down"),
+        ("motion-inflight-advance@3.6", "settled"),
+    ]),
+    "6c-inflight-complete": ((0, 20, 394, 506), [
+        ("motion-inflight-complete@1.4", "1/4 running"),
+        ("motion-inflight-complete@2.2", "done · springs closed"),
+        ("motion-inflight-complete@2.5", "✓ done · pulse"),
+        ("motion-inflight-complete@3.75", "folds away"),
+        ("motion-inflight-complete@4.5", "gone"),
+    ]),
+    "6d-inflight-vanish-stuck": ((0, 20, 394, 506), [
+        ("motion-inflight-vanish@1.4", "before"),
+        ("motion-inflight-vanish@2.2", "no status · just leaves"),
+        ("motion-inflight-stuck@1.4", "stuck · still"),
+        ("motion-inflight-stuck@3.6", "still · amber"),
+    ]),
+    # The rest of Now: the Runway and the Horizon's words at the top, the chips and Settled further down.
+    "7a-now-enter": ((0, 200, 394, 220), [
+        ("motion-now-enter@0.0", "0 ms · the line starts"),
+        ("motion-now-enter@0.2", "200 ms · markers pop"),
+        ("motion-now-enter@0.5", "500 ms"),
+        ("motion-now-enter@1.4", "drawn · NOW breathes"),
+    ]),
+    "7b-now-chips": ((0, 130, 394, 200), [
+        ("motion-now-enter-low@0.0", "0 ms · from 0"),
+        ("motion-now-enter-low@0.2", "200 ms · counting"),
+        ("motion-now-enter-low@0.5", "500 ms · ✓ draws"),
+        ("motion-now-enter-low@1.0", "counted"),
+    ]),
+    "7c-now-change": ((0, 220, 394, 200), [
+        ("motion-now-change@1.4", "2 need you"),
+        ("motion-now-change@2.2", "3 · cutoff glides"),
+        ("motion-now-change@2.5", "glide"),
+        ("motion-now-change@3.0", "settled"),
+    ]),
+    "7d-now-settled": ((0, 280, 394, 260), [
+        ("motion-now-change-low@1.4", "before"),
+        ("motion-now-change-low@2.2", "a receipt lands"),
+        ("motion-now-change-low@2.5", "✓ draws"),
+        ("motion-now-change-low@3.0", "settled"),
+    ]),
+    "7e-now-runway": ((0, 300, 394, 120), [
+        ("motion-now-runway@1.4", "reset 01:12, now"),
+        ("motion-now-runway@2.2", "reaches now · flash"),
+        ("motion-now-runway@2.5", "the next pops in"),
+        ("motion-now-runway@3.0", "settled"),
+    ]),
 }
 
 

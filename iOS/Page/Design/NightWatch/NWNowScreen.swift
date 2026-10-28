@@ -101,6 +101,12 @@ struct NWNowScreen: View {
     @Environment(\.nwMotion) private var motionPin
     /// The time of day the Horizon's sky is drawn at.
     @Environment(\.nwDaypart) private var daypart
+    /// What the rest of Now has seen since it appeared (`NowMotion.NowScene`):
+    /// the Runway, the Horizon's words, Settled's arrivals, the chips.
+    @State private var nowScene = NowMotion.NowScene()
+    @Environment(\.nwNowScript) private var nowScript
+    @Environment(\.nwFixedPhase) private var fixedPhase
+    @Environment(\.nwReduceMotion) private var forcedReduceMotion
 
     var body: some View {
         GeometryReader { geo in
@@ -114,6 +120,8 @@ struct NWNowScreen: View {
                         // Cards below a new arrival make room on its spring; nothing above moves.
                         .animation(reduceMotion ? nil : .spring(response: ApproachModel.response, dampingFraction: ApproachModel.damping),
                                    value: NWStreamSpring(rows: rowIds, horizon: horizonHeight))
+                        // The New pill comes and goes (the cards below make room); a row change keeps the spring above.
+                        .animation(queuedAnimation, value: data.queuedNew > 0)
                     Spacer().frame(height: 120)
                 }
                 .coordinateSpace(name: nwStreamSpace)
@@ -121,6 +129,11 @@ struct NWNowScreen: View {
             .onAppear { if seen == nil, data.inboxLoaded { seen = Set(rowIds) } }
             .onChange(of: data.inboxLoaded) { _, loaded in if loaded, seen == nil { seen = Set(rowIds) } }
             .onChange(of: rowIds) { _, ids in if seen != nil { seen = Set(ids) } }
+            .onAppear { if motionLive { nowScene = motion.scene } }
+            .onChange(of: data.look) { _, look in
+                guard motionLive else { return }
+                nowScene.observe(look, at: Date().timeIntervalSinceReferenceDate, shown: { NWNowBook.shown($0, at: $1) })
+            }
             .onAppear {
                 guard let id = data.scrollToId else { return }
                 DispatchQueue.main.async { proxy.scrollTo(id, anchor: .top) }
@@ -149,6 +162,33 @@ struct NWNowScreen: View {
     }
 
     private var quiet: Bool { data.model.rows.isEmpty }
+
+    /// On the display clock (not the harness).
+    private var motionLive: Bool { motionPin?.kind != .now && fixedPhase == nil }
+
+    /// The rest of Now at its moment. Pinned (the harness): the script
+    /// replayed up to then, as the live screen would have seen it; the
+    /// harness's still screens draw it long settled. Live: the scene with
+    /// this look already in it, so the frame that first shows a change draws it.
+    private var motion: NWNowMotion {
+        let rm = reduceMotion || forcedReduceMotion
+        if let p = motionPin.flatMap({ $0.kind == .now ? $0.time : nil }), let script = nowScript, let r = NowMotion.replay(script, until: p) {
+            return NWNowMotion(scene: r.scene, pinned: script.base + p, reduceMotion: rm)
+        }
+        if let still = fixedPhase {
+            return NWNowMotion(scene: NowMotion.NowScene(opening: data.look, at: 0, shown: { _, _ in -100 }), pinned: still, reduceMotion: rm)
+        }
+        var s = nowScene
+        s.observe(data.look, at: Date().timeIntervalSinceReferenceDate, shown: { NWNowBook.shown($0, at: $1) })
+        return NWNowMotion(scene: s, reduceMotion: rm)
+    }
+
+    /// The NOW dot breathes on the pulse's 4 s while agents work: still when nothing runs, at dusk, or with a problem showing.
+    private var runwayBreath: Double? {
+        let m = data.model
+        guard data.problem == nil, !m.paused, m.workingCount > 0 else { return nil }
+        return PulseModel.baseBreath
+    }
     private var rowIds: [String] { data.model.rows.map(\.id) }
 
     /// The pulse behind the Horizon: what works, what waits and for how long.
@@ -183,11 +223,11 @@ struct NWNowScreen: View {
         return ZStack(alignment: .top) {
             NWHorizon(palette: p.map { $0.tone == .slate ? .asleep : .problem } ?? NightWatch.AuroraPalette(m.mood, daypart: daypart),
                       pulse: p.map { $0.tone == .slate ? .hollowSlate : .hollowAmber } ?? NWPulseOrb.Style(m.mood),
-                      headline: p?.title ?? data.handover ?? m.headline,
-                      subline: p?.subtitle ?? (data.handover == nil ? m.subline : m.headline),
+                      headline: data.horizonHeadline, subline: data.horizonSubline,
                       footnote: p == nil && quiet && m.headline == "All quiet" ? "Page is keeping watch. Go to sleep." : nil,
                       height: height, topInset: inset, model: pulseModel,
-                      workingJump: workingJump(problem: p).map { j in (j.jump, j.rest, { scrollRequest = HeaderJump.sectionId }) })
+                      workingJump: workingJump(problem: p).map { j in (j.jump, j.rest, { scrollRequest = HeaderJump.sectionId }) },
+                      motion: motion)
             NWChromeGlassGroup {
                 HStack(alignment: .top) {
                     NWMacChip(model: data.chip, onTap: actions.tapChip)
@@ -242,7 +282,7 @@ struct NWNowScreen: View {
         ForEach(data.banners.filter { b in !(data.problem?.replacesBanners.contains(b.id) ?? false) }) { b in NWBannerCard(banner: b, onAction: actions.banner) }
         // With the Mac out of reach the Runway would be a stale promise, so it steps aside.
         if data.problem?.kind != .macAsleep {
-            NWGlassCard(radius: 24, padding: 6) { NWRunwayBar(model: data.model.runway) }
+            NWGlassCard(radius: 24, padding: 6) { NWNowRunway(model: data.model.runway, motion: motion, breathPeriod: runwayBreath) }
                 .contentShape(Rectangle())
                 .onTapGesture(perform: actions.tapRunway)
                 .accessibilityAddTraits(.isButton)
@@ -253,7 +293,10 @@ struct NWNowScreen: View {
             NWBriefCard(brief: b, expanded: data.briefExpanded || quiet, onToggle: actions.toggleBrief,
                         onDismiss: actions.dismissBrief, onReview: reviewFinished)
         }
-        if data.queuedNew > 0 { NWNewPill(count: data.queuedNew, onTap: actions.showNew).frame(maxWidth: .infinity) }
+        if data.queuedNew > 0 {
+            NWNewPill(count: data.queuedNew, onTap: actions.showNew).frame(maxWidth: .infinity)
+                .transition(queuedTransition)
+        }
         ForEach(sections, id: \.0) { section, rows in
             // In flight sits between what needs you and what has finished.
             if section == .review { inFlight }
@@ -282,14 +325,33 @@ struct NWNowScreen: View {
         }
         Group {
             if let line = data.model.receiptLine {
-                NWReceiptLine(text: line, failed: data.model.receiptFailed)
-                // A reply still waiting at the relay or on the Mac: Delete takes it back.
-                if let r = data.model.receiptRetract { receiptDelete(r) }
+                // The reply that is queued (at the relay, or held on the Mac) and its Delete: it rises in,
+                // a new word (held, sending, delivered) cross-fades, and going it fades as Settled closes up.
+                VStack(spacing: 16) {
+                    NWReceiptLine(text: line, failed: data.model.receiptFailed)
+                        .contentTransition(.opacity)
+                        .animation(queuedAnimation, value: line)
+                    // A reply still waiting at the relay or on the Mac: Delete takes it back.
+                    if let r = data.model.receiptRetract { receiptDelete(r).transition(.opacity) }
+                }
+                .transition(queuedTransition)
             }
             if quiet && data.problem == nil { NWTonightCard(rings: data.model.rings) }
-            NWSettledList(log: data.log, onSeeAll: actions.seeAll).padding(.top, 6)
+            NWSettledList(log: data.log, onSeeAll: actions.seeAll, motion: motion, now: data.now).padding(.top, 6)
+                .id("section-settled")
         }
+        .animation(queuedAnimation, value: QueuedKey(line: data.model.receiptLine != nil, delete: data.model.receiptRetract != nil))
         .offset(y: push(below: order.count - 1))
+    }
+
+    /// How what is queued comes and goes: rising 6 pt as it fades in, fading as what is below closes up.
+    private var queuedTransition: AnyTransition {
+        reduceMotion || forcedReduceMotion ? .opacity
+            : .asymmetric(insertion: .offset(y: NowMotion.queuedRise).combined(with: .opacity), removal: .opacity)
+    }
+
+    private var queuedAnimation: Animation {
+        .easeOut(duration: reduceMotion || forcedReduceMotion ? WorkflowMotion.reducedFade : NowMotion.queuedFade)
     }
 
     /// Delete under the receipt of a reply that is still waiting somewhere it can be taken back from.
@@ -408,6 +470,7 @@ struct NWNowScreen: View {
                        onSteer: { actions.steer(row) }, onOpen: { actions.open(row.id) }, onCancel: { actions.cancel(row.id) })
         case .review:
             NWReviewCard(row: row, now: data.now, outcome: outcome, pending: pending, receipt: data.receipts[row.id],
+                         chipsShownAt: motion.scene.chipsShown[row.id], motion: motion,
                          onLooksGood: { actions.looksGood(row) }, onSteer: { actions.steer(row) },
                          onOpen: { actions.open(row.id) }, onCancel: { actions.cancel(row.id) })
         }
@@ -424,4 +487,65 @@ private struct NWStreamSpring: Equatable {
     var horizon: CGFloat
 
     static func == (a: Self, b: Self) -> Bool { a.horizon != b.horizon || a.rows == b.rows }
+}
+
+/// What is queued at the foot of the stream: the reply's line, and its Delete.
+private struct QueuedKey: Equatable {
+    var line: Bool
+    var delete: Bool
+}
+
+/// When each first-appearance one-shot of the rest of Now began this app
+/// process (reference-date seconds): the Runway drawing in, each Review
+/// row's chips counting up. Now is rebuilt on every return from Lanes and
+/// every Mac switch; these play once.
+@MainActor enum NWNowBook {
+    private static var book = OneShotBook()
+
+    static func shown(_ key: String, at t: Double) -> Double { book.start(key, now: t) }
+}
+
+/// The rest of Now's scene and the moment to draw: live on the display
+/// clock, or the harness's pinned moment (absolute seconds).
+struct NWNowMotion {
+    var scene = NowMotion.NowScene()
+    var pinned: Double? = nil
+    var reduceMotion = false
+}
+
+/// The Runway on Now, on one clock: its line drawing in and its markers
+/// popping the first time it shows this app process, a marker gliding to
+/// a new place or flashing as it reaches now, and the NOW dot breathing
+/// with the pulse while agents work. With nothing breathing the clock
+/// stops once the last one-shot is over; scrolled away or covered it holds.
+struct NWNowRunway: View {
+    var model: RunwayModel
+    var motion = NWNowMotion()
+    var breathPeriod: Double? = nil
+    @State private var visible = true
+
+    var body: some View {
+        let s = motion.scene.runway, rm = motion.reduceMotion
+        let settles = s.settlesAt(reduceMotion: rm)
+        let now = motion.pinned ?? Date().timeIntervalSinceReferenceDate
+        NWWorkflowClock(origin: 0, until: breathPeriod != nil && !rm ? .infinity : settles, pinned: motion.pinned,
+                        fps: now < settles ? 30 : 20, holding: !visible) { t in
+            NWRunwayBar(model: model, frame: NowMotion.runway(s, model, at: t, breathPeriod: breathPeriod, reduceMotion: rm))
+                // Its motion is its own: a row arriving in the same update (the stream's spring) never animates it too.
+                .transaction { $0.animation = nil }
+        }
+        .modifier(NWOnScreen(visible: $visible))
+    }
+}
+
+extension NowScreenData {
+    /// The Horizon's two lines as Now draws them: a problem's words, else the handover, else the model's.
+    var horizonHeadline: String { problem?.title ?? handover ?? model.headline }
+    var horizonSubline: String { problem?.subtitle ?? (handover == nil ? model.subline : model.headline) }
+
+    /// What the rest of Now's motion looks at (`NowMotion.NowLook`).
+    var look: NowMotion.NowLook {
+        NowMotion.NowLook(headline: horizonHeadline, subline: horizonSubline, runway: model.runway, settled: log.today,
+                          reviews: model.rows.filter { $0.section == .review }.map(\.id), badges: [model.needYouCount, model.workingCount])
+    }
 }

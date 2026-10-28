@@ -33,11 +33,13 @@ struct NWStarGlyph: View {
     var color: NightWatch.RGBA
     var size: CGFloat = 28
     var brightness: Double = 1
+    /// The halo's strength when it breathes (In flight's 0.3 → 0.55); nil is the resting 0.42.
+    var glow: Double? = nil
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(RadialGradient(colors: [color.opacity(0.42 * brightness).color, color.opacity(0).color],
+                .fill(RadialGradient(colors: [color.opacity((glow ?? 0.42) * brightness).color, color.opacity(0).color],
                                      center: .center, startRadius: 1, endRadius: size * 0.75))
                 .frame(width: size * 1.5, height: size * 1.5)
             NWStarShape(seed: seed)

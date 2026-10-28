@@ -74,6 +74,7 @@
 		5D440FB1E3E93F2471DAF9F7 /* NWRunwayBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29CFABD445EE36972428726C /* NWRunwayBar.swift */; };
 		5F4FBA38A9F305348CAF8F8B /* PairMacView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA4B38D95AEEDC3D6CA48FCF /* PairMacView.swift */; };
 		5F59939B3C1AB1BB346AD4C3 /* DevBypass.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE75A73D4256FFE3CF18AD87 /* DevBypass.swift */; };
+		60C68FE402CDD7A2C73095F3 /* NowMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D9F4CD5B992437D3429EFA /* NowMotion.swift */; };
 		611F1DCC7655A9D07EEEB69A /* ActivityStrip.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEA91064988D836162378AEF /* ActivityStrip.swift */; };
 		65F5F483564AD1D0C5BDD3EE /* RenderArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFB1EB69017DC281AC0B858C /* RenderArguments.swift */; };
 		6677EE3BBE4F04076255EE5D /* NWAurora.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BBDA99F3958EC2211A80357 /* NWAurora.swift */; };
@@ -177,6 +178,7 @@
 		EC27B1D409716FAFF9E80458 /* NWTower.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2DA54CD037CB906F0950E091 /* NWTower.swift */; };
 		F5BC8B6174E69C5F210C738B /* InFlightRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE2959752C6B91E300994D8B /* InFlightRows.swift */; };
 		F69A60554B20C37F6633F8D3 /* NightWatchNow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8961FA819AD15B0C672F6A67 /* NightWatchNow.swift */; };
+		F6B7649E85A7E0E2A0E22E2D /* NowMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82D9F4CD5B992437D3429EFA /* NowMotion.swift */; };
 		F7B4C3F7BB2FD26A437C0C93 /* NWWidgetFaces.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51036CDE820AA99318F71E11 /* NWWidgetFaces.swift */; };
 		F81E5F31077ED58AAA4E1790 /* NowContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 605EB9133AEA2BFAA6F60F75 /* NowContainer.swift */; };
 		F974F6B0743696C79789CF5F /* ActionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6029DA091100718623C8E7ED /* ActionCoordinator.swift */; };
@@ -286,6 +288,7 @@
 		7F0F0FFE21E1A7FC811B1381 /* HoldRing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldRing.swift; sourceTree = "<group>"; };
 		811FCA35639BE15A50449CFF /* DispatchModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatchModel.swift; sourceTree = "<group>"; };
 		828BAB6DFBC74469A93FCAA4 /* NWHorizon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHorizon.swift; sourceTree = "<group>"; };
+		82D9F4CD5B992437D3429EFA /* NowMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowMotion.swift; sourceTree = "<group>"; };
 		845602164982E5669D68D3FB /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		87F90880A9F324A1582416D0 /* PageWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PageWidget.swift; sourceTree = "<group>"; };
 		8961FA819AD15B0C672F6A67 /* NightWatchNow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NightWatchNow.swift; sourceTree = "<group>"; };
@@ -527,6 +530,7 @@
 				8961FA819AD15B0C672F6A67 /* NightWatchNow.swift */,
 				E929747C5BF57EA5E695619F /* NightWatchRows.swift */,
 				4F67E4F21F4AB8C27797449A /* NowBanners.swift */,
+				82D9F4CD5B992437D3429EFA /* NowMotion.swift */,
 				7C25B3E2B731B3873638966E /* NowStream.swift */,
 				42E0F336C7E6A059696EF7A0 /* OnboardingModel.swift */,
 				2A71F62EEF65742FEB0AB638 /* PageLogic.swift */,
@@ -686,6 +690,7 @@
 				F69A60554B20C37F6633F8D3 /* NightWatchNow.swift in Sources */,
 				E97906AA552FFEFB803A546E /* NightWatchRows.swift in Sources */,
 				A9FAFE26E2C3D9E12B4C1534 /* NowBanners.swift in Sources */,
+				60C68FE402CDD7A2C73095F3 /* NowMotion.swift in Sources */,
 				96FDE7FE634C32B6A785F250 /* NowStream.swift in Sources */,
 				E1D00CD2AD2908C887C1D2D4 /* OnboardingModel.swift in Sources */,
 				BE818C1B268CC095003715E8 /* PageLogic.swift in Sources */,
@@ -799,6 +804,7 @@
 				9911E8F0041BFA32697D6BAA /* NotificationService.swift in Sources */,
 				6F457BB9358114AEBAEFD672 /* NowBanners.swift in Sources */,
 				F81E5F31077ED58AAA4E1790 /* NowContainer.swift in Sources */,
+				F6B7649E85A7E0E2A0E22E2D /* NowMotion.swift in Sources */,
 				B3DE6FE9BD2214D2BD381DFB /* NowStream.swift in Sources */,
 				D27F008999F9329498BCB5F1 /* OnboardingModel.swift in Sources */,
 				6BA0E6E62A65568F842F6DA7 /* PageApp.swift in Sources */,

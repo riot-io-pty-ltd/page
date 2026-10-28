@@ -26,6 +26,9 @@ struct NWHorizon: View {
     var model: PulseModel? = nil
     /// "2 working" in the subline is a button that goes to the In flight cards.
     var workingJump: (jump: String, rest: String, action: () -> Void)? = nil
+    /// Now's scene and moment: its numbers roll, a change of words
+    /// cross-fades as the new words rise 4 pt (`NowMotion.reword`).
+    var motion = NWNowMotion()
 
     @Environment(\.nwMotion) private var pin
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -53,15 +56,14 @@ struct NWHorizon: View {
                     .frame(width: orbSize, height: orbSize)
                     .padding(.top, topInset + 38)
                 Spacer(minLength: 0)
-                Text(headline)
-                    .font(NightWatch.Typo.hero)
-                    .kerning(NightWatch.Typo.heroTracking)
-                    .foregroundColor(NightWatch.Palette.textPrimary.color)
-                    .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.7)
-                    .lineLimit(2)
-                sublineView
-                    .padding(.bottom, footnote == nil ? 14 : 0)
+                // The two lines on one clock, running only while new words cross in.
+                NWWorkflowClock(origin: 0, until: motion.scene.rewordsSettle(reduceMotion: calmWords), pinned: motion.pinned) { t in
+                    VStack(spacing: 6) {
+                        headlineView(at: t)
+                        sublineView(at: t)
+                            .padding(.bottom, footnote == nil ? 14 : 0)
+                    }
+                }
                 if let footnote {
                     Text(footnote).font(NightWatch.Typo.subline)
                         .foregroundColor(NightWatch.Palette.textTertiary.color)
@@ -109,30 +111,69 @@ struct NWHorizon: View {
         }
     }
 
-    /// The Horizon's second line. With working sessions on screen its count is
-    /// a button: it scrolls to the In flight cards.
-    @ViewBuilder private var sublineView: some View {
+    /// The headline: its numbers roll ("2 need you" → "3 need you"); new words
+    /// ("1 needs you" → "2 need you") cross-fade, the old rising out as the new rise in.
+    private func headlineView(at t: Double) -> some View {
+        let change = motion.scene.reword(motion.scene.headline, at: t, reduceMotion: calmWords)
+        return ZStack {
+            if let change { headlineText(change.change.from).offset(y: CGFloat(change.frame.out.offset)).opacity(change.frame.out.opacity) }
+            headlineText(headline)
+                .nwRolls(headline, reduceMotion: calmWords, animated: change == nil)
+                .offset(y: CGFloat(change?.frame.into.offset ?? 0))
+                .opacity(change?.frame.into.opacity ?? 1)
+        }
+    }
+
+    private func headlineText(_ s: String) -> some View {
+        Text(s)
+            .font(NightWatch.Typo.hero)
+            .kerning(NightWatch.Typo.heroTracking)
+            .foregroundColor(NightWatch.Palette.textPrimary.color)
+            .multilineTextAlignment(.center)
+            .minimumScaleFactor(0.7)
+            .lineLimit(2)
+    }
+
+    /// The Horizon's second line, as the headline: numbers roll, new words cross-fade.
+    private func sublineView(at t: Double) -> some View {
+        let change = motion.scene.reword(motion.scene.subline, at: t, reduceMotion: calmWords)
+        return ZStack {
+            if let change { plainSubline(change.change.from).offset(y: CGFloat(change.frame.out.offset)).opacity(change.frame.out.opacity) }
+            currentSubline(rolls: change == nil)
+                .offset(y: CGFloat(change?.frame.into.offset ?? 0))
+                .opacity(change?.frame.into.opacity ?? 1)
+        }
+    }
+
+    /// With working sessions on screen its count is a button: it scrolls to the In flight cards.
+    @ViewBuilder private func currentSubline(rolls: Bool) -> some View {
         if let j = workingJump {
             HStack(spacing: 0) {
                 Button(action: j.action) {
                     Text(j.jump).underline(true, color: NightWatch.Palette.teal.opacity(0.7).color)
                         .foregroundColor(NightWatch.Palette.teal.color)
+                        .nwRolls(j.jump, reduceMotion: calmWords, animated: rolls)
                         .padding(.vertical, 12).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .padding(.vertical, -12)
                 .accessibilityHidden(true)
                 Text(j.rest).foregroundColor(NightWatch.Palette.textSecondary.color).lineLimit(2)
+                    .nwRolls(j.rest, reduceMotion: calmWords, animated: rolls)
             }
             .font(NightWatch.Typo.subline)
             .multilineTextAlignment(.center)
         } else {
-            Text(subline)
-                .font(NightWatch.Typo.subline)
-                .foregroundColor(NightWatch.Palette.textSecondary.color)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
+            plainSubline(subline).nwRolls(subline, reduceMotion: calmWords, animated: rolls)
         }
+    }
+
+    private func plainSubline(_ s: String) -> some View {
+        Text(s)
+            .font(NightWatch.Typo.subline)
+            .foregroundColor(NightWatch.Palette.textSecondary.color)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
     }
 
     // MARK: the clock
@@ -145,6 +186,8 @@ struct NWHorizon: View {
     }
 
     private var exhalePinned: Bool { pin?.kind == .exhale }
+    /// Reduce Motion for the words: the system's, or the harness's.
+    private var calmWords: Bool { motion.reduceMotion || reduceMotion }
     private var orbActive: Bool { pulseModel.isAnimated || exhaleAt != nil }
     private var orbFPS: Double { exhaleAt != nil ? 30 : pulseModel.framesPerSecond }
 

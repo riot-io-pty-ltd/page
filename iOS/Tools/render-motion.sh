@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Renders Night Watch's five signature motions frame by frame on the "Page
+# Renders Night Watch's five signature motions (and Now's: In flight, the Runway, the Horizon's words,
+# the badges, the chips, Settled) frame by frame on the "Page
 # Render" simulator (the DEBUG harness: -NWRender motion-<name> -NWTime <s>)
 # and tiles each motion into a contact sheet like board 07's rows
 # (Designs/v4/07-signature-motion.png).
@@ -52,6 +53,15 @@ frames=(
   lanes@3 motion-dusk@0.7 motion-dusk@3 motion-dawn@0.6 motion-dawn@1.2 motion-dawn@2.4
   now-working@3 motion-dusk-now@0.8 motion-dusk-now@3 motion-dawn-now@0.9 motion-dawn-now@1.8
   motion-brief@0 motion-brief@0.6 motion-brief@1.2 motion-brief@2.6
+  motion-inflight-enter@0.0 motion-inflight-enter@0.35 motion-inflight-enter@0.7 motion-inflight-enter@1.4 motion-inflight-enter@3.0
+  motion-inflight-advance@1.4 motion-inflight-advance@2.0 motion-inflight-advance@2.2 motion-inflight-advance@2.5 motion-inflight-advance@3.6
+  motion-inflight-complete@1.4 motion-inflight-complete@2.2 motion-inflight-complete@2.5 motion-inflight-complete@3.75 motion-inflight-complete@4.5
+  motion-inflight-vanish@1.4 motion-inflight-vanish@2.2 motion-inflight-stuck@1.4 motion-inflight-stuck@3.6
+  motion-now-enter@0.0 motion-now-enter@0.2 motion-now-enter@0.5 motion-now-enter@1.4
+  motion-now-enter-low@0.0 motion-now-enter-low@0.2 motion-now-enter-low@0.5 motion-now-enter-low@1.0
+  motion-now-change@1.4 motion-now-change@2.2 motion-now-change@2.5 motion-now-change@3.0
+  motion-now-change-low@1.4 motion-now-change-low@2.2 motion-now-change-low@2.5 motion-now-change-low@3.0
+  motion-now-runway@1.4 motion-now-runway@2.2 motion-now-runway@2.5 motion-now-runway@3.0
 )
 for f in "${frames[@]}"; do
   # ONLY=<regex> re-captures just the matching frames.

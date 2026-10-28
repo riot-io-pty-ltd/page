@@ -80,8 +80,6 @@ struct NWOutcomeStrip: View {
     var pending: PendingAction?
     var receipt: ReceiptThreadInput? = nil
     var onCancel: () -> Void = {}
-    @Environment(\.nwFixedNow) private var fixedNow
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         if let receipt, !receipt.isEmpty, outcome != .none {
@@ -96,12 +94,10 @@ struct NWOutcomeStrip: View {
         case .none: EmptyView()
         case .arming:
             if let pending {
-                if let fixedNow {
-                    arming(pending, now: fixedNow)
-                } else if reduceMotion {
-                    TimelineView(.periodic(from: .now, by: 0.1)) { tl in arming(pending, now: tl.date) }
-                } else {
-                    TimelineView(.animation(minimumInterval: 1.0 / 30)) { tl in arming(pending, now: tl.date) }
+                // Ticks until the ring is full, and holds while Now is covered or the app is not active
+                // (the harness's pinned clock draws one moment; Reduce Motion ticks every 0.1 s).
+                NWLiveClock(until: pending.armed ? pending.startedAt.addingTimeInterval(pending.armDuration) : nil) { now in
+                    arming(pending, now: now)
                 }
             }
         case .sending:
@@ -438,13 +434,19 @@ struct NWLookCard: View {
     private var subtitle: String { "\(row.summary) · \(row.waitingText(now: now))" }
 }
 
-/// A Review card: a finished turn, with what changed and Looks good.
+/// A Review card: a finished turn, with what changed and Looks good. The
+/// first time it shows this app process its chips count up from 0 and the
+/// tests ✓ draws (`NowMotion.chipText`, `chipCheck`), on a clock of its own
+/// that stops when they have.
 struct NWReviewCard: View {
     var row: NowRow
     var now: Date
     var outcome: CardOutcome = .none
     var pending: PendingAction? = nil
     var receipt: ReceiptThreadInput? = nil
+    /// When its chips first showed (reference-date seconds); nil: they have long since counted.
+    var chipsShownAt: Double? = nil
+    var motion = NWNowMotion()
     var onLooksGood: () -> Void = {}
     var onSteer: () -> Void = {}
     var onOpen: () -> Void = {}
@@ -467,7 +469,12 @@ struct NWReviewCard: View {
                             .foregroundColor(NightWatch.Palette.textSecondary.color).lineLimit(2)
                             .multilineTextAlignment(.leading)
                     } else {
-                        HStack(spacing: 8) { ForEach(Array(chips.enumerated()), id: \.offset) { _, c in NWTurnChip(chip: c) } }
+                        let start = motion.reduceMotion ? nil : chipsShownAt
+                        NWWorkflowClock(origin: 0, until: (start ?? -.infinity) + NowMotion.chipsSettle, pinned: motion.pinned) { t in
+                            HStack(spacing: 8) {
+                                ForEach(Array(chips.enumerated()), id: \.offset) { _, c in NWTurnChip(chip: c, elapsed: start.map { t - $0 } ?? .infinity) }
+                            }
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -499,8 +506,14 @@ struct NWReviewCard: View {
     }
 }
 
+/// "3 files", "+120", "−14", "tests ✓". `elapsed` seconds since its card
+/// first showed: its number counts up from 0, then the ✓ draws; the final
+/// words hold its width throughout, so nothing beside it shifts, and it is
+/// read as its final words.
 struct NWTurnChip: View {
     var chip: TurnChip
+    var elapsed: Double = .infinity
+
     var body: some View {
         let c: NightWatch.RGBA
         switch chip.tone {
@@ -510,10 +523,58 @@ struct NWTurnChip: View {
         case .removed: c = NightWatch.Palette.red
         case .fail: c = NightWatch.Palette.amber
         }
-        return Text(chip.text)
-            .font(NightWatch.Typo.monoSmall)
-            .foregroundColor(c.opacity(0.95).color)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(c.opacity(chip.tone == .neutral ? 0.09 : 0.14).color))
+        return ZStack(alignment: .leading) {
+            words(chip.text, check: 1, color: c).hidden()
+            words(NowMotion.chipText(chip.text, at: elapsed), check: NowMotion.chipCheck(elapsed), color: c)
+        }
+        .font(NightWatch.Typo.monoSmall)
+        .foregroundColor(c.opacity(0.95).color)
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(c.opacity(chip.tone == .neutral ? 0.09 : 0.14).color))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(chip.text))
+    }
+
+    /// The words, a passing chip's ✓ drawn `check` of the way.
+    @ViewBuilder private func words(_ text: String, check: Double, color: NightWatch.RGBA) -> some View {
+        if chip.tone == .pass, text.hasSuffix("✓") {
+            NWDrawnCheck.over(text, progress: check, color: color.opacity(0.95))
+        } else {
+            Text(text)
+        }
+    }
+}
+
+/// A ✓ that draws itself (`progress` 0 ... 1), in the space the font's ✓
+/// takes, so a line keeps its width and its baseline whether it is drawn or not.
+struct NWDrawnCheck: View {
+    var progress: Double
+    var color: NightWatch.RGBA
+
+    /// `text` ending in "✓", its ✓ drawn in place of the glyph (one run of text, so its spacing is the font's).
+    static func over(_ text: String, progress: Double, color: NightWatch.RGBA) -> some View {
+        (Text(String(text.dropLast())) + Text("✓").foregroundColor(.clear))
+            .overlay(alignment: .trailing) { NWDrawnCheck(progress: progress, color: color) }
+    }
+
+    var body: some View {
+        Text("✓").hidden()
+            .overlay(NWCheckShape().trim(from: 0, to: CGFloat(min(1, max(0, progress))))
+                .stroke(color.color, style: StrokeStyle(lineWidth: 1.4, lineCap: .round, lineJoin: .round))
+                .opacity(progress > 0.001 ? 1 : 0))
+            .accessibilityHidden(true)
+    }
+}
+
+/// A check mark, short stroke then long, in a square centred a little low in its box.
+struct NWCheckShape: Shape {
+    func path(in r: CGRect) -> Path {
+        let side = min(r.width, r.height) * 0.78
+        let o = CGPoint(x: r.midX - side / 2, y: r.midY - side / 2 + r.height * 0.04)
+        var p = Path()
+        p.move(to: CGPoint(x: o.x + side * 0.08, y: o.y + side * 0.55))
+        p.addLine(to: CGPoint(x: o.x + side * 0.38, y: o.y + side * 0.86))
+        p.addLine(to: CGPoint(x: o.x + side * 0.94, y: o.y + side * 0.16))
+        return p
     }
 }

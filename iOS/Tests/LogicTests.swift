@@ -5227,5 +5227,419 @@ do {
     check(items.count == 1, "the row may arrive before the Mac's result")
 }
 
+// MARK: - Now motion: In flight arcs and bars, the grace for ended lines, the shared table
+// (Android asserts the same sample table in NowMotionTest.kt).
+do {
+    typealias NM = NowMotion
+    func near(_ a: Double?, _ b: Double, _ eps: Double = 1e-3) -> Bool { a.map { abs($0 - b) < eps } ?? false }
+    // The shared sample table, verbatim (tolerance 1e-3).
+    let table: [(String, Double, Double)] = [
+        ("arcEntrance(0.10,0.6,0)", NM.arcEntrance(0.10, fraction: 0.6, staggerIndex: 0), 0.0),
+        ("arcEntrance(0.375,0.6,0)", NM.arcEntrance(0.375, fraction: 0.6, staggerIndex: 0), 0.0375),
+        ("arcEntrance(0.60,0.6,0)", NM.arcEntrance(0.60, fraction: 0.6, staggerIndex: 0), 0.30),
+        ("arcEntrance(1.05,0.6,0)", NM.arcEntrance(1.05, fraction: 0.6, staggerIndex: 0), 0.60),
+        ("arcEntrance(2.0,0.6,0)", NM.arcEntrance(2.0, fraction: 0.6, staggerIndex: 0), 0.60),
+        ("entranceStart(strip 2)", NM.entranceStart(2, place: .strip), 0.27),
+        ("entranceStart(card line 2)", NM.entranceStart(2, place: .card), 0.31),
+        ("chipCount(0,120)", Double(NM.chipCount(0, total: 120)), 0), ("chipCount(0.19,120)", Double(NM.chipCount(0.19, total: 120)), 105),
+        ("chipCount(0.38,120)", Double(NM.chipCount(0.38, total: 120)), 120), ("chipCount(1,120)", Double(NM.chipCount(1, total: 120)), 120),
+        ("settledOpacity(0)", NM.settledOpacity(ageMinutes: 0), 1.0), ("settledOpacity(5)", NM.settledOpacity(ageMinutes: 5), 1.0),
+        ("settledOpacity(62.5)", NM.settledOpacity(ageMinutes: 62.5), 0.775), ("settledOpacity(120)", NM.settledOpacity(ageMinutes: 120), 0.55),
+        ("settledOpacity(600)", NM.settledOpacity(ageMinutes: 600), 0.55),
+    ]
+    for (name, got, want) in table { check(near(got, want), "now motion \(name) = \(want) (got \(got))") }
+    let bumps = stride(from: 0.0, through: 1.0, by: 0.001).map { NM.badgeBump($0) }
+    check(near(bumps.max(), 1.22) && near(NM.badgeBump(0.6), 1.0, 0.01) && NM.badgeBump(1) == 1 && NM.badgeBump(0) == 1,
+          "badgeBump peaks at 1.22 and is back to 1.0 by 0.6 s")
+    func fl(_ name: String, _ status: FlightLineStatus = .running) -> FlightWorkflowLine {
+        FlightWorkflowLine(id: name, name: name, phase: nil, progress: "1/4 agents", fraction: 0.25, status: status)
+    }
+    check(NM.flightEvents([fl("a"), fl("b")], [fl("a"), fl("b", .done)]).map(\.key) == ["b"], "flightEvents: b finished")
+    check(NM.flightEvents([fl("a"), fl("b")], [fl("a")]).isEmpty, "flightEvents: a line that just vanishes is no event")
+    check(NM.flightEvents([], [fl("b", .done)]).isEmpty, "flightEvents: nothing on a first snapshot")
+
+    // The numbers it shares with the Workflows lens, and its own.
+    check(NM.sweepStart == WorkflowMotion.sweepStart && NM.glintEvery == WorkflowMotion.rippleEvery && NM.stripStagger == WorkflowMotion.nodeStagger,
+          "In flight reuses the lens's numbers")
+    let own: [(String, Double, Double)] = [
+        ("flare(0).scale", NM.flare(0)?.scale ?? -1, 1.0), ("flare(0).opacity", NM.flare(0)?.opacity ?? -1, 0.9),
+        ("flare(0.3).scale", NM.flare(0.3)?.scale ?? -1, 1.7), ("flare(0.3).opacity", NM.flare(0.3)?.opacity ?? -1, 0.4625),
+        ("flare(0.5999).scale", NM.flare(0.5999)?.scale ?? -1, 1.8), ("flare(0.5999).opacity", NM.flare(0.5999)?.opacity ?? -1, 0.4),
+        ("glint(1.2,0).position", NM.glint(1.2, index: 0).position, 0.5), ("glint(1.2,0).opacity", NM.glint(1.2, index: 0).opacity, 0.45),
+        ("glint(0.6,0).position", NM.glint(0.6, index: 0).position, 0.0625),
+        ("star(0,0).scale", NM.star(0, index: 0).scale, 1.0), ("star(0,0).glow", NM.star(0, index: 0).glow, 0.3),
+        ("star(2,0).scale", NM.star(2, index: 0).scale, 1.04), ("star(2,0).glow", NM.star(2, index: 0).glow, 0.55),
+        ("dot(2,normal).breath", NM.dot(2, health: .normal).breath ?? -1, 1.0),
+        ("dot(3,longRunning).breath", NM.dot(3, health: .longRunning).breath ?? -1, 1.0),
+        ("dot(1.5,stuck).radius", NM.dot(1.5, health: .stuck).ring?.radius ?? -1, 10.9375),
+        ("closing(0,done).value", NM.closing(0, status: .done, from: 0.25).value, 0.25),
+        ("closing(1.0,done).value", NM.closing(1.0, status: .done, from: 0.25).value, 1.0),
+        ("closing(0.5,done).pulse.opacity", NM.closing(0.5, status: .done, from: 0.25).pulse?.opacity ?? -1, 0.55),
+        ("closing(1.05,done).pulse.scale", NM.closing(1.05, status: .done, from: 0.25).pulse?.scale ?? -1, 1.30625),
+        ("closing(0.35,done).check", NM.closing(0.35, status: .done, from: 0.25).check, 1.0),
+        ("closing(1.775,done).fold", NM.closing(1.775, status: .done, from: 0.25).fold, 0.125),
+        ("closing(0.175,failed).amber", NM.closing(0.175, status: .failed, from: 0.25).amber, 0.875),
+        ("step(0.125).out.offset", NM.step(0.125)?.out?.offset ?? -1, -5.25), ("step(0.125).out.opacity", NM.step(0.125)?.out?.opacity ?? -1, 0.125),
+        ("tint(0.25)", NM.tint(0.25), 0.875), ("tint(0.1,rm)", NM.tint(0.1, reduceMotion: true), 0.875),
+        ("rise(0.15).opacity", NM.rise(0.15).opacity, 0.875),
+    ]
+    for (name, got, want) in own { check(near(got, want), "now motion \(name) = \(want) (got \(got))") }
+    check(NM.flare(0.6) == nil && NM.flare(-0.01) == nil, "the flare plays once (0.6 s), then nothing")
+    check(NM.closing(0.4, status: .done, from: 0.25).pulse == nil && NM.closing(1.6, status: .done, from: 0.25).pulse == nil
+          && NM.closing(1.6, status: .done, from: 0.25).fold == 1 && NM.closing(NM.grace, status: .done, from: 0.25).fold == 0,
+          "one soft pulse after the close, then the fold, gone by the grace window (\(NM.grace) s)")
+    check(NM.closing(0.5, status: .failed, from: 0.25).pulse == nil && NM.closing(0.5, status: .stopped, from: 0.25).check == 0
+          && NM.closing(0.5, status: .stopped, from: 0.25).value == 0.25, "failed and stopped: amber, no pulse, no ✓, no close")
+    let calmEnd = NM.closing(0.1, status: .done, from: 0.25, reduceMotion: true)
+    check(calmEnd.pulse == nil && calmEnd.check == 0 && calmEnd.value == 0.25 && near(calmEnd.fold, 0.125)
+          && NM.closing(0.2, status: .done, from: 0.25, reduceMotion: true).fold == 0, "Reduce Motion: no ghost, the line just fades (0.2 s)")
+    check(NM.step(1.0) == nil && NM.step(-0.1) == nil && NM.step(0.3)?.out == nil, "a step change settles; the old step has gone by 0.25 s")
+    check(NM.step(0.1, reduceMotion: true).map { $0.travel == 0 && $0.into.offset == 0 && near($0.into.opacity, 0.875) } == true, "Reduce Motion: a new step cross-fades in place")
+    check(NM.rise(0.2, reduceMotion: true) == NM.Slide(offset: 0, opacity: 1) && NM.rise(1.0) == NM.Slide(offset: 0, opacity: 1)
+          && NM.rise(0).offset == 12 && NM.rise(0).opacity == 0, "a card rises 12 pt as it fades in; at once with Reduce Motion")
+    check(NM.dot(0, health: .stuck).breath == nil && NM.dot(0, health: .normal).ring == nil, "stuck sends a ring, normal breathes")
+    check(NM.announcement(fl("Docs sweep", .done), project: "page") == "page: Docs sweep finished"
+          && NM.announcement(fl("Docs sweep", .failed), project: "page") == "Docs sweep failed"
+          && NM.announcement(fl("Docs sweep", .stopped), project: "page") == "Docs sweep stopped" && NM.announcement(fl("x"), project: "p") == nil,
+          "one polite announcement per ending")
+    check(NM.FlightScene.names([fl("Lint"), fl("Build"), fl("Lint")]) == ["Lint", "Build", "Lint #2"], "a repeated name is numbered")
+    check(FlightLineStatus.from(run: "completed") == .done && FlightLineStatus.from(run: "killed") == .stopped && FlightLineStatus.from(run: "failed") == .failed
+          && FlightLineStatus.from(run: "stalled") == nil && FlightLineStatus.from(run: "running") == .running, "run status words; stalled has not ended")
+
+    // Real sections: the list's summaries (a running workflow, then one the feed says ended) and the watched session's runs.
+    func session(_ id: String, project: String, workflows: [[String: Any]], steps: [String] = ["Reading Session.swift", "Editing SessionRoom.swift", "Running swift build"],
+                 health: String? = nil) -> LiveSession {
+        var d: [String: Any] = ["id": id, "backend": "claude", "title": project, "cwd": "/Users/you/projects/\(project)", "state": "active", "host": "cmux",
+                                "canType": true, "canInterrupt": true, "preview": "[Bash] swift build", "lastActivityAt": nwISO(nwT0 - 20),
+                                "busySince": nwISO(nwT0 - 720), "recentSteps": steps, "workflows": workflows]
+        if let health { d["health"] = health }
+        return try! JSONDecoder.page().decode(LiveSession.self, from: try! JSONSerialization.data(withJSONObject: d))
+    }
+    func wf(_ name: String, _ done: Int, _ total: Int, _ status: String? = nil) -> [String: Any] {
+        var w: [String: Any] = ["name": name, "phase": "Working", "done": done, "total": total]
+        if let status { w["status"] = status }
+        return w
+    }
+    func section(_ list: [LiveSession], runs: [String: [WorkflowRun]] = [:], expanded: Bool = false) -> InFlightSection {
+        InFlightSection.build(sessions: list, hasSessionList: true, workflows: runs, now: nwNow, expanded: expanded)
+    }
+    let other = session("w2", project: "sate-t", workflows: [], health: "stuck")
+    let s0 = section([session("w1", project: "page", workflows: [wf("Review changes", 3, 5), wf("Docs sweep", 1, 4)]), other])
+    let sDone = section([session("w1", project: "page", workflows: [wf("Review changes", 3, 5), wf("Docs sweep", 4, 4, "completed")]), other])
+    let sGone = section([session("w1", project: "page", workflows: [wf("Review changes", 3, 5)]), other])
+    check(sDone.rows[0].card.workflows.map(\.name) == ["Review changes"] && sDone.rows[0].card.ended.map(\.status) == [.done]
+          && sDone.rows[0].card.workflowHeading == "1 workflow running", "an ended line is not a running one; the feed's word is kept apart")
+    let at0 = Date(timeIntervalSinceReferenceDate: 1_000)
+    var grace = NM.FlightGrace()
+    check(grace.observe(sDone, at: at0).isEmpty && grace.merged(sDone, now: at0) == sDone, "the first look plays nothing, even an ended line")
+    grace = NM.FlightGrace()
+    grace.observe(s0, at: at0)
+    let provisional = grace.merged(sDone, now: at0.addingTimeInterval(2))
+    check(provisional.rows[0].card.closing.map(\.line.name) == ["Docs sweep"], "the frame that first lacks the line already draws it closing")
+    check(grace.merged(sDone, now: at0.addingTimeInterval(2), provisional: { _ in false }) == sDone,
+          "but not when it will not play (a silent look, or played already)")
+    let ends = grace.observe(sDone, at: at0.addingTimeInterval(2))
+    check(ends.count == 1 && ends[0].line.name == "Docs sweep" && ends[0].line.status == .done && ends[0].index == 1 && near(ends[0].line.fraction, 0.25)
+          && ends[0].rowId == "w1" && ends[0].project == "page", "running → done is an ending, drawn as it last was (1/4), at its place")
+    let kept = grace.merged(sDone, now: at0.addingTimeInterval(3))
+    check(kept.rows[0].card.closing.count == 1 && kept.strip[0].card.closing.count == 1 && kept.rows[0].card.closing[0].endedAt == at0.addingTimeInterval(2),
+          "kept on its card and its tile for the grace window")
+    check(kept.rows[0].spoken == sDone.rows[0].spoken && kept.rows[0].card.workflowHeading == "1 workflow running", "the spoken line and the heading never count it")
+    check(grace.merged(sDone, now: at0.addingTimeInterval(2 + NM.grace)) == sDone && grace.nextExpiry == at0.addingTimeInterval(2 + NM.grace), "gone after the window")
+    check(grace.observe(sDone, at: at0.addingTimeInterval(2.5)).isEmpty, "each ending once")
+    var vanish = NM.FlightGrace()
+    vanish.observe(s0, at: at0)
+    check(vanish.observe(sGone, at: at0.addingTimeInterval(2)).isEmpty && vanish.merged(sGone, now: at0.addingTimeInterval(2.5)) == sGone,
+          "a line that vanishes with no status: no ghost, no ending")
+    var quiet = NM.FlightGrace()
+    quiet.observe(s0, at: at0)
+    check(quiet.observe(sDone, at: at0.addingTimeInterval(1), silent: true).isEmpty && quiet.merged(sDone, now: at0.addingTimeInterval(1.5)) == sDone,
+          "Now covered or the app away: only remembered")
+    var again = NM.FlightGrace()
+    again.observe(s0, at: at0)
+    again.reset()
+    check(again.observe(sDone, at: at0.addingTimeInterval(1)).isEmpty, "after a reset (resume, another Mac) the next look is a first look")
+    var played = NM.FlightGrace()
+    played.observe(s0, at: at0)
+    check(played.observe(sDone, at: at0.addingTimeInterval(1), once: { _ in false }).isEmpty, "an ending that already played (once per run) does not play again")
+    var left = NM.FlightGrace()
+    left.observe(s0, at: at0)
+    check(left.observe(section([other]), at: at0.addingTimeInterval(1)).isEmpty, "a session that ends takes its lines with it (its own exit plays)")
+    // Capped: the fourth card is hidden, its tile is not; a cap or Show fewer never ends anything.
+    let crowd = (1...4).map { session("c\($0)", project: "p\($0)", workflows: [wf("Lint", 1, 2)]) }
+    var capped = NM.FlightGrace()
+    capped.observe(section(crowd, expanded: true), at: at0)
+    check(capped.observe(section(crowd), at: at0.addingTimeInterval(1)).isEmpty && section(crowd).rows.count == 3, "Show fewer and the cap end nothing")
+    let crowdDone = crowd.dropLast() + [session("c4", project: "p4", workflows: [wf("Lint", 2, 2, "completed")])]
+    check(capped.observe(section(Array(crowdDone)), at: at0.addingTimeInterval(2)).map(\.rowId) == ["c4"], "an ending under the cap is still seen (on its tile)")
+    // The watched session's runs: keyed by run id; killed is stopped, failed is failed, stalled is nothing.
+    func run(_ id: String, _ name: String, _ status: String, _ done: Int, _ total: Int) -> WorkflowRun {
+        WorkflowRun(id: id, name: name, status: status, phase: nil, done: done, total: total)
+    }
+    let w1 = session("w1", project: "page", workflows: [])
+    let r0 = section([w1, other], runs: ["w1": [run("wf_r", "Review changes", "running", 3, 5), run("wf_d", "Docs sweep", "running", 1, 4),
+                                                run("wf_old", "Old run", "completed", 2, 2)]])
+    check(r0.rows[0].card.workflows.map(\.key) == ["wf_r", "wf_d"] && r0.rows[0].card.ended.map(\.key) == ["wf_old"], "run lines are keyed by run id")
+    for (status, want) in [("completed", FlightLineStatus.done), ("killed", .stopped), ("failed", .failed)] {
+        var g = NM.FlightGrace()
+        g.observe(r0, at: at0)
+        let r1 = section([w1, other], runs: ["w1": [run("wf_r", "Review changes", "running", 3, 5), run("wf_d", "Docs sweep", status, 1, 4),
+                                                    run("wf_old", "Old run", "completed", 2, 2)]])
+        let e = g.observe(r1, at: at0.addingTimeInterval(2))
+        check(e.map(\.line.key) == ["wf_d"] && e.first?.line.status == want, "a run that is \(status) ends as \(want)")
+    }
+    var stalled = NM.FlightGrace()
+    stalled.observe(r0, at: at0)
+    check(stalled.observe(section([w1, other], runs: ["w1": [run("wf_r", "Review changes", "running", 3, 5), run("wf_d", "Docs sweep", "stalled", 1, 4)]]),
+                          at: at0.addingTimeInterval(2)).isEmpty, "a stalled run has not ended")
+
+    // The scene: entrances by first showing, springs, steps, tints, rises; a frame of each.
+    let t0 = 500.0
+    var scene = NM.FlightScene(opening: s0, at: t0)
+    let k = NM.FlightScene.lineKey("w1", "Review changes")
+    check(scene.value(k, fraction: 0.6, place: .strip, index: 0, at: t0 + 0.15, reduceMotion: false) == 0
+          && near(scene.value(k, fraction: 0.6, place: .strip, index: 0, at: t0 + 0.6, reduceMotion: false), 0.3)
+          && near(scene.value(k, fraction: 0.6, place: .card, index: 2, at: t0 + 1.21, reduceMotion: false), 0.6)
+          && scene.value(k, fraction: 0.6, place: .card, index: 0, at: t0, reduceMotion: true) == 0.6, "the entrance sweeps 0 → 3/5 (at once with Reduce Motion)")
+    let seen = NM.FlightScene(opening: s0, at: t0, shown: { _, _ in t0 - 100 })
+    check(seen.value(k, fraction: 0.6, place: .card, index: 0, at: t0, reduceMotion: false) == 0.6
+          && seen.rise("w1", index: 0, at: t0, reduceMotion: false) == NM.Slide(offset: 0, opacity: 1), "shown before this app process: the value at once")
+    let sAdvance = section([session("w1", project: "page", workflows: [wf("Review changes", 4, 5), wf("Docs sweep", 1, 4)],
+                                    steps: ["Editing SessionRoom.swift", "Running swift build", "Running swift test"]), other])
+    scene.observe(sAdvance, at: t0 + 2)
+    check(near(scene.value(k, fraction: 0.8, place: .card, index: 0, at: t0 + 2, reduceMotion: false), 0.6)
+          && near(scene.value(k, fraction: 0.8, place: .card, index: 0, at: t0 + 3, reduceMotion: false), 0.8)
+          && scene.flare(k, at: t0 + 2, reduceMotion: false) == NM.Glow(scale: 1, opacity: 0.9), "3/5 → 4/5 springs, and the head flares")
+    let midSpring = scene.value(k, fraction: 0.8, place: .card, index: 0, at: t0 + 2.2, reduceMotion: false)
+    check(midSpring > 0.6 && midSpring < 0.8, "part-way along the spring at 2.2 s (\(midSpring))")
+    let stepNow = scene.step("w1", at: t0 + 2.1, reduceMotion: false)
+    check(stepNow?.change.now == "Running swift build" && stepNow?.change.previous == ["Editing SessionRoom.swift", "Reading Session.swift"]
+          && (stepNow?.frame.out?.offset ?? 0) < 0 && (stepNow?.frame.travel ?? 0) > 0, "the old step slides up as the earlier ones move down")
+    check(scene.step("w1", at: t0 + 3.1, reduceMotion: false) == nil && scene.step("w2", at: t0 + 2.1, reduceMotion: false) == nil, "and settles; nothing else moved")
+    let stuckNow = section([session("w1", project: "page", workflows: [wf("Review changes", 4, 5), wf("Docs sweep", 1, 4)],
+                                    steps: ["Editing SessionRoom.swift", "Running swift build", "Running swift test"], health: "stuck"), other])
+    scene.observe(stuckNow, at: t0 + 4)
+    check(near(scene.amber("w1", attention: true, at: t0 + 4.25, reduceMotion: false), 0.875) && scene.amber("w1", attention: true, at: t0 + 5, reduceMotion: false) == 1
+          && scene.amber("w2", attention: true, at: t0 + 4.25, reduceMotion: false) == 1, "turning stuck cross-fades to amber over 0.5 s")
+    let live = NM.line(scene, row: sAdvance.rows[0], line: sAdvance.rows[0].card.workflows[0], key: "Review changes", place: .card, index: 0, at: t0 + 5, reduceMotion: false)
+    let ring = NM.line(scene, row: sAdvance.rows[0], line: sAdvance.rows[0].card.workflows[0], key: "Review changes", place: .strip, index: 0, at: t0 + 5, reduceMotion: false)
+    check(live.head != nil && live.glint != nil && live.comet == nil && ring.comet != nil && ring.glint == nil, "a working line breathes; the bar glints, the ring's comet turns")
+    let still = NM.line(scene, row: stuckNow.rows[0], line: stuckNow.rows[0].card.workflows[0], key: "Review changes", place: .strip, index: 0, at: t0 + 5, reduceMotion: false)
+    let stillLater = NM.line(scene, row: stuckNow.rows[0], line: stuckNow.rows[0].card.workflows[0], key: "Review changes", place: .strip, index: 0, at: t0 + 7.3, reduceMotion: false)
+    check(still.head == nil && still.glint == nil && still.comet == nil && still.amber == 1 && still == stillLater, "stuck: still and amber; stillness is the signal")
+    let calm = NM.line(scene, row: sAdvance.rows[0], line: sAdvance.rows[0].card.workflows[0], key: "Review changes", place: .card, index: 0, at: t0 + 2.1, reduceMotion: true)
+    check(calm.head == nil && calm.glint == nil && calm.flare == nil && calm.value == 0.8, "Reduce Motion: the final value, nothing looping")
+    let rowLive = NM.row(scene, row: sAdvance.rows[0], index: 0, at: t0 + 5, reduceMotion: false)
+    let rowStuck = NM.row(scene, row: stuckNow.rows[0], index: 0, at: t0 + 5, reduceMotion: false)
+    let rowCalm = NM.row(scene, row: sAdvance.rows[0], index: 0, at: t0 + 5, reduceMotion: true)
+    check(rowLive.star != nil && rowLive.dot.breath != nil && rowStuck.star == nil && rowStuck.dot.ring != nil && rowCalm.star == nil
+          && rowCalm.dot == NM.Dot(breath: nil, ring: nil), "the star and dot breathe while it works; stuck: a still star and an amber ring; Reduce Motion: still")
+    check(NM.row(scene, row: sAdvance.rows[1], index: 1, at: t0 + 0.05, reduceMotion: false).rise.opacity == 0
+          && NM.row(scene, row: sAdvance.rows[1], index: 1, at: t0 + 0.2, reduceMotion: false).rise.opacity > 0, "the second card rises 0.05 s after the first")
+    check(NM.animatesUntil(scene, rows: sAdvance.rows, reduceMotion: false) == .infinity
+          && NM.animatesUntil(scene, rows: sAdvance.rows, reduceMotion: true) == t0 + 4 + WorkflowMotion.reducedFade, "a clock for ever while working; Reduce Motion until the last fade")
+    let allStuck = stuckNow.strip
+    check(allStuck.allSatisfy(\.card.health.needsAttention) && near(NM.animatesUntil(scene, rows: allStuck, place: .strip, reduceMotion: false), t0 + 4 + NM.tintFade)
+          && NM.animatesUntil(scene, rows: allStuck, place: .card, reduceMotion: false) == .infinity
+          && NM.animatesUntil(scene, rows: sAdvance.strip, place: .strip, reduceMotion: false) == .infinity,
+          "a strip of only stuck tiles stops its clock once the amber has crossed (a stuck card's dot still ripples)")
+    // A line before it vanishes keeps its name's key: the line after it shifts up without a new entrance.
+    var shift = NM.FlightScene(opening: s0, at: t0)
+    shift.observe(section([session("w1", project: "page", workflows: [wf("Docs sweep", 1, 4)]), other]), at: t0 + 5)
+    let docs = NM.FlightScene.lineKey("w1", "Docs sweep")
+    check(shift.value(docs, fraction: 0.25, place: .card, index: 0, at: t0 + 5, reduceMotion: false) == 0.25 && shift.springs.isEmpty,
+          "an earlier line leaving moves the next one up, unchanged")
+    // Show all: the cards it brings rise in.
+    var open = NM.FlightScene(opening: section(crowd), at: t0, shown: { _, _ in t0 - 100 })
+    open.observe(section(crowd, expanded: true), at: t0 + 10)
+    check(open.rise("c4", index: 3, extra: true, at: t0 + 10, reduceMotion: false).opacity == 0
+          && open.rise("c4", index: 3, extra: true, at: t0 + 11.5, reduceMotion: false) == NM.Slide(offset: 0, opacity: 1)
+          && open.rise("c1", index: 0, at: t0 + 10, reduceMotion: false) == NM.Slide(offset: 0, opacity: 1), "Show all brings its cards in with the rise")
+
+    // The harness's scripts (the five A4 fixtures), replayed.
+    let base = 9_000.0
+    func replay(_ steps: [(Double, InFlightSection)], entered: Bool = true, until t: Double) -> (section: InFlightSection, scene: NM.FlightScene, grace: NM.FlightGrace) {
+        NM.replay(NM.FlightScript(base: base, steps: steps.map { NM.FlightStep(at: $0.0, section: $0.1) }, entered: entered), until: t)!
+    }
+    let enter = replay([(0, s0)], entered: false, until: 0.6)
+    check(near(enter.scene.value(k, fraction: 0.6, place: .strip, index: 0, at: base + 0.6, reduceMotion: false), 0.3), "enter: the arcs sweep from 0")
+    let advanced = replay([(0, s0), (2, sAdvance)], until: 2.5)
+    check(advanced.scene.springs[k]?.at == base + 2 && advanced.scene.steps["w1"]?.at == base + 2 && advanced.section.rows[0].card.closing.isEmpty,
+          "advance: 3/5 → 4/5 and a new step at 2.0 s, nothing closing")
+    check(replay([(0, s0), (2, sAdvance)], until: 1.9).scene == replay([(0, s0)], until: 1.9).scene, "before 2.0 s nothing has changed")
+    let completed = replay([(0, s0), (2, sDone)], until: 2.5)
+    let ghost = completed.section.rows[0].card.closing.first
+    check(ghost?.line.name == "Docs sweep" && ghost?.line.status == .done && ghost?.endedAt == Date(timeIntervalSinceReferenceDate: base + 2),
+          "complete: the 1/4 line closes from 2.0 s")
+    let ghostFrame = NM.line(completed.scene, row: completed.section.rows[0], line: ghost!.line, key: "Docs sweep", closing: ghost, place: .card, index: 1,
+                             at: base + 2.6, reduceMotion: false)
+    check(ghostFrame.pulse != nil && near(ghostFrame.check, 1) && ghostFrame.value > 0.9 && ghostFrame.fold == 1, "springs closed, one pulse, \"✓ done\"")
+    check(replay([(0, s0), (2, sDone)], until: 4.5).section.rows[0].card.closing.isEmpty, "and gone by 4.5 s")
+    let vanished = replay([(0, s0), (2, sGone)], until: 2.5)
+    check(vanished.section.rows[0].card.closing.isEmpty && vanished.section == sGone, "vanish: no ghost, no pulse, no ✓")
+    let stuckRows = section([session("w1", project: "page", workflows: [wf("Review changes", 3, 5)], health: "rateLimited"),
+                             session("w2", project: "sate-t", workflows: [wf("Fix tests", 2, 6)], health: "stuck")])
+    let stuck = replay([(0, stuckRows)], until: 3)
+    let f1 = stuck.section.rows.map { NM.row(stuck.scene, row: $0, index: 0, at: base + 1.6, reduceMotion: false) }
+    let f2 = stuck.section.rows.map { NM.row(stuck.scene, row: $0, index: 0, at: base + 3.3, reduceMotion: false) }
+    check(f1.map(\.star) == [nil, nil] && f1.map(\.rise) == f2.map(\.rise) && f1.map(\.amber) == [1, 1], "stuck: the stars are still and amber")
+}
+
+// MARK: - Now motion, the rest of Now: the Runway, the Horizon's words, the badges, the chips, Settled
+// (Android asserts the same sample table in NowMotionTest.kt).
+do {
+    typealias NM = NowMotion
+    func near(_ a: Double?, _ b: Double, _ eps: Double = 1e-3) -> Bool { a.map { abs($0 - b) < eps } ?? false }
+    // The shared sample table, verbatim (tolerance 1e-3).
+    let table: [(String, Double, Double)] = [
+        ("runwayLine(0)", NM.runwayLine(0), 0), ("runwayLine(0.3)", NM.runwayLine(0.3), 0.875), ("runwayLine(0.6)", NM.runwayLine(0.6), 1),
+        ("runwayReach(0.5)", NM.runwayReach(0.5), 0.123790), ("runwayReach(1)", NM.runwayReach(1), 0.6),
+        ("markerStarts([0,0.5,0.52])[1]", NM.markerStarts([0, 0.5, 0.52])[1], 0.123790), ("markerStarts([0,0.5,0.52])[2]", NM.markerStarts([0, 0.5, 0.52])[2], 0.193790),
+        ("markerStarts([0.5,0])[0]", NM.markerStarts([0.5, 0])[0], 0.123790), ("markerStarts([0.5,0])[1]", NM.markerStarts([0.5, 0])[1], 0),
+        ("markerPop(0).scale", NM.markerPop(0).scale, 0.6), ("markerPop(0).opacity", NM.markerPop(0).opacity, 0),
+        ("markerPop(0.0875).scale", NM.markerPop(0.0875).scale, 0.89875), ("markerPop(0.0875).opacity", NM.markerPop(0.0875).opacity, 0.980140),
+        ("markerPop(0.175).scale", NM.markerPop(0.175).scale, 1.01), ("markerPop(0.35).scale", NM.markerPop(0.35).scale, 1.0),
+        ("markerPop(0.35).opacity", NM.markerPop(0.35).opacity, 1.0),
+        ("markerGlide(0.2,0.4→0.3)", NM.markerGlide(0.2, from: 0.4, to: 0.3), 0.39375), ("markerGlide(0.4,0.4→0.3)", NM.markerGlide(0.4, from: 0.4, to: 0.3), 0.35),
+        ("markerGlide(0.8,0.4→0.3)", NM.markerGlide(0.8, from: 0.4, to: 0.3), 0.3),
+        ("markerPassing(0.15).flash", NM.markerPassing(0.15)?.flash ?? -1, 0.707107), ("markerPassing(0.15).opacity", NM.markerPassing(0.15)?.opacity ?? -1, 0.84375),
+        ("markerPassing(0.3).flash", NM.markerPassing(0.3)?.flash ?? -1, 1), ("markerPassing(0.3).opacity", NM.markerPassing(0.3)?.opacity ?? -1, 0.5),
+        ("flashGlow(1).scale", NM.flashGlow(1).scale, 1.8), ("flashGlow(0.5).opacity", NM.flashGlow(0.5).opacity, 0.45),
+        ("nowDot(0,4)", NM.nowDot(0, period: 4), 0), ("nowDot(1,4)", NM.nowDot(1, period: 4), 0.5), ("nowDot(2,4)", NM.nowDot(2, period: 4), 1),
+        ("reword(0.175).into.offset", NM.reword(0.175)?.into.offset ?? -1, 0.5), ("reword(0.175).into.opacity", NM.reword(0.175)?.into.opacity ?? -1, 0.875),
+        ("reword(0.175).out.offset", NM.reword(0.175)?.out.offset ?? 1, -3.5), ("reword(0.175).out.opacity", NM.reword(0.175)?.out.opacity ?? -1, 0.125),
+        ("reword(0.1,rm).into.offset", NM.reword(0.1, reduceMotion: true)?.into.offset ?? -1, 0),
+        ("reword(0.1,rm).into.opacity", NM.reword(0.1, reduceMotion: true)?.into.opacity ?? -1, 0.875),
+        ("chipCheck(0.38)", NM.chipCheck(0.38), 0), ("chipCheck(0.53)", NM.chipCheck(0.53), 0.875), ("chipCheck(0.68)", NM.chipCheck(0.68), 1),
+        ("receipt(0.175).offset", NM.receipt(0.175).offset, -0.75), ("receipt(0.175).opacity", NM.receipt(0.175).opacity, 0.875),
+        ("receipt(0.175).height", NM.receipt(0.175).height, 0.875), ("receipt(0.175).check", NM.receipt(0.175).check, 0),
+        ("receipt(0.5).check", NM.receipt(0.5).check, 0.875), ("receipt(0.65).check", NM.receipt(0.65).check, 1),
+        ("receipt(0.1,rm).opacity", NM.receipt(0.1, reduceMotion: true).opacity, 0.875), ("receipt(0.1,rm).offset", NM.receipt(0.1, reduceMotion: true).offset, 0),
+        ("badgeFrom", NM.badgeFrom, 0.5), ("badgeResponse", NM.badgeResponse, 0.35), ("badgeDamping", NM.badgeDamping, 0.6),
+        ("queuedFade", NM.queuedFade, 0.3), ("queuedRise", NM.queuedRise, 6), ("markerSlideMin", NM.markerSlideMin, 0.003),
+        ("receiptFresh", NM.receiptFresh, 120),
+    ]
+    for (name, got, want) in table { check(near(got, want), "now motion \(name) = \(want) (got \(got))") }
+    check(NM.chipText("+120", at: 0.19) == "+105" && NM.chipText("3 files", at: 0) == "0 files" && NM.chipText("−14", at: 0.38) == "−14"
+          && NM.chipText("tests ✓", at: 0) == "tests ✓" && NM.chipText("+120", at: .infinity) == "+120", "chips count up from 0; words with no number stay")
+    check(NM.markerPassing(0.6) == nil && NM.markerPassing(-0.01) == nil && NM.reword(0.35) == nil && NM.reword(0.2, reduceMotion: true) == nil,
+          "a flash and new words play once")
+    check(!NM.rewords("2 need you", "3 need you") && NM.rewords("1 needs you", "2 need you") && NM.rewords("2 need you", "All quiet")
+          && !NM.rewords("4 working · runway clear till 03:40", "5 working · runway clear till 03:10")
+          && NM.rewords("2 working · runway clear till 03:40", "2 working · on battery · 41%"), "new numbers roll; new words cross-fade")
+    check(NM.runwayDraw == 0.6 && NM.markerStagger == 0.07 && NM.markerSlide == 0.8 && NM.markerFlash == 0.6 && NM.rewordDuration == WorkflowMotion.crossFade
+          && NM.rewordRise == 4 && NM.receiptIn == 0.35 && NM.receiptDrop == 6 && NM.checkDraw == 0.3, "the spec's numbers")
+
+    // The Runway: drawn in on its first showing, a glide, a marker reaching now, one arriving, one simply gone.
+    func marker(_ id: String, _ kind: RunwayMarker.Kind, minutes: Double, now: Date) -> RunwayMarker {
+        let at = now.addingTimeInterval(minutes * 60)
+        return RunwayMarker(id: id, kind: kind, label: id, at: at, fraction: RunwayModel.fraction(of: at, now: now) ?? 0, tone: .amber)
+    }
+    let t0 = 700.0
+    let d0 = Date(timeIntervalSinceReferenceDate: t0)
+    let r0 = RunwayModel(markers: [marker("cutoff", .batteryCutoff, minutes: 148, now: d0), marker("reset", .usageReset, minutes: 110, now: d0),
+                                   marker("soon", .usageReset, minutes: 0.01, now: d0)], onAC: false, clearUntil: nil)
+    var rs = NM.RunwayScene()
+    rs.observe(r0, at: t0, first: t0)
+    let f0 = NM.runway(rs, r0, at: t0, breathPeriod: nil, reduceMotion: false)
+    check(f0.line == 0 && f0.markers.allSatisfy { $0.opacity == 0 && near($0.scale, 0.6) }, "first showing: the line and markers start from nothing")
+    // "soon" (at now) starts at once; "reset" when the line reaches it, held to 0.07 s after; "cutoff" 0.07 s after that.
+    let fPop = NM.runway(rs, r0, at: t0 + 0.07 + 0.0875, breathPeriod: nil, reduceMotion: false)
+    let byId = Dictionary(uniqueKeysWithValues: fPop.markers.map { ($0.marker.id, $0) })
+    check(near(byId["reset"]?.scale, 0.89875) && (byId["soon"]?.scale ?? 0) > (byId["reset"]?.scale ?? 1) && (byId["cutoff"]?.scale ?? 1) < (byId["reset"]?.scale ?? 0),
+          "markers pop left to right, 0.07 s apart")
+    let fDone = NM.runway(rs, r0, at: t0 + 1.2, breathPeriod: nil, reduceMotion: false)
+    check(fDone == NM.runway(rs, r0, at: t0 + 4, breathPeriod: nil, reduceMotion: false) && fDone.line == 1 && fDone.markers.allSatisfy { $0.scale == 1 && $0.opacity == 1 }
+          && near(rs.settlesAt(reduceMotion: false), t0 + NM.runwayDraw), "then it holds: settled, no clock")
+    check(NM.runway(rs, r0, at: t0, breathPeriod: nil, reduceMotion: true).markers.allSatisfy { $0.opacity == 1 && $0.scale == 1 }
+          && NM.runway(rs, r0, at: t0, breathPeriod: nil, reduceMotion: true).line == 1, "Reduce Motion: drawn at once")
+    var seenBefore = NM.RunwayScene()
+    seenBefore.observe(r0, at: t0, first: t0 - 100)
+    check(NM.runway(seenBefore, r0, at: t0, breathPeriod: nil, reduceMotion: false) == NM.RunwayFrame.settled(r0),
+          "shown before this app process: drawn at once")
+    // Time's drift (5 s) is drawn where it lies; a new forecast glides.
+    let d1 = d0.addingTimeInterval(5)
+    let drift = RunwayModel(markers: [marker("cutoff", .batteryCutoff, minutes: 148 - 5.0 / 60, now: d0), marker("reset", .usageReset, minutes: 110 - 5.0 / 60, now: d0),
+                                      marker("soon", .usageReset, minutes: 0.01, now: d0)], onAC: false, clearUntil: nil)
+    rs.observe(drift, at: t0 + 5, first: 0)
+    check(rs.tracks["cutoff"]?.at == -.infinity, "a 5 s drift starts no glide (\(d1))")
+    let moved = RunwayModel(markers: [marker("cutoff", .batteryCutoff, minutes: 118, now: d0), marker("reset", .usageReset, minutes: 110, now: d0),
+                                      marker("soon", .usageReset, minutes: 0.01, now: d0)], onAC: false, clearUntil: nil)
+    rs.observe(moved, at: t0 + 10, first: 0)
+    let glide = { (t: Double) in NM.runway(rs, moved, at: t, breathPeriod: nil, reduceMotion: false).markers.first { $0.marker.id == "cutoff" }?.x ?? -1 }
+    check(near(glide(t0 + 10), 148.0 / 360) && near(glide(t0 + 10.4), (148.0 + 118) / 720) && near(glide(t0 + 10.8), 118.0 / 360)
+          && near(rs.settlesAt(reduceMotion: false), t0 + 10.8), "a new forecast: the cutoff glides 30 min nearer over 0.8 s")
+    let calmGlide = NM.runway(rs, moved, at: t0 + 10.1, breathPeriod: nil, reduceMotion: true).markers.first { $0.marker.id == "cutoff" }
+    check(near(calmGlide?.x, 118.0 / 360) && near(calmGlide?.opacity, 0.875), "Reduce Motion: it fades in at its new place")
+    // "soon" reaches now; a new reset comes into the six hours; going on power takes the cutoff away.
+    let later = RunwayModel(markers: [marker("cutoff", .batteryCutoff, minutes: 118, now: d0), marker("reset", .usageReset, minutes: 110, now: d0),
+                                      marker("next", .usageReset, minutes: 300, now: d0)], onAC: false, clearUntil: nil)
+    rs.observe(later, at: t0 + 20, first: 0)
+    let passing = NM.runway(rs, later, at: t0 + 20.3, breathPeriod: nil, reduceMotion: false).markers
+    check(rs.gone["soon"]?.reachedNow == true && passing.first { $0.marker.id == "soon" }.map { $0.x == 0 && near($0.flash?.scale, 1.8) && near($0.opacity, 0.5) } == true,
+          "a marker that reaches now flashes and fades at now")
+    let arriving = NM.runway(rs, later, at: t0 + 20.175, breathPeriod: nil, reduceMotion: false).markers
+    check(arriving.first { $0.marker.id == "next" }.map { near($0.scale, 1.01) } == true && rs.tracks["next"]?.popAt == t0 + 20, "one new since the first look pops on its own")
+    check(!NM.runway(rs, later, at: t0 + 20.6, breathPeriod: nil, reduceMotion: false).markers.contains { $0.marker.id == "soon" }, "gone after its flash")
+    let onPower = RunwayModel(markers: [marker("reset", .usageReset, minutes: 110, now: d0), marker("next", .usageReset, minutes: 300, now: d0)], onAC: true, clearUntil: nil)
+    rs.observe(onPower, at: t0 + 30, first: 0)
+    let fading = NM.runway(rs, onPower, at: t0 + 30.15, breathPeriod: nil, reduceMotion: false).markers.first { $0.marker.id == "cutoff" }
+    check(rs.gone["cutoff"]?.reachedNow == false && fading?.flash == nil && near(fading?.opacity, 0.125) && near(fading?.x, 118.0 / 360), "one gone for another reason just fades, where it was")
+    // A marker is one per kind: the reset that comes round reaches now and the next one arrives (no glide back across the line).
+    var round = NM.RunwayScene()
+    let resetNow = RunwayModel(markers: [marker("usage-reset", .usageReset, minutes: 0.01, now: d0)], onAC: true, clearUntil: nil)
+    let resetNext = RunwayModel(markers: [marker("usage-reset", .usageReset, minutes: 300, now: d0)], onAC: true, clearUntil: nil)
+    round.observe(resetNow, at: t0, first: t0 - 100)
+    round.observe(resetNext, at: t0 + 2, first: 0)
+    let comeRound = NM.runway(round, resetNext, at: t0 + 2.175, breathPeriod: nil, reduceMotion: false).markers
+    check(comeRound.count == 2 && comeRound.first { $0.leaving }.map { $0.x == 0 && $0.flash != nil } == true
+          && comeRound.first { !$0.leaving }.map { near($0.x, 300.0 / 360) && near($0.scale, 1.01) } == true
+          && Set(comeRound.map(\.key)).count == 2, "the reset that came round flashes at now; the next pops in at its place")
+
+    // The NOW dot breathes with the pulse only while agents work.
+    check(NM.runway(rs, onPower, at: t0 + 32, breathPeriod: 4, reduceMotion: false).breath != nil && NM.runway(rs, onPower, at: t0 + 32, breathPeriod: nil, reduceMotion: false).breath == nil
+          && NM.runway(rs, onPower, at: t0 + 32, breathPeriod: 4, reduceMotion: true).breath == nil, "the NOW dot: breathing while working; still otherwise and with Reduce Motion")
+
+    // The scene: the first look plays nothing; new words; new numbers; receipts; the chips; the badges.
+    func look(_ h: String, _ sub: String = "2 working", settled: [String] = ["h1", "h2"], age: Double = 0, stamp: Double = t0, reviews: [String] = ["p4"],
+              badges: [Int] = [2, 2]) -> NM.NowLook {
+        let lines = settled.map { SettledLine(id: $0, tone: .approved, text: $0, age: "1m", status: nil, at: Date(timeIntervalSinceReferenceDate: stamp - age)) }
+        return NM.NowLook(headline: h, subline: sub, runway: r0, settled: lines, reviews: reviews, badges: badges)
+    }
+    var scene = NM.NowScene(opening: look("2 need you"), at: t0, shown: { _, t in t })
+    check(scene.headline == nil && scene.arrivals.isEmpty && scene.badges.bumps.isEmpty && scene.chipsShown["p4"] == t0 && scene.runway.shownAt == t0,
+          "the first look: only the first-appearance one-shots")
+    check(near(scene.chips("p4", at: t0 + 0.19, reduceMotion: false), 0.19) && scene.chips("p4", at: t0, reduceMotion: true) == .infinity
+          && scene.chips("other", at: t0, reduceMotion: false) == .infinity, "the chips count from when the card first showed; at once with Reduce Motion")
+    scene.observe(look("3 need you", settled: ["h0", "h1", "h2"], badges: [3, 2]), at: t0 + 2)
+    check(scene.headline == nil && scene.arrivals == ["h0": t0 + 2] && scene.badges.bumps == [0: t0 + 2], "new numbers roll (no cross-fade); a receipt arrives; the Now badge bumps")
+    check(near(scene.badges.scale(0, at: t0 + 2.25, reduceMotion: false), 1.22) && scene.badges.scale(0, at: t0 + 2.25, reduceMotion: true) == 1
+          && scene.badges.scale(1, at: t0 + 2.25, reduceMotion: false) == 1, "only the badge that changed bumps (none with Reduce Motion)")
+    check(scene.receipt("h0", at: t0 + 2.175, reduceMotion: false).map { near($0.offset, -0.75) && near($0.height, 0.875) } == true
+          && scene.receipt("h1", at: t0 + 2.1, reduceMotion: false) == nil
+          && scene.receipt("h0", at: t0 + 2.7, reduceMotion: false) == nil && near(scene.receiptsSettle(reduceMotion: false), t0 + 2 + NM.receiptSettle),
+          "the new receipt lands, then holds")
+    scene.observe(look("1 needs you", "2 working · on battery", settled: ["h0", "h1", "h2"], badges: [1, 2]), at: t0 + 5)
+    let words = scene.reword(scene.headline, at: t0 + 5.175, reduceMotion: false)
+    check(words?.change.from == "3 need you" && near(words?.frame.into.opacity, 0.875) && near(words?.frame.out.offset, -3.5) && scene.subline?.from == "2 working"
+          && scene.reword(scene.headline, at: t0 + 5.4, reduceMotion: false) == nil && near(scene.rewordsSettle(reduceMotion: false), t0 + 5.35), "new words cross-fade, then hold")
+    var reload = NM.NowScene(opening: look("x", settled: []), at: t0)
+    reload.observe(look("x", settled: ["a", "b"], age: 600), at: t0 + 1)
+    check(reload.arrivals.isEmpty, "older receipts a reload brings in just appear (news is under 2 minutes old)")
+    var gone = NM.NowScene(opening: look("x", badges: [2, 2]), at: t0)
+    gone.observe(look("x", badges: [0, 3]), at: t0 + 1)
+    check(gone.badges.bumps == [1: t0 + 1], "a badge going (or appearing) is a transition, not a bump")
+
+    // The harness's scripts, replayed.
+    let base = 9_000.0
+    let enter = NM.replay(NM.NowScript(base: base, steps: [NM.NowStep(at: 0, look: look("2 need you"))], entered: false), until: 0.3)!
+    check(enter.scene.runway.shownAt == base && enter.scene.chipsShown["p4"] == base, "enter: the Runway and the chips start with Now")
+    let changeSteps = [NM.NowStep(at: 0, look: look("2 need you")), NM.NowStep(at: 2, look: look("3 need you", settled: ["h0", "h1", "h2"], stamp: base + 2, badges: [3, 2]))]
+    let before = NM.replay(NM.NowScript(base: base, steps: changeSteps), until: 1.9)!
+    let after = NM.replay(NM.NowScript(base: base, steps: changeSteps), until: 2.2)!
+    check(before.scene.runway.shownAt == base - 100 && before.scene.arrivals.isEmpty && before.look.headline == "2 need you"
+          && after.look.headline == "3 need you" && after.scene.arrivals["h0"] == base + 2 && after.scene.badges.bumps[0] == base + 2, "change: everything at 2.0 s, nothing before")
+}
+
 print("passes=\(passes) failures=\(failures)")
 exit(failures == 0 ? 0 : 1)

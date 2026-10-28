@@ -26,6 +26,13 @@ struct NowContainer: View {
     @State private var ghostTick = 0
     /// "Show all N" is open in In flight.
     @State private var inFlightExpanded = false
+    /// Workflow lines seen ending a moment ago, kept on their cards for the
+    /// grace window (`NowMotion.FlightGrace`), and a redraw when one is over.
+    @State private var flightGrace = NowMotion.FlightGrace()
+    @State private var flightTick = 0
+    /// The list kept through a dropped connection is stale: from the drop until the first list after
+    /// reconnecting has been looked at, endings are only remembered (that first look is a first look).
+    @State private var flightStale = false
 
     var body: some View {
         // Ages, presence and the arm ring re-evaluate every few seconds even when no data changes.
@@ -38,7 +45,8 @@ struct NowContainer: View {
         }
         .onChange(of: scenePhase) { old, phase in
             // Only a return from the background is an absence (Face ID and Control Centre are not).
-            if phase == .active { if old == .background { away.returned() }; Task { await api.refreshHistory() } }
+            // The first In flight look after it is a first look: nothing that ended meanwhile plays.
+            if phase == .active { if old == .background { away.returned(); flightGrace.reset() }; Task { await api.refreshHistory() } }
         }
         // A finger can be cancelled without an end event; never stay frozen for long.
         .task(id: touching) {
@@ -46,7 +54,14 @@ struct NowContainer: View {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             if !Task.isCancelled { touching = false }
         }
-        .onChange(of: pairing.activeMacId) { _, _ in activity.reset(); coordinator.reset(); shown = [] }
+        .onChange(of: pairing.activeMacId) { _, _ in activity.reset(); coordinator.reset(); shown = []; flightGrace.reset() }
+        .onChange(of: api.connection) { _, c in if c != .connected { flightGrace.reset(); flightStale = true } }
+        // The first list since reconnecting, new or the same as before, is looked at silently; endings play again from the next.
+        .onChange(of: sessions.lastListAt) { _, _ in
+            guard flightStale, api.connection == .connected else { return }
+            flightGrace.observe(flightSection(now: Date()), at: Date(), silent: true)
+            flightStale = false
+        }
     }
 
     private var macName: String { nwMacName(sessions: sessions, pairing: pairing) }
@@ -59,7 +74,9 @@ struct NowContainer: View {
 
     private func content(now: Date) -> some View {
         _ = ghostTick
+        _ = flightTick
         let model = NowModel.build(inputs(now: now))
+        let flight = flightSection(now: now)
         let merged = StableOrder.merge(shown: shown, ranked: model.rows, frozen: touching)
         // A card confirmed a moment ago stays, as a ghost, while its thread resolves.
         let departing = DepartingRows.merge(previous: lastRows, current: merged.rows, deliveries: api.deliveries,
@@ -68,7 +85,7 @@ struct NowContainer: View {
         shownModel.rows = departing.rows
         let ids = model.rows.map(\.id)
         let drawn = departing.rows.map(\.id)
-        var screen = data(model: shownModel, queued: merged.queuedNew, now: now)
+        var screen = data(model: shownModel, queued: merged.queuedNew, flight: flight, now: now)
         screen.ghosts = departing.ghosts
         screen.inboxLoaded = api.inboxLoad == .loaded
         return NWNowScreen(data: screen, actions: actions(model: model))
@@ -77,7 +94,16 @@ struct NowContainer: View {
             .onChange(of: ids) { _, new in if !touching { shown = new } }
             .onChange(of: touching) { _, t in if !t { shown = ids } }
             .onChange(of: drawn) { _, _ in lastRows = departing.rows }
-            .onAppear { shown = ids; lastRows = departing.rows; activity.observePower(paused: model.paused, sessions: sessions.sessions) }
+            .onAppear {
+                shown = ids; lastRows = departing.rows; activity.observePower(paused: model.paused, sessions: sessions.sessions)
+                flightGrace.observe(flight, at: Date(), silent: true)
+            }
+            .onChange(of: flight) { _, f in observeFlight(f) }
+            .task(id: flightGrace.nextExpiry) {
+                guard let at = flightGrace.nextExpiry else { return }
+                try? await Task.sleep(nanoseconds: UInt64(max(0, at.timeIntervalSinceNow + 0.05) * 1_000_000_000))
+                if !Task.isCancelled { flightTick += 1 }
+            }
             .onChange(of: sessions.sessions) { _, list in
                 activity.observe(sessions: list, interventions: api.inbox, paused: model.paused)
                 activity.observePower(paused: model.paused, sessions: list)
@@ -90,12 +116,33 @@ struct NowContainer: View {
             }
     }
 
-    private func data(model: NowModel, queued: Int, now: Date) -> NowScreenData {
+    /// The In flight lines as they now stand. An ending seen while Now is in
+    /// view keeps its line for the grace window and is said once, politely;
+    /// under a sheet (the room plays its own) or away, it is only remembered.
+    private func observeFlight(_ section: InFlightSection) {
+        for end in flightGrace.observe(section, at: Date(), silent: flightQuiet, once: { NWFlightBook.once($0) }) {
+            guard let text = NowMotion.announcement(end.line, project: end.project) else { continue }
+            var spoken = AttributedString(text)
+            spoken.accessibilitySpeechAnnouncementPriority = .low
+            AccessibilityNotification.Announcement(spoken).post()
+        }
+    }
+
+    /// The In flight section as the stores now stand.
+    private func flightSection(now: Date) -> InFlightSection {
+        InFlightSection.build(sessions: sessions.sessions, hasSessionList: sessions.hasList, workflows: sessions.workflows,
+                              stuck: FlightHealth.stuckSessionIds(api.inbox), now: now, expanded: inFlightExpanded)
+    }
+
+    /// Endings are only remembered: under a sheet, away, or on a stale list.
+    private var flightQuiet: Bool { router.sheets.current != nil || scenePhase != .active || flightStale }
+
+    private func data(model: NowModel, queued: Int, flight: InFlightSection, now: Date) -> NowScreenData {
         var d = NowScreenData(model: model, log: SettledLog.build(history: api.history, now: now, calendar: .current), chip: MacChipModel.build(macName: macName, status: api.macStatus, now: now),
                               now: now)
         d.queuedNew = queued
-        d.inFlight = InFlightSection.build(sessions: sessions.sessions, hasSessionList: sessions.hasList, workflows: sessions.workflows,
-                                           stuck: FlightHealth.stuckSessionIds(api.inbox), now: now, expanded: inFlightExpanded)
+        // An ending not yet observed is drawn closing at once, unless it will not play.
+        d.inFlight = flightGrace.merged(flight, now: Date(), provisional: { !flightQuiet && !NWFlightBook.played($0) })
         d.biometry = BiometricGate.displayName
         d.pending = coordinator.pending
         var outcomes: [String: CardOutcome] = [:]

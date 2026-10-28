@@ -21,15 +21,30 @@ struct NWNavCapsule: View {
     var onPulseTap: () -> Void = {}
     var onPulseHold: () -> Void = {}
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.nwReduceMotion) private var forcedReduceMotion
     @Environment(\.nwChromeGlassOn) private var glass
+    @Environment(\.nwMotion) private var pin
+    @Environment(\.nwNowScript) private var script
+    /// When each badge's count last went from one number to another (`NowMotion.BadgeScene`).
+    @State private var badges = NowMotion.BadgeScene()
+
+    private var calm: Bool { reduceMotion || forcedReduceMotion }
+
+    /// The badges' scene and the moment: the harness's script replayed to its pinned moment, else the live one.
+    private var badgeMotion: (scene: NowMotion.BadgeScene, pinned: Double?) {
+        if let p = pin.flatMap({ $0.kind == .now ? $0.time : nil }), let script, let r = NowMotion.replay(script, until: p) {
+            return (r.scene.badges, script.base + p)
+        }
+        return (badges, nil)
+    }
 
     var body: some View {
         // One container: the pulse's glass sits in the capsule's, refracting the same sky.
         NWChromeGlassGroup {
             HStack(spacing: 0) {
-                side(.now, "Now", decideCount, NightWatch.Palette.amber)
+                side(.now, "Now", decideCount, NightWatch.Palette.amber, badge: 0)
                 pulse
-                side(.lanes, "Lanes", workingCount, NightWatch.Palette.teal)
+                side(.lanes, "Lanes", workingCount, NightWatch.Palette.teal, badge: 1)
             }
             .padding(.horizontal, 8)
             .frame(height: 68)
@@ -38,6 +53,8 @@ struct NWNavCapsule: View {
                 NWGlassBackground(radius: NightWatch.Radius.capsule, fill: NightWatch.Palette.surface.opacity(0.94))
             }
         }
+        .onAppear { badges.observe([decideCount, workingCount], at: Date().timeIntervalSinceReferenceDate) }
+        .onChange(of: [decideCount, workingCount]) { _, counts in badges.observe(counts, at: Date().timeIntervalSinceReferenceDate) }
     }
 
     /// A horizontal drag on either side of the capsule switches place. The
@@ -90,8 +107,11 @@ struct NWNavCapsule: View {
         .accessibilityAction(named: Text("Stop all agents")) { onPulseHold() }
     }
 
-    private func side(_ d: Destination, _ title: String, _ count: Int, _ badge: NightWatch.RGBA) -> some View {
+    /// A side and its badge. A new count rolls in as the badge bumps (1 → 1.22 → 1, `NowMotion.badgeBump`);
+    /// a badge appearing scales in from 0.5 on a (0.35, 0.6) spring, and going scales back to 0.5 as it fades.
+    private func side(_ d: Destination, _ title: String, _ count: Int, _ badge: NightWatch.RGBA, badge i: Int) -> some View {
         let on = selection == d
+        let m = badgeMotion
         return Button {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.3)) { selection = d }
         } label: {
@@ -99,12 +119,19 @@ struct NWNavCapsule: View {
                 Text(title).font(.system(.body, weight: on ? .bold : .medium))
                     .foregroundColor((on ? NightWatch.Palette.textPrimary : NightWatch.Palette.textTertiary).color)
                 if count > 0 {
-                    Text("\(count)").font(.system(.caption, weight: .bold))
-                        .foregroundColor(badge.color)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Capsule().fill(badge.opacity(0.18).color))
+                    NWWorkflowClock(origin: 0, until: m.scene.settlesAt(i, reduceMotion: calm), pinned: m.pinned) { t in
+                        Text("\(count)").font(.system(.caption, weight: .bold))
+                            .foregroundColor(badge.color)
+                            .contentTransition(calm ? .opacity : .numericText(value: Double(count)))
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(badge.opacity(0.18).color))
+                            .scaleEffect(CGFloat(m.scene.scale(i, at: t, reduceMotion: calm)))
+                    }
+                    .transition(calm ? .opacity : .scale(scale: NowMotion.badgeFrom).combined(with: .opacity))
                 }
             }
+            .animation(calm ? .easeOut(duration: WorkflowMotion.reducedFade)
+                       : .spring(response: NowMotion.badgeResponse, dampingFraction: NowMotion.badgeDamping), value: count)
             .frame(maxWidth: .infinity, minHeight: 52)
             .background(Capsule().fill(on ? Color.white.opacity(0.08) : Color.clear))
             .contentShape(Capsule())

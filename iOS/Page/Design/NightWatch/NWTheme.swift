@@ -226,11 +226,19 @@ private struct NWReduceMotionKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct NWFlightScriptKey: EnvironmentKey {
+    static let defaultValue: NowMotion.FlightScript? = nil
+}
+
+private struct NWNowScriptKey: EnvironmentKey {
+    static let defaultValue: NowMotion.NowScript? = nil
+}
+
 /// A signature motion pinned at one moment, for the render harness: the
 /// views that play `kind` draw the frame `time` seconds after it began
 /// instead of following the clock.
 struct NWMotionPin: Equatable {
-    enum Kind: String, Equatable { case exhale, approach, receipt, hold, dusk, dawn, brief, workflow }
+    enum Kind: String, Equatable { case exhale, approach, receipt, hold, dusk, dawn, brief, workflow, inflight, now }
     var kind: Kind
     var time: Double
 }
@@ -298,6 +306,21 @@ extension EnvironmentValues {
     var nwWorkflowScript: [WorkflowMotion.Step]? {
         get { self[NWWorkflowScriptKey.self] }
         set { self[NWWorkflowScriptKey.self] = newValue }
+    }
+
+    /// How the In flight section changes over the pinned time (`.inflight`):
+    /// the render harness replays it, as the live section would have seen it.
+    var nwFlightScript: NowMotion.FlightScript? {
+        get { self[NWFlightScriptKey.self] }
+        set { self[NWFlightScriptKey.self] = newValue }
+    }
+
+    /// How the rest of Now changes over the pinned time (`.now`): the Runway,
+    /// the Horizon's words, the badges, the chips and Settled. The render
+    /// harness replays it, as the live screen would have seen it.
+    var nwNowScript: NowMotion.NowScript? {
+        get { self[NWNowScriptKey.self] }
+        set { self[NWNowScriptKey.self] = newValue }
     }
 
     /// True draws the motions that read it as Reduce Motion does, whatever
