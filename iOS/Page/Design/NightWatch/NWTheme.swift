@@ -218,11 +218,19 @@ private struct NWFixedNowKey: EnvironmentKey {
     static let defaultValue: Date? = nil
 }
 
+private struct NWWorkflowScriptKey: EnvironmentKey {
+    static let defaultValue: [WorkflowMotion.Step]? = nil
+}
+
+private struct NWReduceMotionKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 /// A signature motion pinned at one moment, for the render harness: the
 /// views that play `kind` draw the frame `time` seconds after it began
 /// instead of following the clock.
 struct NWMotionPin: Equatable {
-    enum Kind: String, Equatable { case exhale, approach, receipt, hold, dusk, dawn, brief }
+    enum Kind: String, Equatable { case exhale, approach, receipt, hold, dusk, dawn, brief, workflow }
     var kind: Kind
     var time: Double
 }
@@ -284,6 +292,20 @@ extension EnvironmentValues {
 
     /// The pinned seconds into `kind`, or nil when that motion is live.
     func nwPinned(_ kind: NWMotionPin.Kind) -> Double? { nwMotion?.kind == kind ? nwMotion?.time : nil }
+
+    /// How a workflow run changes over the pinned time (`.workflow`): the
+    /// render harness replays it, as the live lens would have seen it.
+    var nwWorkflowScript: [WorkflowMotion.Step]? {
+        get { self[NWWorkflowScriptKey.self] }
+        set { self[NWWorkflowScriptKey.self] = newValue }
+    }
+
+    /// True draws the motions that read it as Reduce Motion does, whatever
+    /// the system says: the render harness's `-NWReduceMotion`.
+    var nwReduceMotion: Bool {
+        get { self[NWReduceMotionKey.self] }
+        set { self[NWReduceMotionKey.self] = newValue }
+    }
 }
 
 extension Text {

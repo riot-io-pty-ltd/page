@@ -9,8 +9,10 @@ import Foundation
 /// `-NWDayTime HH:MM`) pins the time of day the skies are drawn at, as a
 /// local minute of the day, never an instant, so a simulator in any time zone
 /// draws the same sky; `-NWGlass off` draws the chrome without Liquid Glass
-/// (the look before iOS 26, and with Reduce Transparency on). Parsed here so
-/// it is testable; only DEBUG builds act on it.
+/// (the look before iOS 26, and with Reduce Transparency on);
+/// `-NWReduceMotion` draws the motions as Reduce Motion does, without
+/// touching the simulator's own setting. Parsed here so it is testable; only
+/// DEBUG builds act on it.
 struct RenderArguments: Equatable {
     var screen: String
     var glow: CardGlow?
@@ -21,6 +23,8 @@ struct RenderArguments: Equatable {
     var dayTime: Double? = nil
     /// False draws the chrome's fallback surfaces where Liquid Glass would be.
     var glass = true
+    /// True draws the motions that honour it as Reduce Motion does.
+    var reduceMotion = false
 
     static let screenFlag = "-NWRender"
     static let glowFlag = "-NWGlow"
@@ -28,6 +32,7 @@ struct RenderArguments: Equatable {
     static let daypartFlag = "-NWDaypart"
     static let dayTimeFlag = "-NWDayTime"
     static let glassFlag = "-NWGlass"
+    static let reduceMotionFlag = "-NWReduceMotion"
 
     /// nil when `-NWRender` is absent or has no screen after it. A time that
     /// is not a finite, non-negative number is ignored. Pure.
@@ -41,7 +46,8 @@ struct RenderArguments: Equatable {
         }.first
         // Only "off" turns the glass off; anything else leaves it as the system draws it.
         let glass = args.firstIndex(of: glassFlag).map { !(args.indices.contains($0 + 1) && args[$0 + 1] == "off") } ?? true
-        return RenderArguments(screen: args[i + 1], glow: glow, time: time, dayTime: day, glass: glass)
+        return RenderArguments(screen: args[i + 1], glow: glow, time: time, dayTime: day, glass: glass,
+                               reduceMotion: args.contains(reduceMotionFlag))
     }
 
     /// A time of day as a minute: a phase's name (the middle of its core),

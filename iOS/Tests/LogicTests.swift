@@ -1595,6 +1595,8 @@ do {
 // Liquid Glass: the harness can draw the chrome without it, and every glass call sits behind the one gate.
 do {
     check(RenderArguments.parse(["-NWRender", "now"])?.glass == true, "the chrome is on glass unless told otherwise")
+    check(RenderArguments.parse(["-NWRender", "room-workflows-running", "-NWReduceMotion"])?.reduceMotion == true
+          && RenderArguments.parse(["-NWRender", "room-workflows-running"])?.reduceMotion == false, "-NWReduceMotion draws as Reduce Motion does")
     check(RenderArguments.parse(["-NWRender", "now", "-NWGlass", "off"])?.glass == false, "-NWGlass off draws the fallback")
     check(RenderArguments.parse(["-NWRender", "now", "-NWGlass", "on"])?.glass == true
           && RenderArguments.parse(["-NWRender", "now", "-NWGlass"])?.glass == true, "anything but off leaves the glass on")
@@ -2827,6 +2829,158 @@ do {
     check(WorkflowOrbit.groups(wr("d", "d", "completed", done: 1, total: 1, agents: [agents[0]])).map(\.title) == ["Done"], "empty groups are omitted")
     check(WorkflowRun.duration(120) == "2m" && WorkflowRun.tokens(1500) == "1.5k tokens" && WorkflowRun.tokens(12) == "12 tokens", "run duration and token formats")
     check(wr("s", "s", "killed", done: 0, total: 0).statusLabel == "Stopped" && wr("s", "s", "stalled", done: 0, total: 0).statusLabel == "No recent activity", "run status labels")
+}
+
+// The Workflows lens's motion: the shared sample table (Android asserts the same numbers in WorkflowMotionTest.kt).
+do {
+    typealias WM = WorkflowMotion
+    func near(_ a: Double?, _ b: Double, _ eps: Double = 1e-6) -> Bool { a.map { abs($0 - b) < eps } ?? false }
+    let table: [(String, Double, Double)] = [
+        ("easeOutBack(0.25)", WM.easeOutBack(0.25), 0.746875), ("easeOutBack(0.5)", WM.easeOutBack(0.5), 1.025),
+        ("easeOutBack(0.75)", WM.easeOutBack(0.75), 1.040625),
+        ("easeInOutCubic(0.25)", WM.easeInOutCubic(0.25), 0.0625), ("easeInOutCubic(0.75)", WM.easeInOutCubic(0.75), 0.9375),
+        ("nodeStart(3,7)", WM.nodeStart(3, of: 7), 0.26), ("nodeStart(6,7)", WM.nodeStart(6, of: 7), 0.44),
+        ("nodeStart(5,24)", WM.nodeStart(5, of: 24), 0.205),
+        ("nodeEntrance(0.21).scale", WM.nodeEntrance(0.21).scale, 1.015), ("nodeEntrance(0.21).opacity", WM.nodeEntrance(0.21).opacity, 0.925925926),
+        ("nodeEntrance(0.1).scale", WM.nodeEntrance(0.1).scale, 0.834143181), ("nodeEntrance(0.1).opacity", WM.nodeEntrance(0.1).opacity, 0.347434682),
+        ("sweep(0.375)", WM.sweep(0.375), 0.0625), ("sweep(0.6)", WM.sweep(0.6), 0.5), ("sweep(0.9)", WM.sweep(0.9), 0.981481481),
+        ("shownDone(0.45,4)", Double(WM.shownDone(0.45, done: 4)), 1), ("shownDone(0.6,4)", Double(WM.shownDone(0.6, done: 4)), 2),
+        ("shownDone(0.75,4)", Double(WM.shownDone(0.75, done: 4)), 3), ("shownDone(1.05,4)", Double(WM.shownDone(1.05, done: 4)), 4),
+        ("row(0.325,0).offset", WM.row(0.325, index: 0).offset, 1.0), ("row(0.325,0).opacity", WM.row(0.325, index: 0).opacity, 0.875),
+        ("row(0.5,9).offset", WM.row(0.5, index: 9).offset, 6.229504),
+        ("breath(0.45,0)", WM.breath(0.45), 0.5), ("breath(0.9,0)", WM.breath(0.9), 1.0), ("breath(0,1)", WM.breath(0, index: 1), 0.033836327),
+        ("breath(1.0,3)", WM.breath(1.0, index: 3), 0.862096069),
+        ("ripple(1.2,0).radius", WM.ripple(1.2, index: 0).radius, 24.0), ("ripple(1.2,0).opacity", WM.ripple(1.2, index: 0).opacity, 0.04375),
+        ("ripple(0.6,2).radius", WM.ripple(0.6, index: 2).radius, 15.544594724), ("ripple(0.6,2).opacity", WM.ripple(0.6, index: 2).opacity, 0.22871199),
+        ("comet(2)", WM.comet(2), Double.pi / 2), ("comet(10)", WM.comet(10), Double.pi / 2),
+        ("change(0.175,finished).mix", WM.change(0.175, kind: .finished).mix, 0.875),
+        ("change(0.175,finished).fill", WM.change(0.175, kind: .finished).fill ?? -1, 0.925),
+        ("change(0.175,finished).ring.radius", WM.change(0.175, kind: .finished).ring?.radius ?? -1, 23.03125),
+        ("change(0.175,finished).ring.opacity", WM.change(0.175, kind: .finished).ring?.opacity ?? -1, 0.2109375),
+        ("change(0.35,failed).ring.radius", WM.change(0.35, kind: .failed).ring?.radius ?? -1, 30.75),
+        ("change(0.35,failed).ring.opacity", WM.change(0.35, kind: .failed).ring?.opacity ?? -1, 0.0625),
+        ("pulse(0.55).scale", WM.pulse(0.55)?.scale ?? -1, 1.30625), ("pulse(0.55).opacity", WM.pulse(0.55)?.opacity ?? -1, 0.06875),
+        ("bump(0.125)", WM.bump(0.125), 1.042426407), ("bump(0.25)", WM.bump(0.25), 1.06),
+    ]
+    for (name, got, want) in table { check(near(got, want), "workflow motion \(name) = \(want) (got \(got))") }
+    check(near(WM.nodeEntrance(0).scale, 0.4) && WM.nodeEntrance(0).opacity == 0 && near(WM.nodeEntrance(0.42).scale, 1) && WM.nodeEntrance(0.42).opacity == 1
+          && WM.nodeEntrance(-1).opacity == 0, "a node enters from 0.4, unseen, and lands at 1")
+    check(WM.change(0.175, kind: .failed).fill == nil && WM.change(0.35, kind: .finished).fill == nil
+          && WM.change(0.7, kind: .finished).ring == nil && WM.change(0.1, kind: .stopped).ring == nil, "only a finished node fills; one ring, finished or failed")
+    let calm = WM.change(0.1, kind: .finished, reduceMotion: true)
+    check(near(calm.mix, 0.875) && calm.fill == nil && calm.ring == nil, "Reduce Motion: a 0.2 s cross-fade, no fill, no ring")
+    check(WM.pulse(-0.01) == nil && WM.pulse(1.1) == nil && WM.bump(0) == 1 && WM.bump(0.5) == 1, "the pulse and the bump play once, then nothing")
+    check(WM.row(0, index: 0, reduceMotion: true) == (0, 0) && WM.row(0.2, index: 30, reduceMotion: true) == (0, 1), "Reduce Motion rows fade in place")
+    check(WM.rowStart(7) == WM.rowStart(20), "rows after the eighth appear with it")
+    check(WM.rise(-.infinity) == (8, 0), "an agent's item not yet arrived waits, hidden")
+}
+
+// The scene: events by agent id, the frozen order, the arc's spring, the pulse once per run, settling.
+do {
+    typealias WM = WorkflowMotion
+    func near(_ a: Double?, _ b: Double, _ eps: Double = 1e-6) -> Bool { a.map { abs($0 - b) < eps } ?? false }
+    func ag(_ id: String, _ state: String) -> WorkflowRun.Agent { .init(id: id, label: "agent \(id)", phase: nil, state: state, lastActivityAt: nil) }
+    func run(_ status: String, _ states: [String], done: Int? = nil, total: Int? = nil) -> WorkflowRun {
+        let agents = states.enumerated().map { ag("a\($0.offset + 1)", $0.element) }
+        return WorkflowRun(id: "wf1", name: "review-changes", status: status, phase: nil, done: done ?? states.filter { $0 == "done" }.count,
+                           total: total ?? states.count, startedAt: nil, endedAt: nil, tokens: nil, agents: agents)
+    }
+    func orbit(_ r: WorkflowRun) -> WorkflowOrbit { WorkflowOrbit.build(run: r, now: nwNow) }
+    // The design's run: 4/7, two running, one failed.
+    let design = run("running", ["running", "running", "failed", "done", "done", "done", "done"])
+    let finish = run("running", ["running", "done", "failed", "done", "done", "done", "done"])
+    check(WM.summary(orbit(design)) == "4 of 7 agents done, 2 running, 1 failed", "the orbit in one sentence (\(WM.summary(orbit(design))))")
+    let e1 = WM.events(orbit(design), orbit(finish))
+    check(e1 == WM.Events(finished: ["a2"]), "a running agent that is done now is finished (\(e1))")
+    check(WM.events(orbit(design), orbit(design)).isEmpty, "nothing changed, nothing to play")
+    var later = design
+    later = WorkflowRun(id: later.id, name: later.name, status: later.status, phase: "Review", done: 4, total: 7,
+                        startedAt: nwNow, endedAt: nil, tokens: 999, agents: later.agents)
+    check(WM.events(orbit(design), WorkflowOrbit.build(run: later, now: nwNow.addingTimeInterval(2))).isEmpty, "a new phase, age or token count is not a change")
+    check(WM.events(orbit(design), orbit(run("running", ["failed", "running", "failed", "done", "done", "done", "done"]))) == WM.Events(failed: ["a1"]),
+          "a running agent that failed")
+    check(WM.events(orbit(design), orbit(run("killed", ["stopped", "stopped", "failed", "done", "done", "done", "done"]))) == WM.Events(stopped: ["a1", "a2"], completed: true),
+          "stopped agents, and a run that ended is complete")
+    let grown = run("running", ["running", "running", "failed", "done", "done", "done", "done", "running"])
+    check(WM.events(orbit(design), orbit(grown)) == WM.Events(added: ["a8"]), "a newcomer")
+    let last = run("running", ["running", "done", "done", "done", "done", "done", "done"])
+    let complete = run("completed", ["done", "done", "done", "done", "done", "done", "done"])
+    let e2 = WM.events(orbit(last), orbit(complete))
+    check(e2 == WM.Events(finished: ["a1"], completed: true), "the last agent done: finished and complete (\(e2))")
+    check(WM.announcement(e2, orbit: orbit(complete)) == "review-changes: all 7 agents done", "the completion is announced once, politely")
+    check(WM.announcement(e1, orbit: orbit(finish)) == "agent a2 finished" && WM.announcement(WM.Events(), orbit: orbit(finish)) == nil,
+          "a finished agent is announced by name; nothing else is")
+    check(!WM.isComplete(orbit(design)) && WM.isComplete(orbit(complete)) && !WM.isComplete(orbit(run("running", ["done"])))
+          && WM.isComplete(orbit(run("killed", ["stopped", "failed", "done"]))), "complete: every agent finished, and the run no longer running")
+    // The Mac lists at most 100 agents, running first: a big run whose unlisted agents failed still completes.
+    check(WM.isComplete(orbit(run("completed", Array(repeating: "done", count: 100), done: 140, total: 150))), "a run of 150 agents, 100 listed, completes")
+    check(!WM.isComplete(orbit(run("stalled", ["stopped", "failed", "done"]))) && !WM.isComplete(orbit(run("completed", [], done: 0, total: 0))),
+          "a stalled run has not ended, nor is an empty one complete")
+    check(WM.events(orbit(design), orbit(run("stalled", ["stopped", "stopped", "failed", "done", "done", "done", "done"]))) == WM.Events(stopped: ["a1", "a2"]),
+          "a stall stops its agents but plays no completion")
+    check(WM.summary(orbit(run("running", ["running"]))) == "0 of 1 agent done, 1 running", "one agent is singular")
+    let crowd = orbit(run("running", Array(repeating: "done", count: 26) + ["failed", "running"]))
+    check(crowd.nodes.count == WorkflowOrbit.maxNodes && WM.summary(crowd) == "26 of 28 agents done, 1 running, 1 failed",
+          "the sentence counts every agent, not only the 24 drawn")
+
+    // Opening: every node in, the arc swept, the count up, nothing pulsing for a running run.
+    let open = WM.Scene(opening: orbit(design))
+    check(open.completionAt == nil && open.animatesUntil(reduceMotion: false) == .infinity, "a running run loops while it runs")
+    check(nwNear(open.settlesAt(reduceMotion: false), 1.05) && nwNear(open.settlesAt(reduceMotion: true), 0.2), "its entrance is over by 1.05 s (0.2 s with Reduce Motion)")
+    let f0 = WM.frame(open, at: 0), f1 = WM.frame(open, at: 1.2)
+    check(f0.shownDone == 0 && f0.arc == 0 && f0.nodes.allSatisfy { $0.opacity == 0 } && f0.track == 0, "t = 0: nothing yet, \"0/7\"")
+    check(f1.shownDone == 4 && near(f1.arc, 4.0 / 7) && f1.nodes.allSatisfy { near($0.opacity, 1) && near($0.scale, 1) } && near(f1.track, 1), "1.2 s: all in, \"4/7\"")
+    check(f1.comet != nil && f1.head != nil && f1.breath != nil && f1.nodes[0].rings.count == 1 && f1.nodes[2].rings.isEmpty,
+          "while running: the comet, the head, the breath and a ripple per running node")
+    check(nwNear(f1.nodes[1].core, 1 + 0.12 * WM.breath(1.2, index: 1)) && nwNear(f1.nodes[1].halo, 0.25 + 0.25 * WM.breath(1.2, index: 1)),
+          "a running node breathes on its own phase")
+    let still = WM.frame(open, at: 1.2, reduceMotion: true)
+    check(still.comet == nil && still.breath == nil && still.nodes.allSatisfy { $0.rings.isEmpty && $0.core == 1 } && still.shownDone == 4 && nwNear(still.arc, 4.0 / 7),
+          "Reduce Motion: the final state, nothing looping")
+    check(WM.frame(open, at: 5, reduceMotion: true) == WM.frame(open, at: 9, reduceMotion: true), "Reduce Motion is still")
+
+    // An agent finishes at 2.0 s: it fills and rings, the arc springs to 5/7, the count is the new one.
+    guard let fin = WM.replay([WM.Step(at: 0, run: design), WM.Step(at: 2, run: finish)], until: 2.2, now: nwNow) else { fatalError() }
+    check(fin.run.done == 5 && fin.scene.orbit.done == 5, "the replay is at the second step")
+    let ff = WM.frame(fin.scene, at: 2.175)
+    let a2 = ff.nodes.first { $0.id == "a2" }
+    check(a2?.from == .running && a2?.state == .done && near(a2?.mix, 0.875) && near(a2?.fill, 0.925) && a2?.rings.count == 1, "the finished node crosses to done, fills and rings")
+    check(nwNear(WM.frame(fin.scene, at: 2.2).arc, 0.668737999) && nwNear(WM.frame(fin.scene, at: 2.5).arc, 0.714825724), "the arc springs to 5/7 (the shared table)")
+    check(ff.shownDone == 5 && ff.rolls, "the count rolls to the new value")
+    check(WM.replay([WM.Step(at: 0, run: design), WM.Step(at: 2, run: finish)], until: 1.9, now: nwNow)?.scene == WM.Scene(opening: orbit(design)),
+          "before 2.0 s nothing has changed")
+    check(WM.frame(fin.scene, at: 9).nodes.first { $0.id == "a2" }?.mix == 1 && WM.frame(fin.scene, at: 9).nodes.first { $0.id == "a2" }?.fill == nil, "and settles as a plain done node")
+
+    // The order stays put while the lens is open; a newcomer joins at the end and the others glide.
+    var s = WM.Scene(opening: orbit(design))
+    s.observe(orbit(run("running", ["done", "running", "failed", "done", "done", "done", "done"], done: 5)), at: 3)
+    check(s.order == ["a1", "a2", "a3", "a4", "a5", "a6", "a7"] && s.glides.isEmpty, "a1 finishing does not swap it with a2 (the orbit would sort a2 first)")
+    s.observe(orbit(run("running", ["done", "running", "failed", "done", "done", "done", "done", "running"], done: 5, total: 8)), at: 4)
+    check(s.order.last == "a8" && s.entries["a8"] == WM.Scene.Entry(start: 4, joined: 4) && s.glides.count == 6, "a newcomer enters at the end; the others glide (12 o'clock stays)")
+    check(near(s.angle(of: "a2", at: 4, reduceMotion: false), 2 * Double.pi / 7) && near(s.angle(of: "a2", at: 6, reduceMotion: false), 2 * Double.pi / 8)
+          && near(s.angle(of: "a2", at: 4, reduceMotion: true), 2 * Double.pi / 8), "from its old place to its new one (at once with Reduce Motion)")
+    check(nwNear(s.arc(at: 4, reduceMotion: false), 5.0 / 7, 1e-3) && nwNear(s.arc(at: 9, reduceMotion: false), 5.0 / 8, 1e-3), "the arc re-scales smoothly")
+
+    // The run completes at 2.0 s: the arc closes, then one soft pulse; then it is still.
+    guard let done = WM.replay([WM.Step(at: 0, run: last), WM.Step(at: 2, run: complete)], until: 4, now: nwNow) else { fatalError() }
+    check(done.scene.completionAt == 2.5 && nwNear(done.scene.settlesAt(reduceMotion: false), 3.6), "the pulse follows the arc closing and is over by 3.6 s")
+    check(WM.frame(done.scene, at: 2.4).pulse == nil && WM.frame(done.scene, at: 3.05).pulse.map { near($0.scale, 1.30625) && near($0.opacity, 0.06875) } == true
+          && near(WM.frame(done.scene, at: 2.75).textScale, 1.06), "a glow 1 → 1.35 r, the centre bumping 1 → 1.06 → 1")
+    check(WM.frame(done.scene, at: 4) == WM.frame(done.scene, at: 6), "a finished run, settled, is still")
+    check(WM.frame(done.scene, at: 4).comet == nil && WM.frame(done.scene, at: 4).head == nil, "nothing loops for a finished run")
+    check(WM.frame(done.scene, at: 3, reduceMotion: true).pulse == nil, "Reduce Motion: no pulse")
+    check(done.scene.statusFrom?.isRunning == true && near(WM.frame(done.scene, at: 2.175).statusMix, 0.875)
+          && near(done.scene.statusMix(at: 2.1, reduceMotion: true), 0.875) && WM.frame(done.scene, at: 2.5).statusMix == 1,
+          "RUNNING cross-fades to DONE over 0.35 s (0.2 s with Reduce Motion)")
+    check(WM.frame(done.scene, at: 2.175).comet != nil && near(WM.frame(done.scene, at: 2.175).loops, 0.125)
+          && WM.frame(done.scene, at: 2.4).comet == nil, "the comet and the head fade out with it, then stop")
+    // Already complete the first time it opens: it pulses at the end of the sweep, once per run per process.
+    let opened = WM.Scene(opening: orbit(complete))
+    check(opened.completionAt == 1.05 && WM.Scene(opening: orbit(complete), pulse: false).completionAt == nil, "a complete run pulses at the end of its entrance sweep")
+    var book = OneShotBook()
+    let firstPulse = book.start("wf1", now: 1_000 + opened.completionAt!)
+    let againPulse = book.start("wf1", now: 5_000 + opened.completionAt!) - 5_000
+    check(near(firstPulse, 1_001.05) && WM.frame({ var x = opened; x.completionAt = againPulse; return x }(), at: 1.3).pulse == nil, "opened again later, it does not pulse again")
 }
 
 do {

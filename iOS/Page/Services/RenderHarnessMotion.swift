@@ -40,9 +40,17 @@ enum RenderHarnessMotion {
     static func time(_ args: RenderArguments) -> Double { args.time ?? defaultTime(args.screen) }
 
     /// The aurora's and the pulse's clock: the pinned time for a motion
-    /// screen (so its ripples sit where the board's do), 3 s otherwise.
+    /// screen (so its ripples sit where the board's do), 3 s otherwise. The
+    /// Workflows lens's frames keep the room's sky at 3 s, so only the lens moves.
     static func phase(_ args: RenderArguments) -> Double {
-        args.screen.hasPrefix("motion-") ? time(args) : (args.time ?? 3.0)
+        if workflow(args.screen) { return 3.0 }
+        return args.screen.hasPrefix("motion-") ? time(args) : (args.time ?? 3.0)
+    }
+
+    /// The room screens whose workflow motion `-NWTime` pins: seconds since the lens (or the agent) opened.
+    /// (Not room-workflows-live or -many: those run on the real clock.)
+    static func workflow(_ screen: String) -> Bool {
+        (screen.hasPrefix("room-workflows") && screen != "room-workflows-live" && screen != "room-workflows-many") || screen == "room-agent"
     }
 
     /// Which motion the pinned time belongs to.
@@ -55,6 +63,7 @@ enum RenderHarnessMotion {
         case "motion-dusk", "motion-dusk-now": return NWMotionPin(kind: .dusk, time: t)
         case "motion-dawn", "motion-dawn-now": return NWMotionPin(kind: .dawn, time: t)
         case "motion-brief": return NWMotionPin(kind: .brief, time: t)
+        case _ where workflow(args.screen): return NWMotionPin(kind: .workflow, time: t)
         default: return nil
         }
     }

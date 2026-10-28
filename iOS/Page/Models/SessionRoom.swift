@@ -698,6 +698,12 @@ struct WorkflowOrbit: Equatable {
     let meta: String
     let statusLabel: String
     let isRunning: Bool
+    /// running, completed, failed, killed, stalled: the chip's colour.
+    let status: String
+    /// Counted over all the run's agents, not only the drawn nodes.
+    let running: Int
+    let failed: Int
+    let stopped: Int
 
     /// Most nodes drawn; more would only be dots on dots.
     static let maxNodes = 24
@@ -725,9 +731,11 @@ struct WorkflowOrbit: Equatable {
         if let phase = run.phase { meta.append("phase \(phase)") }
         if let start = run.startedAt { meta.append(WorkflowRun.duration((run.endedAt ?? now).timeIntervalSince(start))) }
         if let t = run.tokens { meta.append(WorkflowRun.tokens(t)) }
+        let states = run.agents.map(nodeState)
         return WorkflowOrbit(name: run.name, nodes: nodes, done: run.done, total: run.total, centre: "\(run.done)/\(run.total)",
                              caption: "agents done", meta: meta.joined(separator: " · "), statusLabel: run.statusLabel,
-                             isRunning: run.isRunning)
+                             isRunning: run.isRunning, status: run.status, running: states.filter { $0 == .running }.count,
+                             failed: states.filter { $0 == .failed }.count, stopped: states.filter { $0 == .stopped }.count)
     }
 
     /// "2 finished today · design-pass ✓ · port-android ✓", or nil.
@@ -746,6 +754,524 @@ struct WorkflowOrbit: Equatable {
         let other = run.agents.filter { !$0.running && $0.state != "done" }
         let done = run.agents.filter { $0.state == "done" }
         return [("Running", running), ("Failed or didn't finish", other), ("Done", done)].filter { !$0.1.isEmpty }
+    }
+}
+
+/// The Workflows lens's motion as plain maths, so a frame at any moment can
+/// be computed and tested without running an animation (and the render
+/// harness can pin one). The board's note: "Workflow nodes fill teal one by
+/// one, and the ring closes with one soft pulse when every agent is done."
+/// The Android port has the very same numbers and sample table
+/// (model/WorkflowMotion.kt).
+///
+/// Time `t` is seconds since the lens opened or the picked run changed. The
+/// live loops run on it too, so a pinned frame is the frame the phone shows.
+/// Where the board gave no number this picks one, named here: the breath
+/// and the ripples lag `index · 0.37` rad per node (a wave that travels
+/// clockwise, like the comet); the ring's glow follows a live completion by
+/// `closeDelay` (the arc's spring has closed by then); nodes keep the order
+/// they entered in while the lens is open (the orbit sorts running agents
+/// first, which would swap nodes as they finish), newcomers join at the end
+/// and every node glides to its new place on the arc's spring.
+enum WorkflowMotion {
+    // Entrance
+    static let trackFade = 0.35
+    static let nodeLead = 0.08
+    static let nodeStagger = 0.06
+    /// The whole ring has started entering by this, however many nodes.
+    static let nodeSpread = 0.6
+    static let nodeDuration = 0.42
+    static let nodeFrom = 0.4
+    static let overshoot = 1.2
+    /// A node's opacity is all there by this share of its entrance.
+    static let nodeFadeShare = 0.6
+    static let sweepStart = 0.15
+    static let sweepDuration = 0.9
+    static let rowStart = 0.2
+    static let rowStagger = 0.04
+    static let rowDuration = 0.25
+    static let rowRise = 8.0
+    /// Rows after this many appear with the last of them.
+    static let rowsStaggered = 8
+
+    // Live (a running run only)
+    static let breathPeriod = 1.8
+    static let breathScale = 0.12
+    static let haloLow = 0.25
+    static let haloHigh = 0.5
+    static let nodePhase = 0.37
+    static let rippleEvery = 2.4
+    static let rippleFrom = 10.0
+    static let rippleTo = 26.0
+    static let rippleOpacity = 0.35
+    static let cometPeriod = 8.0
+    static let cometSpan = 40.0 * Double.pi / 180
+    static let cometOpacity = 0.35
+
+    // State changes
+    static let crossFade = 0.35
+    static let fillFrom = 0.4
+    static let changeRipple = 0.7
+    static let changeRippleFrom = 8.0
+    static let changeRippleTo = 34.0
+    static let changeRippleOpacity = 0.5
+    static let arcResponse = 0.6
+    static let arcDamping = 0.85
+    /// The arc's (and a node's glide's) spring is drawn settled after this.
+    static let arcSettle = 1.0
+
+    // Completion: "the ring closes with one soft pulse"
+    static let closeDelay = 0.5
+    static let pulseDuration = 1.1
+    static let pulseGrow = 1.35
+    static let pulseOpacity = 0.55
+    static let bumpDuration = 0.5
+    static let bumpScale = 0.06
+
+    /// Reduce Motion: the final state at once, faded in; changes cross-fade.
+    static let reducedFade = 0.2
+
+    // MARK: curves
+
+    /// Ease out with a little overshoot (`s` 1.2): 1 + (s+1)(x-1)³ + s(x-1)². Pure.
+    static func easeOutBack(_ x: Double, s: Double = overshoot) -> Double {
+        let u = MotionCurve.clamp01(x) - 1
+        return 1 + (s + 1) * u * u * u + s * u * u
+    }
+
+    /// Ease in and out (cubic). Pure.
+    static func easeInOutCubic(_ x: Double) -> Double {
+        let t = MotionCurve.clamp01(x)
+        return t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2
+    }
+
+    /// The fractional part, 0 ..< 1 for negative `x` too. Pure.
+    static func cycle(_ x: Double) -> Double { x - floor(x) }
+
+    // MARK: entrance
+
+    static func trackOpacity(_ t: Double) -> Double { MotionCurve.easeOut(t / trackFade) }
+
+    /// When node `i` of `n` starts entering: 0.08 + i·min(0.06, 0.6/n). Pure.
+    static func nodeStart(_ i: Int, of n: Int) -> Double {
+        nodeLead + Double(i) * min(nodeStagger, nodeSpread / Double(max(1, n)))
+    }
+
+    /// A node `e` seconds into its entrance: scale 0.4 → 1 (overshooting a
+    /// little), opacity in over the first 60%. Pure.
+    static func nodeEntrance(_ e: Double) -> (scale: Double, opacity: Double) {
+        let p = MotionCurve.clamp01(e / nodeDuration)
+        return (nodeFrom + (1 - nodeFrom) * easeOutBack(p), MotionCurve.smooth(p / nodeFadeShare))
+    }
+
+    /// How far the progress arc has swept, 0 ... 1 of its value. Pure.
+    static func sweep(_ t: Double) -> Double { easeInOutCubic((t - sweepStart) / sweepDuration) }
+
+    /// The centre's count as the arc sweeps: "0/7" … "4/7". Pure.
+    static func shownDone(_ t: Double, done: Int) -> Int { Int((Double(done) * sweep(t)).rounded()) }
+
+    static func rowStart(_ i: Int) -> Double { rowStart + Double(min(max(0, i), rowsStaggered - 1)) * rowStagger }
+
+    /// Something rising in, `e` seconds after it started: (offset in points, opacity). Pure.
+    static func rise(_ e: Double) -> (offset: Double, opacity: Double) {
+        let p = MotionCurve.easeOut(e / rowDuration)
+        return (rowRise * (1 - p), p)
+    }
+
+    /// Agent row `i` (0-based, down the list) at `t`. Reduce Motion: no rise, a 0.2 s fade. Pure.
+    static func row(_ t: Double, index i: Int, reduceMotion: Bool = false) -> (offset: Double, opacity: Double) {
+        reduceMotion ? (0, MotionCurve.easeOut(t / reducedFade)) : rise(t - rowStart(i))
+    }
+
+    // MARK: live
+
+    /// 0 ... 1, breathing with a 1.8 s period: 0 at t = 0 for the first node,
+    /// each later node lagging 0.37 rad. Pure.
+    static func breath(_ t: Double, index i: Int = 0) -> Double {
+        0.5 + 0.5 * sin(t * 2 * Double.pi / breathPeriod - Double.pi / 2 - Double(i) * nodePhase)
+    }
+
+    /// A running node's soft ring at `t`: radius 10 → 26 pt fading 0.35 → 0,
+    /// one every 2.4 s, lagging the same phase as the breath. Pure.
+    static func ripple(_ t: Double, index i: Int) -> (radius: Double, opacity: Double) {
+        let p = MotionCurve.easeOut(cycle(t / rippleEvery - Double(i) * nodePhase / (2 * Double.pi)))
+        return (rippleFrom + (rippleTo - rippleFrom) * p, rippleOpacity * (1 - p))
+    }
+
+    /// Where the comet's head is: radians clockwise from 12 o'clock, once round every 8 s. Pure.
+    static func comet(_ t: Double) -> Double { 2 * Double.pi * cycle(t / cometPeriod) }
+
+    // MARK: changes and completion
+
+    /// A node `e` seconds after it changed: how far its colour has crossed,
+    /// the done disc filling (finished only, then nil), and the one ring it
+    /// sends (finished or failed). Reduce Motion: a 0.2 s cross-fade only. Pure.
+    static func change(_ e: Double, kind: Scene.Change.Kind, reduceMotion: Bool = false)
+        -> (mix: Double, fill: Double?, ring: (radius: Double, opacity: Double)?) {
+        if reduceMotion { return (MotionCurve.easeOut(e / reducedFade), nil, nil) }
+        let mix = MotionCurve.easeOut(e / crossFade)
+        let fill = kind == .finished && e < crossFade ? fillFrom + (1 - fillFrom) * mix : nil
+        var ring: (Double, Double)?
+        if (kind == .finished || kind == .failed), e >= 0, e < changeRipple {
+            let q = MotionCurve.easeOut(e / changeRipple)
+            ring = (changeRippleFrom + (changeRippleTo - changeRippleFrom) * q, changeRippleOpacity * (1 - q))
+        }
+        return (mix, fill, ring)
+    }
+
+    /// The completion glow `e` seconds in: scale of the progress ring's
+    /// radius (1 → 1.35) and opacity (0.55 → 0); nil before and after. Pure.
+    static func pulse(_ e: Double) -> (scale: Double, opacity: Double)? {
+        guard e >= 0, e < pulseDuration else { return nil }
+        let p = MotionCurve.easeOut(e / pulseDuration)
+        return (1 + (pulseGrow - 1) * p, pulseOpacity * (1 - p))
+    }
+
+    /// The centre text's one bump with the glow: 1 → 1.06 → 1 over 0.5 s. Pure.
+    static func bump(_ e: Double) -> Double {
+        guard e > 0, e < bumpDuration else { return 1 }
+        return 1 + bumpScale * sin(Double.pi * e / bumpDuration)
+    }
+
+    // MARK: events
+
+    /// What changed between two looks at a run, by agent id.
+    struct Events: Equatable {
+        var finished: [String] = []
+        var failed: [String] = []
+        var stopped: [String] = []
+        /// Agents the run did not have before.
+        var added: [String] = []
+        /// Every agent has finished and the run is no longer running (it was not before).
+        var completed = false
+
+        var isEmpty: Bool { finished.isEmpty && failed.isEmpty && stopped.isEmpty && added.isEmpty && !completed }
+    }
+
+    /// Every agent has finished and the run has ended. With every agent
+    /// listed this is done + failed + stopped == total; asked as "none
+    /// running" it also holds for a run of more than the 100 agents the Mac
+    /// lists (running ones first), as on Android. A stalled run has not
+    /// ended (its unfinished agents read as stopped, but it may go on). Pure.
+    static func isComplete(_ o: WorkflowOrbit) -> Bool {
+        !o.isRunning && o.status != "stalled" && o.total > 0 && o.running == 0
+    }
+
+    /// The changes from `old` to `new`: running agents that finished, failed
+    /// or stopped, newcomers, and whether the run has just completed. Pure.
+    static func events(_ old: WorkflowOrbit, _ new: WorkflowOrbit) -> Events {
+        let before = Dictionary(old.nodes.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
+        var e = Events()
+        for n in new.nodes {
+            guard let was = before[n.id] else { e.added.append(n.id); continue }
+            guard was == .running else { continue }
+            switch n.state {
+            case .done: e.finished.append(n.id)
+            case .failed: e.failed.append(n.id)
+            case .stopped: e.stopped.append(n.id)
+            case .running: break
+            }
+        }
+        e.completed = !isComplete(old) && isComplete(new)
+        return e
+    }
+
+    /// "4 of 7 agents done, 2 running, 1 failed": the orbit as one sentence. Pure.
+    static func summary(_ o: WorkflowOrbit) -> String {
+        var parts = ["\(o.done) of \(o.total) agent\(o.total == 1 ? "" : "s") done"]
+        if o.running > 0 { parts.append("\(o.running) running") }
+        if o.failed > 0 { parts.append("\(o.failed) failed") }
+        if o.stopped > 0 { parts.append("\(o.stopped) didn't finish") }
+        return parts.joined(separator: ", ")
+    }
+
+    /// The one polite announcement a change earns while the lens is open:
+    /// "review-changes: all 7 agents done", "verify: iOS logic tests finished". Pure.
+    static func announcement(_ e: Events, orbit o: WorkflowOrbit) -> String? {
+        func label(_ id: String) -> String { o.nodes.first { $0.id == id }?.label ?? "An agent" }
+        if e.completed {
+            let didnt = o.failed + o.stopped
+            return didnt == 0 ? "\(o.name): all \(o.total) agents done"
+                : "\(o.name): finished, \(o.done) of \(o.total) agents done, \(didnt) didn't"
+        }
+        if e.finished.count == 1 { return "\(label(e.finished[0])) finished" }
+        if e.finished.count > 1 { return "\(e.finished.count) agents finished" }
+        if e.failed.count == 1 { return "\(label(e.failed[0])) failed" }
+        if e.failed.count > 1 { return "\(e.failed.count) agents failed" }
+        return nil
+    }
+
+    // MARK: the scene
+
+    /// Everything the lens has seen since it opened: the orbit as last seen,
+    /// the order the nodes entered in, what changed and when, where the arc
+    /// is going and when the ring closes. Each frame is a pure function of
+    /// it and `t`; the live lens builds it as changes arrive, the harness by
+    /// replaying a script.
+    struct Scene: Equatable {
+        struct Change: Equatable {
+            enum Kind: Equatable { case finished, failed, stopped, other }
+            let kind: Kind
+            let from: WorkflowOrbit.NodeState
+            let at: Double
+        }
+
+        struct Entry: Equatable {
+            /// When its entrance starts.
+            let start: Double
+            /// When it joined: 0 for the nodes there at the opening.
+            let joined: Double
+        }
+
+        struct Glide: Equatable {
+            let from: Double
+            let at: Double
+        }
+
+        private(set) var orbit: WorkflowOrbit
+        /// Node ids clockwise from 12 o'clock, as they entered; newcomers at the end.
+        private(set) var order: [String]
+        private(set) var entries: [String: Entry] = [:]
+        private(set) var changes: [String: Change] = [:]
+        private(set) var glides: [String: Glide] = [:]
+        private(set) var arcFrom = 0.0
+        private(set) var arcTo: Double
+        /// When the arc last started moving to a new value; nil while it is still the entrance sweep.
+        private(set) var arcAt: Double?
+        /// The run as it was before its status last changed, and when: the
+        /// chip and the card cross-fade from it.
+        private(set) var statusFrom: WorkflowOrbit?
+        private(set) var statusAt: Double?
+        /// When the ring's one soft pulse starts; it may lie in the past
+        /// (the pulse already played for this run).
+        var completionAt: Double?
+
+        /// The lens opening on `orbit`. A run that is already complete
+        /// pulses at the end of the sweep, unless `pulse` is false.
+        init(opening orbit: WorkflowOrbit, pulse: Bool = true) {
+            self.orbit = orbit
+            order = orbit.nodes.map(\.id)
+            arcTo = WorkflowMotion.fraction(orbit)
+            for (i, id) in order.enumerated() {
+                entries[id] = Entry(start: WorkflowMotion.nodeStart(i, of: order.count), joined: 0)
+            }
+            if pulse, WorkflowMotion.isComplete(orbit) { completionAt = sweepStart + sweepDuration }
+        }
+
+        /// The run as it now stands, `t` seconds after the opening. Returns
+        /// what changed; nothing moves when nothing did.
+        @discardableResult
+        mutating func observe(_ new: WorkflowOrbit, at t: Double) -> Events {
+            let old = orbit
+            let e = WorkflowMotion.events(old, new)
+            let before = Dictionary(old.nodes.map { ($0.id, $0.state) }, uniquingKeysWith: { a, _ in a })
+            for n in new.nodes {
+                guard let was = before[n.id], was != n.state else { continue }
+                let kind: Change.Kind = was != .running ? .other
+                    : (n.state == .done ? .finished : (n.state == .failed ? .failed : (n.state == .stopped ? .stopped : .other)))
+                changes[n.id] = Change(kind: kind, from: was, at: t)
+            }
+            // The order: kept, minus those gone, newcomers at the end, every node gliding to its new place.
+            let ids = Set(new.nodes.map(\.id))
+            let next = order.filter { ids.contains($0) } + new.nodes.map(\.id).filter { !order.contains($0) }
+            if next != order {
+                let was = Dictionary(order.map { ($0, angle(of: $0, at: t, reduceMotion: false) ?? 0) }, uniquingKeysWith: { a, _ in a })
+                order = next
+                for (i, id) in order.enumerated() {
+                    if let from = was[id], abs(WorkflowMotion.angle(i, of: order.count) - from) > 1e-9 { glides[id] = Glide(from: from, at: t) }
+                }
+                for id in e.added where entries[id] == nil { entries[id] = Entry(start: t, joined: t) }
+            }
+            if new.done != old.done || new.total != old.total {
+                arcFrom = arc(at: t, reduceMotion: false)
+                arcTo = WorkflowMotion.fraction(new)
+                arcAt = t
+            }
+            if new.status != old.status || new.isRunning != old.isRunning { statusFrom = old; statusAt = t }
+            if e.completed { completionAt = t + closeDelay }
+            orbit = new
+            return e
+        }
+
+        /// How far the chip and the card have crossed from `statusFrom`, 0 ... 1 (1 with nothing to cross from). Pure.
+        func statusMix(at t: Double, reduceMotion: Bool) -> Double {
+            guard let at = statusAt else { return 1 }
+            return MotionCurve.easeOut((t - at) / (reduceMotion ? reducedFade : crossFade))
+        }
+
+        /// The arc's value at `t`: the entrance sweep, then a spring to each new value. Pure.
+        func arc(at t: Double, reduceMotion: Bool) -> Double {
+            if reduceMotion { return arcTo }
+            guard let at = arcAt else { return arcTo * WorkflowMotion.sweep(t) }
+            // Settled is exact, so a settled frame is the same frame every time.
+            guard t - at < arcSettle else { return arcTo }
+            return arcFrom + (arcTo - arcFrom) * MotionCurve.spring(t - at, response: arcResponse, damping: arcDamping)
+        }
+
+        /// Node `id`'s angle at `t` (radians clockwise from 12 o'clock), gliding after a re-spacing. Pure.
+        func angle(of id: String, at t: Double, reduceMotion: Bool) -> Double? {
+            guard let i = order.firstIndex(of: id) else { return nil }
+            let target = WorkflowMotion.angle(i, of: order.count)
+            guard !reduceMotion, let g = glides[id], t - g.at < arcSettle else { return target }
+            var d = target - g.from
+            while d > Double.pi { d -= 2 * Double.pi }
+            while d < -Double.pi { d += 2 * Double.pi }
+            return g.from + d * MotionCurve.spring(t - g.at, response: arcResponse, damping: arcDamping)
+        }
+
+        /// When the last entrance, change, glide, arc move or pulse has finished. Pure.
+        func settlesAt(reduceMotion: Bool) -> Double {
+            if reduceMotion {
+                let joined = entries.values.map(\.joined).max() ?? 0
+                let changed = changes.values.map(\.at).max() ?? 0
+                return max(joined, changed, statusAt ?? 0) + reducedFade
+            }
+            var end = max(trackFade, sweepStart + sweepDuration, WorkflowMotion.rowStart(rowsStaggered - 1) + rowDuration)
+            end = max(end, (entries.values.map(\.start).max() ?? 0) + nodeDuration)
+            if let c = changes.values.map(\.at).max() { end = max(end, c + max(crossFade, changeRipple)) }
+            if let s = statusAt { end = max(end, s + crossFade) }
+            if let g = glides.values.map(\.at).max() { end = max(end, g + arcSettle) }
+            if let a = arcAt { end = max(end, a + arcSettle) }
+            if let c = completionAt { end = max(end, c + max(pulseDuration, bumpDuration)) }
+            return end
+        }
+
+        /// Until when the lens needs a clock: for ever while the run runs
+        /// (its loops), else until it settles. Pure.
+        func animatesUntil(reduceMotion: Bool) -> Double {
+            orbit.isRunning && !reduceMotion ? .infinity : settlesAt(reduceMotion: reduceMotion)
+        }
+    }
+
+    /// done / total, 0 for an empty run. Pure.
+    static func fraction(_ o: WorkflowOrbit) -> Double { o.total > 0 ? min(1, Double(o.done) / Double(o.total)) : 0 }
+
+    /// Node `i` of `n`, evenly round the ring from 12 o'clock. Pure.
+    static func angle(_ i: Int, of n: Int) -> Double { Double(i) / Double(max(1, n)) * 2 * Double.pi }
+
+    // MARK: a frame
+
+    struct Ring: Equatable {
+        let radius: Double
+        let opacity: Double
+        let state: WorkflowOrbit.NodeState
+    }
+
+    struct Glow: Equatable {
+        /// Of the progress ring's radius.
+        let scale: Double
+        let opacity: Double
+    }
+
+    struct NodeFrame: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let state: WorkflowOrbit.NodeState
+        /// The colour it is crossing from (its state while settled) and how far across, 0 ... 1.
+        let from: WorkflowOrbit.NodeState
+        let mix: Double
+        let angle: Double
+        /// The entrance: the whole node's scale and opacity.
+        let scale: Double
+        let opacity: Double
+        /// The breath: the core's scale and the halo's opacity.
+        let core: Double
+        let halo: Double
+        /// The done disc filling (0.4 → 1), nil when not filling.
+        let fill: Double?
+        let rings: [Ring]
+    }
+
+    struct Frame: Equatable {
+        /// The orbit and progress tracks.
+        let track: Double
+        /// The arc, its head and the centre (1, or the Reduce Motion fade).
+        let content: Double
+        let nodes: [NodeFrame]
+        let arc: Double
+        /// The arc head's breath, 0 ... 1, while the run runs; nil without a head.
+        let head: Double?
+        /// The comet's head angle while the run runs.
+        let comet: Double?
+        /// The comet's and the head's strength: 1 while running, fading out with the status as the run stops.
+        let loops: Double
+        /// How far the chip and the card have crossed from the run's last status.
+        let statusMix: Double
+        let shownDone: Int
+        let total: Int
+        /// The completion glow.
+        let pulse: Glow?
+        let textScale: Double
+        /// The RUNNING chip's and the running rows' dots, 0 ... 1; nil when still.
+        let breath: Double?
+        /// The count rolls to a new value (it is past the entrance sweep).
+        let rolls: Bool
+    }
+
+    /// The whole orbit at `t`. Pure.
+    static func frame(_ s: Scene, at t: Double, reduceMotion: Bool = false) -> Frame {
+        let o = s.orbit
+        let live = o.isRunning && !reduceMotion
+        let fade = MotionCurve.easeOut(t / reducedFade)
+        let states = Dictionary(o.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var nodes: [NodeFrame] = []
+        for (i, id) in s.order.enumerated() {
+            guard let n = states[id] else { continue }
+            let entry = s.entries[id] ?? Scene.Entry(start: 0, joined: 0)
+            let enter = reduceMotion ? (scale: 1.0, opacity: MotionCurve.easeOut((t - entry.joined) / reducedFade))
+                : nodeEntrance(t - entry.start)
+            var from = n.state, mix = 1.0, fill: Double?, rings: [Ring] = []
+            if let c = s.changes[id], c.from != n.state {
+                let ch = change(t - c.at, kind: c.kind, reduceMotion: reduceMotion)
+                if ch.mix < 1 { from = c.from; mix = ch.mix }
+                fill = ch.fill
+                if let r = ch.ring { rings.append(Ring(radius: r.radius, opacity: r.opacity * enter.opacity, state: n.state)) }
+            }
+            var core = 1.0, halo = haloLow
+            if live && n.state == .running {
+                let b = breath(t, index: i)
+                core = 1 + breathScale * b
+                halo = haloLow + (haloHigh - haloLow) * b
+                let r = ripple(t, index: i)
+                rings.append(Ring(radius: r.radius, opacity: r.opacity * enter.opacity, state: .running))
+            }
+            nodes.append(NodeFrame(id: id, label: n.label, state: n.state, from: from, mix: mix,
+                                   angle: s.angle(of: id, at: t, reduceMotion: reduceMotion) ?? 0,
+                                   scale: enter.scale, opacity: enter.opacity, core: core, halo: halo, fill: fill, rings: rings))
+        }
+        let pulse = reduceMotion ? nil : s.completionAt.flatMap { WorkflowMotion.pulse(t - $0) }
+        let mix = s.statusMix(at: t, reduceMotion: reduceMotion)
+        // A run that has just stopped lets its comet and head fade with the chip instead of vanishing.
+        let stopping = !reduceMotion && !o.isRunning && s.statusFrom?.isRunning == true && mix < 1
+        return Frame(track: reduceMotion ? fade : trackOpacity(t), content: reduceMotion ? fade : 1, nodes: nodes,
+                     arc: s.arc(at: t, reduceMotion: reduceMotion),
+                     head: o.isRunning ? (live ? breath(t) : 0.5) : (stopping ? breath(t) : nil),
+                     comet: live || stopping ? comet(t) : nil, loops: live ? 1 : (stopping ? 1 - mix : 0), statusMix: mix,
+                     shownDone: reduceMotion || s.arcAt != nil ? o.done : shownDone(t, done: o.done), total: o.total,
+                     pulse: pulse.map { Glow(scale: $0.scale, opacity: $0.opacity) },
+                     textScale: reduceMotion ? 1 : (s.completionAt.map { bump(t - $0) } ?? 1),
+                     breath: live ? breath(t) : nil, rolls: s.arcAt != nil)
+    }
+
+    // MARK: a script (the render harness, the tests)
+
+    /// The run as it stands from `at` seconds after the lens opened.
+    struct Step {
+        let at: Double
+        let run: WorkflowRun
+    }
+
+    /// The run and the scene `t` seconds after the lens opened on `steps[0]`,
+    /// every later step observed at its moment, as the live lens would. Pure.
+    static func replay(_ steps: [Step], until t: Double, now: Date) -> (run: WorkflowRun, scene: Scene)? {
+        guard let first = steps.first else { return nil }
+        var run = first.run
+        var scene = Scene(opening: WorkflowOrbit.build(run: run, now: now))
+        for s in steps.dropFirst() where s.at <= t {
+            scene.observe(WorkflowOrbit.build(run: s.run, now: now), at: s.at)
+            run = s.run
+        }
+        return (run, scene)
     }
 }
 

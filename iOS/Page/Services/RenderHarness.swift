@@ -30,6 +30,7 @@ enum RenderHarness {
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
+        "room-workflows-running", "room-workflows-finish", "room-workflows-complete", "room-workflows-done", "room-workflows-live", "room-workflows-many",
         "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused", "room-yesno", "room-yesno-draft",
         "room-yesno-arm", "room-queue-choice", "room-queue-undo", "room-queue-held", "room-queue-bubbles",
         "room-photos-composer", "room-photos-path", "room-photos-busy", "room-photos-uploading", "room-photos-bubble",
@@ -485,6 +486,7 @@ struct RenderHarnessRoot: View {
         .environment(\.nwFixedPhase, RenderHarnessMotion.phase(args))
         .environment(\.nwMotion, RenderHarnessMotion.pin(args))
         .environment(\.nwFixedNow, RenderHarness.now)
+        .environment(\.nwReduceMotion, args.reduceMotion)
         // A local minute of the day, never an instant: 01:12 unless pinned.
         .environment(\.nwDaypart, .at(minuteOfDay: args.dayTime ?? Daypart.nighttime.coreMinute))
         // `-NWGlass off`: the chrome as it is drawn without Liquid Glass.
@@ -501,7 +503,7 @@ struct RenderHarnessRoot: View {
         case _ where s.hasPrefix("history"):
             HarnessHistory(screen: s)
         case _ where s.hasPrefix("room-"):
-            HarnessRoom(screen: s)
+            HarnessRoom(screen: s, time: RenderHarnessMotion.time(args))
         case _ where s.hasPrefix("welcome") || s.hasPrefix("scan") || s.hasPrefix("pair"):
             HarnessOnboarding(screen: s)
         case _ where s.hasPrefix("problem-"):

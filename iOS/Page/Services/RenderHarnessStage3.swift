@@ -98,6 +98,48 @@ enum RenderFixtures3 {
         return [running, done1, done2]
     }
 
+    /// The Workflows lens's motion fixtures, as the run stands from each
+    /// step's moment (`-NWTime` is seconds after the lens opened): running is
+    /// the design's 4/7 (two running, one failed); finish has "verify: iOS
+    /// logic tests" finish at 2.0 s; complete has its last agent finish at
+    /// 2.0 s; done was already complete when the lens opened. live plays
+    /// complete on the real clock, unpinned, so the lens's own clock runs
+    /// (its last agent finishes 8 s in, time enough to see it running first).
+    static func workflowScript(_ screen: String) -> [WorkflowMotion.Step]? {
+        let design = runs[0]
+        func with(_ r: WorkflowRun, status: String? = nil, _ states: [String: String], endedAt: Date? = nil) -> WorkflowRun {
+            let agents = r.agents.map { a in
+                states[a.id].map { WorkflowRun.Agent(id: a.id, label: a.label, phase: a.phase, state: $0, lastActivityAt: now) } ?? a
+            }
+            return WorkflowRun(id: r.id, name: r.name, summary: r.summary, status: status ?? r.status, phase: r.phase,
+                               done: agents.filter { $0.state == "done" }.count, total: r.total, startedAt: r.startedAt,
+                               endedAt: endedAt, tokens: r.tokens, agents: agents)
+        }
+        switch screen {
+        case "room-workflows-running":
+            return [.init(at: 0, run: design)]
+        case "room-workflows-finish":
+            return [.init(at: 0, run: design), .init(at: 2, run: with(design, ["a2": "done"]))]
+        case "room-workflows-live":
+            return workflowScript("room-workflows-complete").map { [$0[0], .init(at: 8, run: $0[1].run)] }
+        case "room-workflows-complete":
+            let last = with(design, ["a2": "done", "a3": "done"])
+            return [.init(at: 0, run: last), .init(at: 2, run: with(last, status: "completed", ["a1": "done"], endedAt: now))]
+        case "room-workflows-many":
+            // A wide fan-out on the real clock, for the lens's cost: 80 agents, 20 running, 4 failed.
+            let agents = (0..<80).map { i in
+                WorkflowRun.Agent(id: "m\(i)", label: "verify: pass \(i + 1)", phase: "Verify",
+                                  state: i < 20 ? "running" : (i < 24 ? "failed" : "done"), lastActivityAt: now.addingTimeInterval(-Double(i)))
+            }
+            return [.init(at: 0, run: WorkflowRun(id: "wf-many", name: "fan-out", summary: nil, status: "running", phase: "Verify",
+                                                  done: 56, total: 80, startedAt: design.startedAt, tokens: design.tokens, agents: agents))]
+        case "room-workflows-done":
+            return [.init(at: 0, run: with(design, status: "completed", ["a1": "done", "a2": "done", "a3": "done"], endedAt: now.addingTimeInterval(-40)))]
+        default:
+            return nil
+        }
+    }
+
     static var screenLines: [String] {
         ["╭────────────────────────────╮",
          "│ ✻ Claude Code  v2.1.310    │",
@@ -128,7 +170,7 @@ enum RenderFixtures3 {
         var runId: String? = nil
     }
 
-    static func inputs(_ screen: String) -> SessionRoomData.Inputs {
+    static func inputs(_ screen: String, time: Double = 3) -> SessionRoomData.Inputs {
         let fiveHour = RenderFixtures.status.usage?.fiveHour?.pct
         var i = SessionRoomData.Inputs(session: session("room-claude", "mac-on-claude-code", state: .active, preview: "Bash: iOS/Tests/run-logic-tests.sh"),
                                        macName: mac, now: now)
@@ -137,6 +179,8 @@ enum RenderFixtures3 {
         i.fiveHourPct = fiveHour
         i.screen = SessionScreen(sessionId: "room-claude", lines: screenLines, at: now.addingTimeInterval(-2))
         i.runs = runs
+        // One run, as the board draws it (no picker), as it stands at the pinned time.
+        if let script = workflowScript(screen), let at = WorkflowMotion.replay(script, until: time, now: now) { i.runs = [at.run] }
         i.diff = diff
         i.diffRequestedAt = now
         i.sent = [SentSessionCommand(clientId: "c-1", sessionId: "room-claude", kind: .input, text: claudeEntries[0].text,
@@ -257,14 +301,14 @@ enum RenderFixtures3 {
         return i
     }
 
-    static func room(_ screen: String) -> Room {
-        let i = inputs(screen)
+    static func room(_ screen: String, time: Double = 3) -> Room {
+        let i = inputs(screen, time: time)
         var data = SessionRoomData.make(i)
         var lens = RoomLens.story
         switch screen {
         case "room-screen": lens = .screen
         case "room-changes", "room-review": lens = .changes
-        case "room-workflows": lens = .workflows
+        case _ where screen.hasPrefix("room-workflows"): lens = .workflows
         case "room-stop": data.fixedStop = 0.62
         default: break
         }
@@ -312,10 +356,12 @@ struct HarnessRoom: View {
     @State private var draft: String
     @State private var runId: String?
     private let room: RenderFixtures3.Room
+    /// The live fixture's step, moved on the real clock.
+    @State private var step = 0
 
-    init(screen: String) {
+    init(screen: String, time: Double = 3) {
         self.screen = screen
-        let r = RenderFixtures3.room(screen)
+        let r = RenderFixtures3.room(screen, time: time)
         room = r
         _lens = State(initialValue: r.lens)
         _draft = State(initialValue: r.draft)
@@ -336,10 +382,31 @@ struct HarnessRoom: View {
                     RenderFixtures3.entry("g5", .assistant, "Couldn't run the build without the SDK path, so I'm stopping here and reporting it.", ago: 60)],
                     finished: true))
                 .environment(\.nwTopInset, 54)
+        } else if let script = RenderFixtures3.workflowScript(screen) {
+            // The lens itself, where the eye lands: in the room the composer covers the
+            // orbit on this short screen. The very view the room shows, on the room's data.
+            NWRoomWorkflowsLens(data: live(script), actions: SessionRoomActions(), runId: $runId)
+                .padding(.top, 20)
+                .environment(\.nwWorkflowScript, script)
+                .task {
+                    // Unpinned, the script's steps arrive as a Mac's would: the lens diffs them itself.
+                    guard screen == "room-workflows-live" else { return }
+                    for (i, s) in script.enumerated().dropFirst() {
+                        try? await Task.sleep(nanoseconds: UInt64((s.at - script[i - 1].at) * 1_000_000_000))
+                        step = i
+                    }
+                }
         } else {
             NWSessionRoom(data: room.data, lens: $lens, draft: $draft, runId: $runId)
                 .environment(\.nwTopInset, 54)
         }
+    }
+
+    private func live(_ script: [WorkflowMotion.Step]) -> SessionRoomData {
+        guard screen == "room-workflows-live" else { return room.data }
+        var d = room.data
+        d.runs = [script[min(step, script.count - 1)].run]
+        return d
     }
 }
 
