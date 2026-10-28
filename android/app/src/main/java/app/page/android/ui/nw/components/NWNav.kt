@@ -176,7 +176,7 @@ private fun PulseButton(
     Box(
         modifier.semantics(mergeDescendants = true) {
             role = Role.Button
-            contentDescription = "Start new work. Hold to stop everything."
+            contentDescription = "Start new work. Hold for 10 seconds to stop everything."
             customActions = listOf(CustomAccessibilityAction("Stop all agents") { onHold(); true })
         },
         contentAlignment = Alignment.Center,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,6 +52,7 @@ import app.page.android.model.DawnModel
 import app.page.android.model.HeaderJump
 import app.page.android.model.MotionCurve
 import app.page.android.model.NWDestination
+import app.page.android.model.NowModel
 import app.page.android.model.PulseModel
 import app.page.android.ui.nw.components.NWAnimated
 import app.page.android.ui.nw.components.NWDawnLight
@@ -62,6 +64,7 @@ import app.page.android.ui.nw.components.NWPulseStyle
 import app.page.android.ui.nw.components.NWShaders
 import app.page.android.ui.nw.components.nwClockSeconds
 import app.page.android.ui.nw.theme.AuroraPalette
+import app.page.android.ui.nw.theme.LocalDaypart
 import app.page.android.ui.nw.theme.LocalMotionPin
 import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.NW
@@ -146,6 +149,8 @@ fun NWHorizon(
 ) {
     val reduce = LocalReduceMotion.current
     val pin = LocalMotionPin.current
+    // The time of day: the stars, and the sky the exhale and the dusk start from.
+    val daypart = LocalDaypart.current
     val orbSize = HorizonGeometry.orbSize(height)
     val pulseModel = model ?: pulse.defaultModel
     val isDusk = pulse == NWPulseStyle.Style.DUSK
@@ -225,19 +230,20 @@ fun NWHorizon(
         // A pause that has settled is a still night: no clock.
         NWAnimated(active = !(isDusk && duskAt == null) && pin.pinned(NWMotionPin.Kind.DUSK) == null) { t ->
             var pal = palette
-            var stars = 1.0
+            var stars = daypart.stars
             var band = 0.0
             var dawn: DawnModel.Dawn? = null
             elapsed(NWMotionPin.Kind.EXHALE, exhaleAt)?.let { e ->
                 val x = PulseModel.exhale(e)
-                if (!x.finished) pal = AuroraPalette.needsYou.mixedPerceptual(palette, x.aurora)
+                // From the hour's needs-you sky, so the sky never snaps for a frame.
+                if (!x.finished) pal = AuroraPalette.of(NowModel.Mood.NEEDS_YOU, daypart).mixedPerceptual(palette, x.aurora)
             }
             if (isDusk) {
                 // A pause already under way when the Horizon appeared is drawn settled: through the purple dusk to a
                 // near-black night, the stars all but gone.
                 val d = DawnModel.dusk(elapsed(NWMotionPin.Kind.DUSK, duskAt) ?: DawnModel.duskDuration)
-                pal = (clocks.fromPalette ?: AuroraPalette.working).towardNight(d.aurora)
-                stars = starField(d.aurora)
+                pal = (clocks.fromPalette ?: AuroraPalette.of(NowModel.Mood.WORKING, daypart)).towardNight(d.aurora)
+                stars = starField(d.aurora, from = daypart.stars)
                 band = d.band
             } else {
                 elapsed(NWMotionPin.Kind.DAWN, dawnAt)?.let { w ->
@@ -247,7 +253,7 @@ fun NWHorizon(
                         // gold; the sky behind it only warms a little.
                         val sunrise = AuroraPalette.night.mixed(AuroraPalette.dawn, 0.35 * d.warmth)
                         pal = sunrise.mixed(palette, 1 - d.aurora)
-                        stars = starField(d.aurora)
+                        stars = starField(d.aurora, from = daypart.stars)
                         band = d.band
                         dawn = d
                     }
@@ -286,7 +292,8 @@ fun NWHorizon(
                     if (NWShaders.available && !hollow && !reduce) {
                         NWPulseLight(
                             NWPulseStyle.color(pulse, pulseModel, e), (pulseModel.ripples(t) + farewell(e)).take(4), glow(pulseModel, e, t), t,
-                            Modifier.size(orbSize * 1.3f),
+                            // Required, so the light reaches past the orb's box (centred over it) instead of being clamped to it.
+                            Modifier.requiredSize(orbSize * 1.3f),
                         )
                         NWPulseOrb(pulse, Modifier.size(orbSize), model = pulseModel, exhale = e, halo = false, time = t)
                     } else {

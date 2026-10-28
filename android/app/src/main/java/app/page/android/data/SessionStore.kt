@@ -2,6 +2,28 @@ package app.page.android.data
 
 import android.util.Log
 import app.page.android.model.CommandResult
+import app.page.android.model.HeldDelete
+import app.page.android.model.HeldMessages
+import app.page.android.model.LatePhotoResults
+import app.page.android.model.MacRetract
+import app.page.android.model.OutboxFire
+import app.page.android.model.PhotoProgress
+import app.page.android.model.PhotoReceipt
+import app.page.android.model.PhotoTransport
+import app.page.android.model.PhotoUploader
+import app.page.android.model.PreparedPhoto
+import app.page.android.model.ResultWaiter
+import app.page.android.model.UploadOutcome
+import app.page.android.model.UploadPhoto
+import app.page.android.model.PhotoChunks
+import app.page.android.model.PhotoText
+import app.page.android.model.OutboxRestore
+import app.page.android.model.ReplyDelivery
+import app.page.android.model.RestoredDraft
+import app.page.android.model.ScheduledSend
+import app.page.android.model.SendOutbox
+import app.page.android.model.SessionCaps
+import app.page.android.model.SendCountdown
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
 import app.page.android.model.AnswerPicker
@@ -32,7 +54,9 @@ import app.page.android.model.TranscriptRole
 import app.page.android.model.WorkflowRun
 import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -42,6 +66,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import app.page.android.model.parseJson
+import app.page.android.model.str
 
 /**
  * Live sessions on the paired Mac (docs/SESSIONS-PROTOCOL.md): the list, the
@@ -58,6 +84,8 @@ import kotlinx.serialization.json.JsonObject
  */
 object SessionStore {
     private const val TAG = "SessionStore"
+    private const val OUTBOX_KEY = "page.outbox.v1"
+    private const val RESTORED_KEY = "page.outbox.restored.v1"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     data class State(
@@ -77,6 +105,16 @@ object SessionStore {
         val commands: Map<String, SentSessionCommand> = emptyMap(),
         /** From GET /status; null until known. */
         val relayFeatures: Set<String>? = null,
+        /** The list header's `caps`: what this Mac accepts beyond the base ops (a Mac that sends none: empty). */
+        val caps: Set<String> = emptySet(),
+        /** Messages counting down before their POST (10 s, "Undo"). In memory, and on disk only while counting. */
+        val outbox: SendOutbox = SendOutbox(),
+        /** Messages that did not go and are back in their room's box, with why (read once by the room). */
+        val restoredDrafts: Map<String, RestoredDraft> = emptyMap(),
+        /** Where a delete of each held message stands, by the message's `clientId`. */
+        val deletes: Map<String, HeldDelete> = emptyMap(),
+        /** Photos going up (`images-v1`), by the bubble's `clientId`; gone once the Mac has answered or the upload stopped. */
+        val uploads: Map<String, PhotoProgress> = emptyMap(),
         val hasKey: Boolean = false,
         val macOfflineHint: Boolean = false,
         val waitStartedAt: Instant? = null,
@@ -105,9 +143,15 @@ object SessionStore {
         /** The newest message typed into this session from the phone. */
         fun latestInput(sessionId: String): SentSessionCommand? = sentMessages(sessionId).lastOrNull()
 
-        /** Messages typed into this session from the phone, oldest first. */
+        /**
+         * Messages typed into this session from the phone, oldest first, plus the ones the Mac holds that another
+         * device sent (so every held message shows in the room, with Delete).
+         */
         fun sentMessages(sessionId: String): List<SentSessionCommand> =
-            commands.values.filter { it.sessionId == sessionId && it.kind == SessionCommandKind.INPUT }.sortedBy { it.sentAt }
+            HeldMessages.pending(session(sessionId), commands.values.filter { it.sessionId == sessionId && it.kind == SessionCommandKind.INPUT }.sortedBy { it.sentAt })
+
+        /** The Mac can take a held message back (`retract-v1`). */
+        val canRetract: Boolean get() = SessionCaps.canRetract(caps)
 
         /** The most recent Stop for this session, while it's worth showing. */
         fun latestInterrupt(sessionId: String, now: Instant): SentSessionCommand? =
@@ -170,6 +214,34 @@ object SessionStore {
     private var pendingStart: PendingStart? = null
     private var pendingStartJob: Job? = null
 
+    /** A held message's clientId is "seen" once a list carried it: only then can its absence mean "no longer held". */
+    private val seenHeld = HashSet<String>()
+
+    /** The countdown timers, by [ScheduledSend.id]. */
+    private val outboxJobs = HashMap<String, Job>()
+
+    /** What each retract op in flight is taking back, by the retract's own clientId. */
+    private sealed interface RetractTarget {
+        data class Held(val heldId: String) : RetractTarget
+        data class Reply(val interventionId: String) : RetractTarget
+    }
+    private val retractTargets = HashMap<String, RetractTarget>()
+
+    /** The `result` each `inputImages` in flight waits for, by its own clientId. */
+    private val photoWaiters = HashMap<String, CompletableDeferred<CommandResult>>()
+
+    /**
+     * The `inputImages` commands that may still be answered after the phone stopped waiting for them, by the command's
+     * own clientId (5 minutes): a late `result` still settles its photo bubble.
+     */
+    private val latePhotos = LatePhotoResults()
+
+    /** The Mac's answers awaited for a `retract {interventionId}` the relay's "forwarded" led to, by the retract's clientId. */
+    private val chainedRetracts = HashMap<String, CompletableDeferred<MacRetract.Outcome?>>()
+
+    /** The uploads running, by bubble id: they belong to the store, so leaving the room does not stop one. */
+    private val photoJobs = HashMap<String, Job>()
+
     private val viewer: String get() = AppGraph.prefs.viewer
 
     // region Lifecycle
@@ -189,6 +261,21 @@ object SessionStore {
     fun reset() {
         timeoutJobs.values.forEach { it.cancel() }
         timeoutJobs.clear()
+        outboxJobs.values.forEach { it.cancel() }
+        outboxJobs.clear()
+        retractTargets.clear()
+        photoJobs.values.forEach { it.cancel() }
+        photoJobs.clear()
+        photoWaiters.clear()
+        latePhotos.clear()
+        // A delete waiting on the Mac for the old pairing stops waiting: no answer will come.
+        chainedRetracts.values.toList().forEach { it.complete(null) }
+        chainedRetracts.clear()
+        seenHeld.clear()
+        // A pairing change drops what was counting down (it was for the old Mac), and what was saved for a restart,
+        // including the old pairing's restored drafts: message text never outlives its pairing on disk.
+        persistOutbox(SendOutbox())
+        if (!_state.value.isDemoMode) AppGraph.prefs.putString(RESTORED_KEY, null)
         waitJob?.cancel()
         waitJob = null
         pendingStart = null
@@ -335,6 +422,7 @@ object SessionStore {
                     val watched = watchedSessionId
                     s.copy(
                         sessions = u.sessions,
+                        caps = u.caps,
                         macName = u.macName ?: s.macName,
                         hasList = true,
                         lastListAt = Instant.now(),
@@ -345,6 +433,7 @@ object SessionStore {
                     )
                 }
                 matchStartedSession(u.sessions)
+                reconcileHeld(u.sessions)
             }
             is SessionsUpdate.Workflows -> update { s ->
                 val next = LinkedHashMap(s.workflows)
@@ -405,6 +494,28 @@ object SessionStore {
             update { it.copy(folders = s.folders.copy(error = SessionResultCopy.refusal(r.reason, r.detail, "Claude"))) }
             return
         }
+        // The answer to an `inputImages`: the upload waiting for it settles the bubble (it may need to resend first).
+        photoWaiters.remove(r.clientId)?.let {
+            latePhotos.forget(r.clientId)
+            it.complete(r)
+            return
+        }
+        // The same answer, after the phone stopped waiting for it (30 s, or a POST whose answer was lost): it still settles the bubble.
+        latePhotos.take(r.clientId, Instant.now())?.let { late ->
+            settleLatePhotos(late, r)
+            return
+        }
+        // The answer to the follow-up `retract` of a reply the relay said the Mac already has: the delete waits on it.
+        chainedRetracts.remove(r.clientId)?.let {
+            it.complete(MacRetract.outcome(r, "Claude"))
+            return
+        }
+        // The answer to a retract op: the message it named is settled by it, never by the retract's own `code`.
+        retractTargets.remove(r.clientId)?.let { target ->
+            timeoutJobs.remove(r.clientId)?.cancel()
+            applyRetractResult(target, r)
+            return
+        }
         val cmd = s.commands[r.clientId] ?: return
         val next = cmd.copy(state = cmd.state.applying(r, agentName(cmd.sessionId)))
         update { it.copy(commands = it.commands + (r.clientId to next)) }
@@ -413,6 +524,61 @@ object SessionStore {
     }
 
     private fun agentName(sessionId: String): String = _state.value.session(sessionId)?.backend?.displayName ?: "Your agent"
+
+    /**
+     * A list arrived: settle the held messages this phone knows about from the row's `held` (a `result` reaches only
+     * the phones connected when it happens, so the list is the other source of truth). A message gone from the
+     * list with no settled state reads "No longer held", but only if this phone saw it listed first.
+     */
+    private fun reconcileHeld(sessions: List<LiveSession>) {
+        val byId = sessions.associateBy { it.id }
+        for (session in sessions) for (h in session.held) seenHeld.add(h.clientId)
+        // Bounded: start again from what this list names, so a message still listed keeps counting as seen.
+        if (seenHeld.size > 400 && !_state.value.macDisabled) {
+            seenHeld.clear()
+            for (session in sessions) for (h in session.held) seenHeld.add(h.clientId)
+        }
+        val s = _state.value
+        var changed = false
+        val next = LinkedHashMap(s.commands)
+        for ((id, cmd) in s.commands) {
+            if (cmd.kind != SessionCommandKind.INPUT) continue
+            // A held message whose session left the list is gone with its row: "No longer held — check the session"
+            // (the Mac's final `result` reached only the phones connected then). Not on a list from a Mac with live
+            // sessions turned off: that list is empty on purpose, and the Mac still holds what it held.
+            val session = byId[cmd.sessionId]
+            if (session == null && s.macDisabled) continue
+            val settled = HeldMessages.settle(
+                cmd.state, session?.held?.firstOrNull { it.clientId == id }, id in seenHeld, sessionListed = session != null,
+                sentAt = cmd.sentAt, now = Instant.now(), macDisabled = s.macDisabled,
+            )
+            if (settled != cmd.state) {
+                next[id] = cmd.copy(state = settled)
+                changed = true
+                if (!settled.isPending) timeoutJobs.remove(id)?.cancel()
+            }
+        }
+        if (changed) update { it.copy(commands = next) }
+    }
+
+    /** What the Mac said about a retract: settle the message it named. */
+    private fun applyRetractResult(target: RetractTarget, r: CommandResult) {
+        val outcome = MacRetract.outcome(r, "Claude")
+        when (target) {
+            is RetractTarget.Held -> {
+                val retractId = r.clientId
+                update { s ->
+                    val delete = HeldDelete.Done(retractId, outcome)
+                    val cmd = s.commands[target.heldId]
+                    // Deleted: the message is not typed, even if its own final `result` never reaches this phone.
+                    val commands = if (cmd != null && outcome is MacRetract.Outcome.Deleted && cmd.state is SessionDeliveryState.Held)
+                        s.commands + (target.heldId to cmd.copy(state = SessionDeliveryState.Deleted(outcome.text))) else s.commands
+                    s.copy(commands = commands, deletes = s.deletes + (target.heldId to delete))
+                }
+            }
+            is RetractTarget.Reply -> RelayClient.macRetractAnswered(target.interventionId, outcome)
+        }
+    }
 
     // endregion
 
@@ -424,19 +590,27 @@ object SessionStore {
      * Types [text] into the session. Returns the problem to show instead when
      * the text can't be sent; otherwise the message's delivery state appears
      * in `commands` under a fresh `clientId`. [target] is what the room showed
-     * when it opened; the Mac refuses if the session no longer matches.
+     * when it opened; the Mac refuses if the session no longer matches. [hold]: the Mac holds it until the turn
+     * ends (`hold-v1`); only for a Mac whose caps say so.
      */
-    fun sendInput(sessionId: String, text: String, target: SessionTarget? = null): SessionComposer.Problem? {
+    fun sendInput(sessionId: String, text: String, target: SessionTarget? = null, hold: Boolean = false): SessionComposer.Problem? {
         val clean = when (val v = SessionComposer.validate(text)) {
             is SessionComposer.Validation.Bad -> return v.problem
             is SessionComposer.Validation.Ok -> v.text
         }
         if (_state.value.isDemoMode) {
-            simulateDemoCommand(SessionCommandKind.INPUT, sessionId, clean, target)
+            simulateDemoCommand(SessionCommandKind.INPUT, sessionId, clean, target, hold = hold)
             return null
         }
+        // The backstop: a Mac that doesn't advertise `hold-v1` types a held message at once, which is what the
+        // person chose not to do.
+        if (hold && SessionCaps.HOLD !in _state.value.caps) return SessionComposer.Problem.HoldUnavailable
+        return sendValidated(sessionId, clean, target, hold)
+    }
+
+    private fun sendValidated(sessionId: String, clean: String, target: SessionTarget?, hold: Boolean): SessionComposer.Problem? {
         val clientId = UUID.randomUUID().toString().lowercase()
-        val body = encrypt(SessionCommand.Input(sessionId, clean, target), clientId)
+        val body = encrypt(SessionCommand.Input(sessionId, clean, target, hold), clientId)
         if (body == null) {
             record(clientId, sessionId, SessionCommandKind.INPUT, clean, SessionDeliveryState.Failed("This phone has no session key. Re-pair with your Mac."), target)
             return null
@@ -446,6 +620,338 @@ object SessionStore {
         deliver(body, clientId, "input")
         return null
     }
+
+    // region The 10 s countdown (Send now, to a busy session)
+
+    /**
+     * Send now to a busy session: nothing leaves the phone for 10 s ("Sending in 10 s · Undo"). The countdown lives
+     * here, not in a screen, so leaving the room does not cancel it; Undo ([undoScheduled]) is the only way out.
+     * If the app is killed first nothing is sent, and the text is back in the box next launch ([restorePersistedOutbox]).
+     */
+    fun scheduleInput(sessionId: String, text: String, target: SessionTarget? = null, pageId: String? = null): SessionComposer.Problem? {
+        val clean = when (val v = SessionComposer.validate(text)) {
+            is SessionComposer.Validation.Bad -> return v.problem
+            is SessionComposer.Validation.Ok -> v.text
+        }
+        // Too large to send is said now, not 10 s later.
+        encrypt(SessionCommand.Input(sessionId, clean, target), UUID.randomUUID().toString().lowercase())?.let {
+            if (!SessionComposer.fitsRelay(it)) return SessionComposer.Problem.TooLarge
+        }
+        val entry = ScheduledSend(UUID.randomUUID().toString().lowercase(), sessionId, clean, target, Instant.now(), pageId)
+        update { it.copy(outbox = it.outbox.schedule(entry)) }
+        persistOutbox(_state.value.outbox)
+        outboxJobs[entry.id] = scope.launch {
+            delay((SendCountdown.SECONDS * 1000).toLong())
+            fire(entry.id)
+        }
+        return null
+    }
+
+    /** Undo: the text comes back (null when it was already sent). Nothing had left the phone. */
+    fun undoScheduled(id: String): String? {
+        val (next, entry) = _state.value.outbox.undo(id)
+        if (entry == null) return null
+        outboxJobs.remove(id)?.cancel()
+        update { it.copy(outbox = next) }
+        persistOutbox(next)
+        return entry.text
+    }
+
+    private fun fire(id: String) {
+        outboxJobs.remove(id)
+        val (next, entry) = _state.value.outbox.undo(id)
+        if (entry == null) return // undone meanwhile
+        update { it.copy(outbox = next) }
+        persistOutbox(next)
+        // The timer runs on uptime, which stops while the phone sleeps: a countdown that woke well past its end did not
+        // go when the person expected, so it doesn't go now (iOS `staleGrace`). The text is back in the box.
+        if (SendCountdown.isStale(entry, Instant.now())) {
+            restoreDraft(OutboxRestore.slept(entry))
+            return
+        }
+        val s = _state.value
+        // A page's Steer goes as that page's written reply, if the page is still open.
+        if (entry.pageId != null) {
+            fireReply(entry)
+            return
+        }
+        when (OutboxFire.decide(sessionStillListed = s.isDemoMode || s.session(entry.sessionId) != null)) {
+            OutboxFire.Action.SEND ->
+                if (s.isDemoMode) simulateDemoCommand(SessionCommandKind.INPUT, entry.sessionId, entry.text, entry.target)
+                else sendValidated(entry.sessionId, entry.text, entry.target, hold = false)
+            OutboxFire.Action.RESTORE -> restoreDraft(OutboxRestore.gone(entry))
+        }
+    }
+
+    /** The countdown of a review or look page's Steer ended: the page's own reply path, without a second arm ring. */
+    private fun fireReply(entry: ScheduledSend) {
+        val pageId = entry.pageId ?: return
+        val page = RelayClient.inbox.value.firstOrNull { it.id == pageId }
+        if (page == null) {
+            restoreDraft(OutboxRestore.gone(entry))
+            return
+        }
+        val row = app.page.android.model.NowRowBuilder.row(page, _state.value.session(page.sessionId), PairingStore.pairedMac.value?.name ?: "")
+        // The box was emptied when the countdown began: words the page can't take now, or the relay refuses, go back in it.
+        val began = ActionCoordinator.begin(row, app.page.android.model.RowAction.Kind.TELL_INSTEAD, entry.text, arm = false) { outcome ->
+            OutboxRestore.afterReply(entry, outcome)?.let(::restoreDraft)
+        }
+        if (!began) restoreDraft(OutboxRestore.pageBusy(entry))
+    }
+
+    /** Only what a restart needs, while it counts: never in demo mode, never longer than the countdown. */
+    private fun persistOutbox(outbox: SendOutbox) {
+        if (_state.value.isDemoMode) return
+        AppGraph.prefs.putString(OUTBOX_KEY, if (outbox.isEmpty) null else OutboxRestore.encode(outbox.entries))
+    }
+
+    private fun restoreDraft(d: RestoredDraft) {
+        update { s ->
+            val old = s.restoredDrafts[d.sessionId]
+            s.copy(restoredDrafts = s.restoredDrafts + (d.sessionId to (if (old == null) d else d.copy(text = OutboxRestore.merge(old.text, d.text)))))
+        }
+        persistRestored()
+    }
+
+    private fun persistRestored() {
+        if (_state.value.isDemoMode) return
+        val drafts = _state.value.restoredDrafts.values.toList()
+        AppGraph.prefs.putString(
+            RESTORED_KEY,
+            if (drafts.isEmpty()) null else kotlinx.serialization.json.JsonArray(drafts.map {
+                JsonObject(mapOf("sessionId" to kotlinx.serialization.json.JsonPrimitive(it.sessionId), "text" to kotlinx.serialization.json.JsonPrimitive(it.text), "note" to kotlinx.serialization.json.JsonPrimitive(it.note)))
+            }).toString(),
+        )
+    }
+
+    /**
+     * Call once at launch (after the prefs exist): whatever was still counting when the app last died was never sent;
+     * it comes back as a draft in its room, with a note. Nothing is ever sent after a restart.
+     */
+    fun restorePersistedOutbox() {
+        val prefs = AppGraph.prefs
+        val persisted = OutboxRestore.decode(prefs.string(OUTBOX_KEY))
+        if (persisted.isNotEmpty()) {
+            prefs.putString(OUTBOX_KEY, null)
+            for (d in OutboxRestore.afterKill(persisted)) restoreDraft(d)
+        }
+        val saved = prefs.string(RESTORED_KEY)?.let { parseJson(it) } as? kotlinx.serialization.json.JsonArray ?: return
+        val loaded = saved.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            val sid = o.str("sessionId")?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val text = o.str("text")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            RestoredDraft(sid, text, o.str("note") ?: OutboxRestore.NOTE_KILLED)
+        }
+        if (loaded.isNotEmpty()) update { s -> s.copy(restoredDrafts = loaded.associateBy { it.sessionId } + s.restoredDrafts) }
+    }
+
+    /** The room reads its restored draft once: it is in the box now, and the note says why. */
+    fun takeRestoredDraft(sessionId: String): RestoredDraft? {
+        val d = _state.value.restoredDrafts[sessionId] ?: return null
+        update { it.copy(restoredDrafts = it.restoredDrafts - sessionId) }
+        persistRestored()
+        return d
+    }
+
+    // endregion
+
+    // region Delete (retract-v1)
+
+    /**
+     * Delete a message the Mac holds until the turn ends: `retract {heldId}`. The Mac's answer (deleted, too late,
+     * not holding it) lands in [State.deletes]; with no answer in 20 s it reads "Couldn't confirm the delete".
+     * Only for a Mac whose caps say `retract-v1`: an older Mac would ignore the op, and nothing is offered for it.
+     */
+    fun deleteHeld(heldId: String) {
+        val s = _state.value
+        if (s.deletes[heldId]?.isDeleting == true) return
+        if (s.isDemoMode) {
+            simulateDemoRetract(heldId)
+            return
+        }
+        if (!SessionCaps.canRetract(s.caps)) return
+        sendRetract(SessionCommand.Retract(heldId = heldId), RetractTarget.Held(heldId))
+    }
+
+    /** `retract {interventionId}`: a `/reply` the Mac holds for a rate limit. The answer goes to [RelayClient.macRetractAnswered]. */
+    fun retractReply(interventionId: String) {
+        val s = _state.value
+        if (s.isDemoMode) {
+            scope.launch {
+                delay(700)
+                RelayClient.macRetractAnswered(interventionId, MacRetract.Outcome.Deleted("Deleted — not sent. Nothing will be typed at reset"))
+            }
+            return
+        }
+        if (!SessionCaps.canRetract(s.caps)) {
+            // Before the first list the Mac's caps are not known: nothing says it is old.
+            RelayClient.macRetractAnswered(interventionId, MacRetract.Outcome.Failed(if (s.hasList) "Update Page on your Mac to delete a held reply." else MacRetract.UNCONFIRMED))
+            return
+        }
+        sendRetract(SessionCommand.Retract(interventionId = interventionId), RetractTarget.Reply(interventionId))
+    }
+
+    /**
+     * After the relay's `DELETE /reply/:id` said `409 too_late` "forwarded": asks the Mac whether it still holds the reply
+     * (`retract {interventionId}`, `retract-v1`) and waits for its answer, at most [MacRetract.TIMEOUT]. null: no answer
+     * (a Mac that doesn't advertise `retract-v1`, a POST that failed, 20 s of silence, a new pairing), which the caller
+     * reads as "too late".
+     */
+    suspend fun askMacToRetractReply(interventionId: String): MacRetract.Outcome? {
+        val s = _state.value
+        if (s.isDemoMode || !SessionCaps.canRetract(s.caps)) return null
+        val retractId = UUID.randomUUID().toString().lowercase()
+        val body = encrypt(SessionCommand.Retract(interventionId = interventionId), retractId) ?: return null
+        val answer = CompletableDeferred<MacRetract.Outcome?>()
+        chainedRetracts[retractId] = answer
+        scope.launch {
+            val outcome = RelayClient.postSessionCommand(body)
+            noteOutcome(outcome)
+            Log.i(TAG, "retract ${retractId.take(8)} (after forwarded) post -> ${outcome.logName}")
+            if (MacRetract.relayFailure(outcome) != null) answer.complete(null)
+        }
+        return try {
+            withTimeoutOrNull((MacRetract.TIMEOUT * 1000).toLong()) { answer.await() }
+        } finally {
+            chainedRetracts.remove(retractId)
+        }
+    }
+
+    private fun sendRetract(command: SessionCommand.Retract, target: RetractTarget) {
+        val retractId = UUID.randomUUID().toString().lowercase()
+        fun fail(f: MacRetract.Outcome.Failed) {
+            when (target) {
+                is RetractTarget.Held -> update { it.copy(deletes = it.deletes + (target.heldId to HeldDelete.Done(retractId, f))) }
+                is RetractTarget.Reply -> RelayClient.macRetractAnswered(target.interventionId, f)
+            }
+        }
+        val body = encrypt(command, retractId)
+        if (body == null) {
+            fail(MacRetract.Outcome.Failed("This phone has no session key. Re-pair with your Mac."))
+            return
+        }
+        retractTargets[retractId] = target
+        if (target is RetractTarget.Held) update { it.copy(deletes = it.deletes + (target.heldId to HeldDelete.Deleting(retractId, Instant.now()))) }
+        scope.launch {
+            val outcome = RelayClient.postSessionCommand(body)
+            noteOutcome(outcome)
+            Log.i(TAG, "retract ${retractId.take(8)} post -> ${outcome.logName}")
+            val failure = MacRetract.relayFailure(outcome) ?: return@launch
+            if (retractTargets.remove(retractId) == null) return@launch
+            timeoutJobs.remove(retractId)?.cancel()
+            fail(failure)
+        }
+        timeoutJobs[retractId] = scope.launch {
+            delay((MacRetract.TIMEOUT * 1000).toLong())
+            if (retractTargets.remove(retractId) == null) return@launch
+            timeoutJobs.remove(retractId)
+            when (target) {
+                is RetractTarget.Held -> update { s -> s.copy(deletes = s.deletes + (target.heldId to HeldDelete.Unconfirmed(retractId))) }
+                is RetractTarget.Reply -> RelayClient.macRetractAnswered(target.interventionId, MacRetract.Outcome.Failed(MacRetract.UNCONFIRMED))
+            }
+        }
+    }
+
+    // endregion
+
+
+    // region Photos (images-v1)
+
+    /**
+     * Sends [photos] with [caption] into the session: the pieces go up (3 at a time), then one `inputImages`; the
+     * bubble shows "Sending photos" with the upload's progress until the Mac answers. The upload lives here, so leaving
+     * the room does not cancel it. Returns why nothing was sent, or null. Only for a Mac whose caps say `images-v1`.
+     */
+    fun sendPhotos(sessionId: String, caption: String, photos: List<PreparedPhoto>, target: SessionTarget? = null): String? {
+        val s = _state.value
+        if (photos.isEmpty() || photos.size > app.page.android.model.PhotoLimits.MAX_PHOTOS) return "Add one to four photos."
+        val text = caption.trim()
+        if (s.isDemoMode) {
+            simulateDemoPhotos(sessionId, text, photos.size, target)
+            return null
+        }
+        if (SessionCaps.IMAGES !in s.caps) return "Your Mac can't take photos from Page. Update Page on your Mac."
+        if (rootKey == null) reloadKey()
+        if (rootKey == null) return "This phone has no session key. Re-pair with your Mac."
+        // New ids for every send: the Mac remembers the ones it has used for 15 minutes.
+        val upload = photos.map { UploadPhoto(PhotoChunks.newImageId(), it) }
+        // The route the row named when it was sent (`image` or `path`): the receipt says which, as iOS does.
+        val attach = s.sessions.firstOrNull { it.id == sessionId }?.attach
+        val bubbleId = UUID.randomUUID().toString().lowercase()
+        record(bubbleId, sessionId, SessionCommandKind.INPUT, text, SessionDeliveryState.Sending, target, photos = photos.size)
+        photoJobs[bubbleId] = scope.launch {
+            val uploader = PhotoUploader(photoTransport(bubbleId, photos.size, attach), { UUID.randomUUID().toString().lowercase() })
+            val outcome = uploader.run(sessionId, upload, text, target) { p -> update { it.copy(uploads = it.uploads + (bubbleId to p)) } }
+            photoJobs.remove(bubbleId)
+            update { it.copy(uploads = it.uploads - bubbleId) }
+            if (_state.value.commands[bubbleId] == null) return@launch // reset meanwhile
+            when (outcome) {
+                is UploadOutcome.Answered -> {
+                    val r = outcome.result
+                    applyResult(r.copy(clientId = bubbleId, detail = PhotoReceipt.detail(r, photos.size, attach)))
+                }
+                is UploadOutcome.Stopped -> settlePhotos(bubbleId, SessionDeliveryState.Failed(outcome.message))
+                UploadOutcome.NoAnswer -> settlePhotos(bubbleId, SessionDeliveryState.CheckSession(PhotoUploader.NO_ANSWER))
+            }
+            Log.i(TAG, "photos ${bubbleId.take(8)} x${photos.size} -> ${outcome::class.simpleName}")
+        }
+        return null
+    }
+
+    private fun settlePhotos(bubbleId: String, state: SessionDeliveryState) {
+        val cmd = _state.value.commands[bubbleId] ?: return
+        if (cmd.state != SessionDeliveryState.Sending) return
+        update { it.copy(commands = it.commands + (bubbleId to cmd.copy(state = state))) }
+    }
+
+    /**
+     * A late `result` for an `inputImages` (after the 30 s timeout or a failed POST) settles the photo bubble that sent it.
+     * Only a bubble the phone had marked as unanswered or failed (or still waiting) changes; see
+     * [SessionDeliveryState.afterLatePhotoResult].
+     */
+    private fun settleLatePhotos(late: LatePhotoResults.Entry, r: CommandResult) {
+        val cmd = _state.value.commands[late.bubbleId] ?: return
+        val result = r.copy(clientId = late.bubbleId, detail = PhotoReceipt.detail(r, late.photos, late.attach))
+        val next = cmd.state.afterLatePhotoResult(result, agentName(cmd.sessionId))
+        if (next == cmd.state) return
+        update { it.copy(commands = it.commands + (late.bubbleId to cmd.copy(state = next))) }
+        Log.i(TAG, "photos ${late.bubbleId.take(8)} late result -> ${r.code.wire}${r.reason?.let { "/$it" } ?: ""}")
+    }
+
+    /**
+     * Sealed POSTs for the uploader, and the one-shot listeners for `inputImages` results. One per send: each
+     * `inputImages` it announces is remembered for the bubble, so its result still settles the bubble if it arrives after
+     * the phone stopped waiting.
+     */
+    private fun photoTransport(bubbleId: String, photos: Int, attach: String?) = object : PhotoTransport {
+        override suspend fun post(command: SessionCommand, clientId: String): SessionCommandOutcome {
+            val body = encrypt(command, clientId) ?: return SessionCommandOutcome.Failed("This phone has no session key. Re-pair with your Mac.")
+            if (!SessionComposer.fitsRelay(body)) return SessionCommandOutcome.TooLarge
+            val outcome = RelayClient.postSessionCommand(body)
+            noteOutcome(outcome)
+            // Pieces are many: only the one that carries the answer is worth a log line.
+            if (command is SessionCommand.InputImages) Log.i(TAG, "inputImages ${clientId.take(8)} post -> ${outcome.logName} (${body.length} bytes)")
+            return outcome
+        }
+
+        override fun expect(clientId: String): ResultWaiter {
+            val d = CompletableDeferred<CommandResult>()
+            photoWaiters[clientId] = d
+            // Before the POST: a result can beat the HTTP answer, and a POST whose answer was lost may still have reached the Mac.
+            latePhotos.remember(clientId, LatePhotoResults.Entry(bubbleId, photos, attach, Instant.now()))
+            return object : ResultWaiter {
+                override suspend fun await(timeoutMillis: Long): CommandResult? = try {
+                    withTimeoutOrNull(timeoutMillis) { d.await() }
+                } finally {
+                    photoWaiters.remove(clientId)
+                }
+
+                override fun cancel() { photoWaiters.remove(clientId) }
+            }
+        }
+    }
+
+    // endregion
 
     /** Stop: the Mac presses Esc in the session. [target] is what the room showed; the Mac refuses if the session no longer matches. */
     fun interrupt(sessionId: String, target: SessionTarget? = null) {
@@ -510,12 +1016,13 @@ object SessionStore {
 
     private fun record(
         clientId: String, sessionId: String, kind: SessionCommandKind, text: String, state: SessionDeliveryState,
-        target: SessionTarget? = null, promptKey: String? = null,
+        target: SessionTarget? = null, promptKey: String? = null, photos: Int = 0,
     ) {
         val sentAt = Instant.now()
         val prior = _state.value.transcripts[sessionId]?.entries?.map { it.id }?.toSet()
-        update { it.copy(commands = pruned(it.commands + (clientId to SentSessionCommand(clientId, sessionId, kind, text, sentAt, state, prior, target, promptKey)))) }
-        if (!state.isPending) return
+        update { it.copy(commands = pruned(it.commands + (clientId to SentSessionCommand(clientId, sessionId, kind, text, sentAt, state, prior, target, promptKey, photos = photos)))) }
+        // A photo message waits on its own 30 s, which starts when `inputImages` goes out.
+        if (!state.isPending || photos > 0) return
         timeoutJobs[clientId] = scope.launch {
             delay((SessionDeliveryState.RESULT_TIMEOUT * 1000).toLong())
             val cmd = _state.value.commands[clientId] ?: return@launch
@@ -739,7 +1246,9 @@ object SessionStore {
             transcripts = transcripts.associateBy { it.key },
             screens = screens.associateBy { it.sessionId },
             workflows = workflows,
-            relayFeatures = setOf(SessionAvailability.FEATURE),
+            // The demo's Mac holds and deletes messages, and its relay takes queued replies back.
+            relayFeatures = setOf(SessionAvailability.FEATURE, SessionCaps.RELAY_RETRACT),
+            caps = setOf(SessionCaps.HOLD, SessionCaps.RETRACT, SessionCaps.IMAGES),
             hasKey = true,
             isDemoMode = true,
         )
@@ -750,7 +1259,7 @@ object SessionStore {
      * the same refusal rules as the Mac's input gate where they're visible
      * from here.
      */
-    private fun simulateDemoCommand(kind: SessionCommandKind, sessionId: String, text: String, shown: SessionTarget? = null, promptKey: String? = null) {
+    private fun simulateDemoCommand(kind: SessionCommandKind, sessionId: String, text: String, shown: SessionTarget? = null, promptKey: String? = null, hold: Boolean = false) {
         val clientId = UUID.randomUUID().toString().lowercase()
         record(clientId, sessionId, kind, text, SessionDeliveryState.Sending, shown, promptKey)
         val target = _state.value.session(sessionId)
@@ -760,6 +1269,7 @@ object SessionStore {
             val result = when (kind) {
                 SessionCommandKind.START -> CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, "Started Claude (simulated)", null)
                 SessionCommandKind.ANSWER -> CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, "Answered in ${target.host} (simulated)", null)
+                SessionCommandKind.RETRACT -> CommandResult(clientId, true, CommandResult.Code.DELIVERED, null, HeldMessages.DELETED_COPY, null, retract = CommandResult.Retract.DELETED)
                 SessionCommandKind.INTERRUPT -> {
                     if (target.isStoppable) {
                         replaceDemoSession(target, LiveSessionState.INTERRUPTED)
@@ -771,6 +1281,7 @@ object SessionStore {
                 SessionCommandKind.INPUT -> {
                     val busy = target.state == LiveSessionState.ACTIVE
                     when {
+                        busy && hold -> CommandResult(clientId, true, CommandResult.Code.QUEUED, null, "Held — Page types it when ${target.backend.displayName} finishes this turn", null, held = true)
                         target.state.isWaiting -> CommandResult(clientId, false, CommandResult.Code.REFUSED, "waiting", null, target.interventionId)
                         busy && text.firstOrNull()?.isDigit() == true -> CommandResult(clientId, false, CommandResult.Code.REFUSED, "digit_while_busy", null, null)
                         else -> CommandResult(
@@ -781,13 +1292,58 @@ object SessionStore {
                 }
             }
             apply(SessionsUpdate.Result(result))
-            if (kind != SessionCommandKind.INPUT || !result.ok) return@launch
+            if (kind != SessionCommandKind.INPUT || !result.ok || result.held) return@launch
             delay(600)
             if (!_state.value.isDemoMode) return@launch
             update { s ->
                 val old = s.transcripts[sessionId]
                 val entry = TranscriptEntry("demo-$clientId", TranscriptRole.USER, text, Instant.now(), null)
                 s.copy(transcripts = s.transcripts + (sessionId to SessionTranscript(sessionId, (old?.entries ?: emptyList()) + entry, old?.truncated ?: false)))
+            }
+        }
+    }
+
+    /** A demo photo send: the upload's progress, then the Mac's answer, then the transcript's echo with the photo count. */
+    private fun simulateDemoPhotos(sessionId: String, caption: String, count: Int, target: SessionTarget?) {
+        val bubbleId = UUID.randomUUID().toString().lowercase()
+        record(bubbleId, sessionId, SessionCommandKind.INPUT, caption, SessionDeliveryState.Sending, target, photos = count)
+        val session = _state.value.session(sessionId)
+        scope.launch {
+            val total = 12 * count
+            for (n in 1..total step 3) {
+                delay(150)
+                update { it.copy(uploads = it.uploads + (bubbleId to PhotoProgress(n, total, PhotoProgress.Phase.UPLOADING))) }
+            }
+            update { it.copy(uploads = it.uploads + (bubbleId to PhotoProgress(total, total, PhotoProgress.Phase.WAITING))) }
+            delay(600)
+            if (!_state.value.isDemoMode) return@launch
+            update { it.copy(uploads = it.uploads - bubbleId) }
+            val where = session?.host ?: "your Mac"
+            applyResult(CommandResult(bubbleId, true, CommandResult.Code.DELIVERED, null, "Sent ${PhotoText.chip(count)} to Claude in $where (demo)", null, attached = count))
+            delay(600)
+            if (!_state.value.isDemoMode) return@launch
+            update { s ->
+                val old = s.transcripts[sessionId]
+                val chips = (1..count).joinToString(" ") { "[Image #$it]" }
+                val entry = TranscriptEntry("demo-$bubbleId", TranscriptRole.USER, chips + caption, Instant.now(), null, images = count)
+                s.copy(transcripts = s.transcripts + (sessionId to SessionTranscript(sessionId, (old?.entries ?: emptyList()) + entry, old?.truncated ?: false)))
+            }
+        }
+    }
+
+    /** A demo delete: the Mac says "deleted" a moment later, and the held message settles. */
+    private fun simulateDemoRetract(heldId: String) {
+        val retractId = UUID.randomUUID().toString().lowercase()
+        update { it.copy(deletes = it.deletes + (heldId to HeldDelete.Deleting(retractId, Instant.now()))) }
+        scope.launch {
+            delay(700)
+            if (!_state.value.isDemoMode) return@launch
+            update { s ->
+                val cmd = s.commands[heldId]
+                s.copy(
+                    commands = if (cmd != null && cmd.state is SessionDeliveryState.Held) s.commands + (heldId to cmd.copy(state = SessionDeliveryState.Deleted(HeldMessages.DELETED_COPY))) else s.commands,
+                    deletes = s.deletes + (heldId to HeldDelete.Done(retractId, MacRetract.Outcome.Deleted(HeldMessages.DELETED_COPY))),
+                )
             }
         }
     }

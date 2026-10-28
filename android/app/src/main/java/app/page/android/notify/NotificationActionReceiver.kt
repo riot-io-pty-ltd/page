@@ -8,7 +8,9 @@ import androidx.core.app.RemoteInput
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import app.page.android.model.QueuedReplyNotification
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
 import app.page.android.model.ActionGate
@@ -51,6 +53,11 @@ class NotificationActionReceiver : BroadcastReceiver() {
         if (info == null) {
             // Page never posted this (or it closed and was forgotten).
             PageNotifications.notice("Nothing was sent", "Page couldn't match that notification to a page. Open Page to answer it.", parsed.interventionId)
+            return
+        }
+        // Delete: takes back a reply that is sending or queued. It carries nothing but the page's id.
+        if (parsed.action == NotificationActionId.DELETE) {
+            handleDelete(context, info)
             return
         }
         // Only the reply action carries user input, and only its typed text is used.
@@ -98,12 +105,50 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 }
                 // Replace the actions with a status at once: no double taps,
                 // and the reply spinner ends.
-                PageNotifications.post(info, silent = true, status = "Sending your reply…")
+                NotificationReplyState.set(info.id, NotificationReplyState.SENDING)
+                PageNotifications.post(info, silent = true, status = QueuedReplyNotification.SENDING, deleteAction = true)
                 val request = OneTimeWorkRequestBuilder<ReplyWorker>()
                     .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                     .setInputData(ReplyWorker.input(info.id, decision.text, decision.action))
                     .build()
                 WorkManager.getInstance(context).enqueueUniqueWork("reply-${info.id}", ExistingWorkPolicy.KEEP, request)
+            }
+        }
+    }
+
+    /**
+     * Delete on a notification. While the reply is still sending: mark it, and if its work has not started cancel it
+     * (nothing left the phone: "Deleted — not sent"); a POST that is already running can't be called back, so the
+     * worker re-checks the mark and, once the relay holds the reply, asks the relay to take it back. Once queued at the
+     * relay: ask the relay ([RetractWorker]). Anything else has nothing to delete.
+     */
+    private fun handleDelete(context: Context, info: PageInfo) {
+        val wm = WorkManager.getInstance(context)
+        when (NotificationReplyState.get(info.id)) {
+            NotificationReplyState.SENDING -> {
+                NotificationReplyState.requestDelete(info.id)
+                val infos = try { wm.getWorkInfosForUniqueWork("reply-${info.id}").get(1, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) { null }
+                val notStarted = infos != null && infos.all { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+                if (notStarted) {
+                    // The cancel is asynchronous: the work can still start before it lands. The mark stays, so that
+                    // worker sees it right before its POST and sends nothing (a later reply from here replaces it).
+                    wm.cancelUniqueWork("reply-${info.id}")
+                    PageNotifications.post(info, silent = true, status = null, note = QueuedReplyNotification.NOT_SENT)
+                } else {
+                    PageNotifications.post(info, silent = true, status = QueuedReplyNotification.DELETING)
+                }
+            }
+            NotificationReplyState.QUEUED -> {
+                PageNotifications.post(info, silent = true, status = QueuedReplyNotification.DELETING)
+                val request = OneTimeWorkRequestBuilder<RetractWorker>()
+                    .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                    .setInputData(RetractWorker.input(info.id))
+                    .build()
+                wm.enqueueUniqueWork(RetractWorker.uniqueName(info.id), ExistingWorkPolicy.KEEP, request)
+            }
+            else -> {
+                // Nothing of ours is queued for it: the page's own actions are back.
+                PageNotifications.post(info, silent = true, status = null, note = "Nothing to delete")
             }
         }
     }

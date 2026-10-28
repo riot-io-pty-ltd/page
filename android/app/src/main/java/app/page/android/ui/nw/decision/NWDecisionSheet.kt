@@ -70,10 +70,15 @@ import app.page.android.model.NWTip
 import app.page.android.model.NowRow
 import app.page.android.model.PendingAction
 import app.page.android.model.ReceiptThreadInput
+import app.page.android.model.QueuedDelete
 import app.page.android.model.RowAction
+import app.page.android.model.SendChoice
+import app.page.android.model.SendReceipt
+import app.page.android.model.SendWhen
 import app.page.android.model.SentSessionCommand
 import app.page.android.model.SessionAsk
 import app.page.android.model.TurnSummaryChips
+import app.page.android.model.YesNoReply
 import app.page.android.model.waitingText
 import app.page.android.ui.nw.components.NWAnswerHost
 import app.page.android.ui.nw.components.NWButton
@@ -81,13 +86,17 @@ import app.page.android.ui.nw.components.NWButtonKind
 import app.page.android.ui.nw.components.NWChip
 import app.page.android.ui.nw.components.NWDeliveryPreview
 import app.page.android.ui.nw.components.NWHoldRing
+import app.page.android.ui.nw.components.NWReceiptAction
 import app.page.android.ui.nw.components.NWReceiptLine
+import app.page.android.ui.nw.components.NWSendChoice
+import app.page.android.ui.nw.components.NWSendReceiptView
 import app.page.android.ui.nw.components.NWReceiptThreadView
 import app.page.android.ui.nw.components.NWTextField
 import app.page.android.ui.nw.components.NWTipCallout
 import app.page.android.ui.nw.components.NWTurnChip
 import app.page.android.ui.nw.components.color
 import app.page.android.ui.nw.components.tint
+import app.page.android.ui.nw.room.YesNoChip
 import app.page.android.ui.nw.theme.NW
 import java.time.Instant
 
@@ -120,6 +129,15 @@ data class DecisionScreenState(
     val holdCommittedAt: java.time.Instant? = null,
     /** The first-time tip for the delivery preview, while it is unseen. */
     val tip: NWTip? = null,
+    /** What Delete would take back for this page's reply (queued at the relay, or held on the Mac for a rate limit); null when nothing can be deleted. */
+    val deleteLayer: QueuedDelete.Layer? = null,
+    /** What the last delete answered ("Too late — your Mac already has it"), or why a queued reply can't be deleted from here. */
+    val deleteNote: String? = null,
+    /** How a Steer to a busy session goes ("Now" / "When it finishes"); null when the session isn't busy or this isn't a Steer. */
+    val choice: SendChoice.Plan? = null,
+    val choiceExplained: Boolean = true,
+    /** This session's countdown ("Sending in 10 s · Undo") or held message ("Held — sends when Claude finishes · Delete"), as the Steer left it. */
+    val sendReceipt: SendReceipt? = null,
 )
 
 class DecisionScreenActions(
@@ -137,6 +155,13 @@ class DecisionScreenActions(
     val close: () -> Unit = {},
     val dismissTip: (NWTip) -> Unit = {},
     val tipShown: (NWTip) -> Unit = {},
+    /** Delete the queued reply (relay queue, or the Mac's rate-limit hold). */
+    val delete: () -> Unit = {},
+    val selectWhen: (SendWhen) -> Unit = {},
+    /** Undo the countdown, or Delete the held message. */
+    val sendReceiptAction: (SendReceipt) -> Unit = {},
+    /** Dismiss the note for a message put back in the box. */
+    val dismissNote: () -> Unit = {},
 )
 
 /** The sheet's own surface tint: near-black, tinted by the card's class. (iOS NWDecisionBackground.) */
@@ -388,6 +413,28 @@ private class DecisionView(
         if (s != null && !(receipt?.frame(state.now)?.word == s.text)) {
             NWReceiptLine(s.text, failed = s.tone == DecisionPhase.Tone.PROBLEM || s.tone == DecisionPhase.Tone.WARN)
         }
+        DeleteBlock()
+        // A Steer's own receipt: the 10 s countdown with Undo, or the message the Mac holds with Delete.
+        state.sendReceipt?.let { NWSendReceiptView(it, actions.sendReceiptAction, { actions.dismissNote() }) }
+    }
+
+    /**
+     * Delete, for a reply that is queued and not yet sent: only where it can work (the relay or the Mac says it can take
+     * it back). After a delete that could not happen, the answer reads here, in words.
+     */
+    @Composable
+    private fun DeleteBlock() {
+        val layer = state.deleteLayer
+        if (layer == null && state.deleteNote == null) return
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            state.deleteNote?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textTertiary.color, modifier = Modifier.padding(horizontal = 4.dp)) }
+            if (layer != null) {
+                NWReceiptAction(
+                    "Delete", actions.delete, tone = NW.Palette.red.mixed(NW.Palette.white, 0.2),
+                    hint = if (layer == QueuedDelete.Layer.MAC_RATE_LIMIT) "Takes this reply back from your Mac. Nothing will be typed at reset." else "Takes this reply back before your Mac reconnects. Nothing is typed.",
+                )
+            }
+        }
     }
 
     @Composable
@@ -397,6 +444,7 @@ private class DecisionView(
             is CardOutcome.Arming -> NWReceiptLine("Sending in a moment · tap to cancel", failed = false, modifier = Modifier.clickable(onClick = actions.cancel))
             CardOutcome.Sending -> NWReceiptLine("Sending…")
             is CardOutcome.Delivered -> NWReceiptLine("Delivered · ${o.detail}")
+            is CardOutcome.Note -> NWReceiptLine(o.text)
             CardOutcome.None -> Unit
         }
     }
@@ -437,7 +485,9 @@ private class DecisionView(
 
     @Composable
     fun Controls() {
-        val busy = state.pending != null || !accepts
+        // A Steer counting down ("Sending in 10 s · Undo") is the one thing under way: no second send beside it.
+        val counting = state.sendReceipt?.action == SendReceipt.Action.UNDO
+        val busy = state.pending != null || !accepts || counting
         val info = c.informational
         val committed = committedAt
         when {
@@ -523,8 +573,29 @@ private class DecisionView(
             Composer("Send", "Tell it what to do next…", alwaysOpen = false)
             return
         }
-        if (row.action(RowAction.Kind.CARRY_ON) != null) NWButton("Looks good ✦", actions.carryOn, Modifier.fillMaxWidth(), kind = NWButtonKind.BRIGHT)
+        // Claude ended on a yes/no question: Yes and No are the primary pair, sent as a written reply like Steer's.
+        val q = yesNoQuestion
+        if (q != null) YesNoRow(q)
+        if (row.action(RowAction.Kind.CARRY_ON) != null) NWButton("Looks good ✦", actions.carryOn, Modifier.fillMaxWidth(), kind = if (q != null) NWButtonKind.QUIET else NWButtonKind.BRIGHT)
         if (row.action(RowAction.Kind.TELL_INSTEAD) != null) NWButton("Steer…", { onComposerOpen(true) }, Modifier.fillMaxWidth())
+    }
+
+    /**
+     * The yes/no question a finished turn ends on, when a written reply can answer it (the same gate as Steer) and no
+     * reply is on its way: an unconfirmed send still shows the controls, but not a second Yes.
+     */
+    private val yesNoQuestion: String?
+        get() = YesNoReply.reviewOffer(
+            c.yesNo?.takeIf { c.section == NowRow.Section.REVIEW },
+            takesReply = row.action(RowAction.Kind.TELL_INSTEAD) != null, open = accepts && state.pending == null,
+        )
+
+    @Composable
+    private fun YesNoRow(question: String) {
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+            YesNoChip(YesNoReply.YES, question, primary = true, modifier = Modifier.weight(1f)) { actions.send(YesNoReply.YES) }
+            YesNoChip(YesNoReply.NO, question, primary = false, modifier = Modifier.weight(1f)) { actions.send(YesNoReply.NO) }
+        }
     }
 
     /** The composer. Locked until asked for: a written reply to a waiting prompt is Esc, then the text, then Return, and the label says so. */
@@ -533,7 +604,9 @@ private class DecisionView(
         val focus = remember { FocusRequester() }
         LaunchedEffect(Unit) { if (!alwaysOpen) runCatching { focus.requestFocus() } }
         val blank = draft.trim().isEmpty()
+        val q = yesNoQuestion?.takeIf { blank }
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            if (q != null) YesNoRow(q)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text((row.action(RowAction.Kind.TELL_INSTEAD)?.preview?.split(" · ")?.firstOrNull() ?: "Your message").uppercase(), style = NW.Typo.label, color = NW.Palette.textQuiet.color, modifier = Modifier.weight(1f))
                 if (!alwaysOpen) Text(
@@ -541,6 +614,8 @@ private class DecisionView(
                     modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { onComposerOpen(false); onDraft("") }.padding(horizontal = 8.dp).wrapCenter(),
                 )
             }
+            // A busy session: Now (after a 10 s Undo) or When it finishes (held on the Mac).
+            state.choice?.let { NWSendChoice(it, c.agent, state.choiceExplained, actions.selectWhen) }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Bottom) {
                 NWTextField(draft, onDraft, placeholder, Modifier.weight(1f), focus = focus)
                 NWButton(label, { actions.send(draft) }, Modifier.width(96.dp), kind = NWButtonKind.BRIGHT, enabled = !blank)

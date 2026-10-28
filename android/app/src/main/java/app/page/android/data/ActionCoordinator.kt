@@ -76,21 +76,24 @@ object ActionCoordinator {
     /**
      * Starts an action on a row. Every action arms first (a 1.2 s ring that names what will be typed; cancel
      * works until it ends), except an Irreversible approve, whose hold plus biometrics is the arm. [onResult]
-     * gets the relay's answer for a send that happened.
+     * gets the relay's answer for a send that happened. Returns false when nothing was started (another action is on
+     * its way for the row, or the row doesn't offer [kind]), so a caller holding words can give them back.
      */
-    fun begin(row: NowRow, kind: RowAction.Kind, text: String = "", onResult: ((ReplyOutcome) -> Unit)? = null) {
-        if (_pending.value[row.id] != null || !ActionGate.isSendable(kind) || ActionGate.requiresBiometrics(kind, row.commit)) return
+    fun begin(row: NowRow, kind: RowAction.Kind, text: String = "", arm: Boolean = true, onResult: ((ReplyOutcome) -> Unit)? = null): Boolean {
+        if (_pending.value[row.id] != null || !ActionGate.isSendable(kind) || ActionGate.requiresBiometrics(kind, row.commit)) return false
         // The backstop: a row only ever sends what it offers. A row the phone cannot type into has no Approve.
-        if (!canBegin(row, kind)) return
-        val request = ReplyMapping.request(kind, text) ?: return
+        if (!canBegin(row, kind)) return false
+        val request = ReplyMapping.request(kind, text) ?: return false
         setProblem(row.id, null)
-        val armed = ActionGate.requiresArm(kind, row.commit)
+        // [arm] false: a countdown the person already watched and could Undo (a Steer to a busy session) stands in for the ring.
+        val armed = arm && ActionGate.requiresArm(kind, row.commit)
         setPending(row.id, PendingAction(row.id, kind, request.text, row.commit, Instant.now(), armed, row.action(kind)?.preview))
         jobs[row.id] = scope.launch {
             if (armed) delay((ArmSpec.duration * 1000).toLong())
             if (!isActive) return@launch
             fire(row.id, request, onResult)
         }
+        return true
     }
 
     /** A row sends an action only when it has that action; a row that can only Open on Mac sends nothing. */

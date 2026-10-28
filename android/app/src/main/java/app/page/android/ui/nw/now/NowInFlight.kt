@@ -70,7 +70,7 @@ import app.page.android.ui.nw.theme.Rgba
  * "IN FLIGHT 3": a side-scroll strip that summarises every working session, then one full card per session, as
  * big as a Review card, so the whole picture of the work is on one screen. Tapping a card opens its room on
  * Story; "Open" shows its terminal and "Steer" opens the composer. Touching and holding offers the same, and Stop
- * (which opens the room where the 0.6 s hold lives).
+ * (which opens the room where the 10 s hold lives).
  */
 @Composable
 fun NWInFlightSection(

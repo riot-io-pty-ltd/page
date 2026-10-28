@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Page"
 include(":app")
+include(":photo-testkit")

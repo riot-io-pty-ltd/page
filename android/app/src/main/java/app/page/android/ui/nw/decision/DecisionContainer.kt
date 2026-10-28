@@ -29,6 +29,7 @@ import app.page.android.data.NowStore
 import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.SessionStore
+import app.page.android.data.SteerChoiceStore
 import app.page.android.data.TipStore
 import app.page.android.model.ActionGate
 import app.page.android.model.AnswerPicker
@@ -37,6 +38,13 @@ import app.page.android.model.ChipKind
 import app.page.android.model.DecisionContent
 import app.page.android.model.DecisionPhase
 import app.page.android.model.Intervention
+import app.page.android.model.OutboxRestore
+import app.page.android.model.QueuedDelete
+import app.page.android.model.plusSeconds
+import app.page.android.model.SendChoice
+import app.page.android.model.SendReceipt
+import app.page.android.model.SendWhen
+import app.page.android.model.NowRow
 import app.page.android.model.NowRowBuilder
 import app.page.android.model.ReceiptThreadInput
 import app.page.android.model.ReplyOutcome
@@ -48,6 +56,7 @@ import app.page.android.ui.nw.theme.NW
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.Instant
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * The Decision sheet, live: finds the page (even on a cold launch from a notification), derives what the sheet is
@@ -80,19 +89,33 @@ fun DecisionContainer(
     val macName = mac?.name ?: ""
     val context = LocalContext.current
     val biometry = remember { BiometricGate.methodName(context) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     var snapshot by remember(interventionId) { mutableStateOf<Intervention?>(null) }
     var lookupFinished by remember(interventionId) { mutableStateOf(false) }
     var closeLookupFinished by remember(interventionId) { mutableStateOf(false) }
     var draft by remember(interventionId) { mutableStateOf("") }
-    var composerOpen by remember(interventionId) { mutableStateOf(app.page.android.ui.nw.shell.RenderHarness.spec.value?.screen == "decision-composer") }
+    // Steer on a card opens the sheet with the composer already up (and focused): one tap.
+    var composerOpen by remember(interventionId) {
+        mutableStateOf(app.page.android.ui.nw.shell.RenderHarness.spec.value?.screen == "decision-composer" || AppRouter.takeSheetComposer(interventionId))
+    }
+    var restoredNote by remember(interventionId) { mutableStateOf<String?>(null) }
+    // A Steer that went to the countdown or the Mac's hold: the same words again within a second are one tap's echo.
+    var lastSend by remember(interventionId) { mutableStateOf<app.page.android.model.DraftSubmit.Last?>(null) }
+    val retractNotes by RelayClient.retractNotes.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { SteerChoiceStore.ensureLoaded() }
+    val lastChoice by SteerChoiceStore.last.collectAsStateWithLifecycle()
+    val choiceExplained by SteerChoiceStore.explained.collectAsStateWithLifecycle()
     var holdCommittedAt by remember(interventionId) { mutableStateOf<java.time.Instant?>(null) }
     var showedTip by remember(interventionId) { mutableStateOf(false) }
 
     val live = inbox.firstOrNull { it.id == interventionId }
     val intervention = live ?: snapshot
     val arming = ActionCoordinator.isArming(interventionId)
-    val now by rememberNWNow(until = if (arming) Instant.now().plusSeconds(2) else null, fastMs = 100)
+    // The arm ring and a Steer's 10 s countdown read in fractions of seconds: the clock runs fast while either is moving.
+    val countdownEnd = sessionState.outbox.entries.filter { it.pageId == interventionId }.minOfOrNull { it.startedAt }
+        ?.plusSeconds(app.page.android.model.SendCountdown.SECONDS + 0.5)
+    val now by rememberNWNow(until = if (arming) Instant.now().plusSeconds(2) else countdownEnd, fastMs = if (arming) 100 else 250)
     val legacyRelay = RelayClient.relayIsLegacy && live?.deliveryStatus == null
     val phase = DecisionPhase.derive(
         DecisionPhase.Inputs(
@@ -142,6 +165,11 @@ fun DecisionContainer(
     }
     val session = sessionState.session(iv.sessionId)
     val row = NowRowBuilder.row(iv, session, macName)
+    // A Steer that did not go (the app closed before its countdown ended) is back in the box, with why.
+    LaunchedEffect(iv.sessionId, sessionState.restoredDrafts[iv.sessionId], row.action(RowAction.Kind.TELL_INSTEAD) != null) {
+        if (row.action(RowAction.Kind.TELL_INSTEAD) == null) return@LaunchedEffect
+        SessionStore.takeRestoredDraft(iv.sessionId)?.let { d -> draft = OutboxRestore.merge(d.text, draft); composerOpen = true; restoredNote = d.note }
+    }
     val content = DecisionContent.build(iv, row, session, macName)
     val problem = problems[iv.id]
     val outcome: CardOutcome = when {
@@ -158,10 +186,29 @@ fun DecisionContainer(
         if (iv.isBlockingHook) AnswerPicker.delivery(CardOutcome.from(pending[iv.id], deliveries[iv.id], now), iv.sessionId, it.id, now)
         else sessionState.latestAnswer(iv.sessionId, it.id)
     }
+    // How a Steer to a busy session goes: only on a look or review page whose session is working (never a decision,
+    // and never a rate limit, whose "Send after reset" is already held on the Mac).
+    val steers = row.action(RowAction.Kind.TELL_INSTEAD) != null && row.chip != ChipKind.QUESTION && row.chip != ChipKind.RATE_LIMITED &&
+        (row.section == NowRow.Section.LOOK || row.section == NowRow.Section.REVIEW)
+    val choice = if (steers && session != null) SendChoice.forSession(session, false, sessionState.caps, lastChoice) else null
+    val agentName = session?.backend?.displayName ?: iv.agentName
+    // This page's countdown, else the newest message the Mac holds for its session.
+    val countdown = sessionState.outbox.entries.filter { it.pageId == iv.id }.minByOrNull { it.startedAt }
+    val heldMessage = sessionState.sentMessages(iv.sessionId).lastOrNull { it.state is app.page.android.model.SessionDeliveryState.Held }
+    val sendReceipt = (
+        SendReceipt.build(
+            heldMessage, agentName, now, scheduled = countdown, delete = heldMessage?.let { sessionState.deletes[it.clientId] },
+            canDelete = heldMessage != null && QueuedDelete.heldMessage(heldMessage.state, sessionState.caps, sessionState.deletes[heldMessage.clientId]),
+        ) ?: restoredNote?.let { SendReceipt("restored", it, null, SendReceipt.Tone.NOTE) }
+        )
+    // Delete for a queued reply: only where the relay (or the Mac, for a rate-limit hold) says it can take it back.
+    val deleteLayer = QueuedDelete.reply(deliveries[iv.id], iv.isBlockingHook, sessionState.relayFeatures, sessionState.caps)
+    val deleteNote = retractNotes[iv.id] ?: if (deleteLayer == null) QueuedDelete.whyNot(deliveries[iv.id], iv.isBlockingHook, sessionState.relayFeatures, sessionState.caps, sessionState.hasList) else null
     val state = DecisionScreenState(
         content = content, row = row, phase = phase, legacyRelay = legacyRelay, now = now, biometry = biometry, pending = pending[iv.id], outcome = outcome,
         hasSession = session != null, ask = ask, askDelivery = askDelivery, macName = macName, askViaHook = iv.isBlockingHook, receipt = receipt,
         holdCommittedAt = holdCommittedAt, fixedHold = app.page.android.ui.nw.shell.RenderHarness.spec.value?.hold, tip = book.decisionTip(row.focusPreview != null && row.action(RowAction.Kind.OPEN_ON_MAC) == null),
+        deleteLayer = deleteLayer, deleteNote = deleteNote, choice = choice, choiceExplained = choiceExplained, sendReceipt = sendReceipt,
     )
     val actions = DecisionScreenActions(
         approve = { ActionCoordinator.begin(row, RowAction.Kind.APPROVE) },
@@ -169,9 +216,42 @@ fun DecisionContainer(
         deny = { ActionCoordinator.begin(row, RowAction.Kind.DENY) },
         carryOn = { ActionCoordinator.begin(row, RowAction.Kind.CARRY_ON) },
         stop = { ActionCoordinator.begin(row, RowAction.Kind.STOP) },
-        send = { text ->
-            // A written reply: Esc, then the text, then Return, which the Mac's reply planner does.
-            ActionCoordinator.begin(row, RowAction.Kind.TELL_INSTEAD, text) { outcome2 -> if (outcome2 is ReplyOutcome.Accepted) { draft = ""; composerOpen = false } }
+        send = send@{ text ->
+            // Neither path below has a ring that refuses a second start, so one tap that arrives twice is caught here.
+            if (choice != null) {
+                if (app.page.android.model.DraftSubmit.isDuplicate(text, lastSend, java.time.Instant.now())) return@send
+                lastSend = app.page.android.model.DraftSubmit.Last(text, java.time.Instant.now())
+            }
+            when {
+                // When it finishes: the Mac holds it (session input, with the folder and terminal this sheet showed).
+                choice?.selected == SendWhen.WHEN_FINISHED && session != null -> {
+                    val problem = SessionStore.sendInput(iv.sessionId, text, SessionTarget.of(session, macName), hold = true)
+                    if (problem == null) { SteerChoiceStore.markExplained(); draft = ""; composerOpen = false; restoredNote = null }
+                }
+                // Now, to a working session: 10 s to Undo first, then the page's own reply path (in place of the 1.2 s ring).
+                choice != null -> {
+                    val problem = SessionStore.scheduleInput(iv.sessionId, text, session?.let { SessionTarget.of(it, macName) }, pageId = iv.id)
+                    if (problem == null) { if (choice.isChoice) SteerChoiceStore.markExplained(); draft = ""; composerOpen = false; restoredNote = null }
+                }
+                // A written reply: Esc, then the text, then Return, which the Mac's reply planner does.
+                else -> ActionCoordinator.begin(row, RowAction.Kind.TELL_INSTEAD, text) { outcome2 -> if (outcome2 is ReplyOutcome.Accepted) { draft = ""; composerOpen = false } }
+            }
+        },
+        selectWhen = SteerChoiceStore::select,
+        dismissNote = { restoredNote = null },
+        delete = {
+            when (deleteLayer) {
+                QueuedDelete.Layer.RELAY_QUEUE -> scope.launch { RelayClient.retractReply(iv.id) }
+                QueuedDelete.Layer.MAC_RATE_LIMIT -> RelayClient.deleteHeldReply(iv.id)
+                else -> Unit
+            }
+        },
+        sendReceiptAction = { r ->
+            when (r.action) {
+                SendReceipt.Action.UNDO -> SessionStore.undoScheduled(r.id)?.let { draft = OutboxRestore.merge(it, draft); composerOpen = true }
+                SendReceipt.Action.DELETE -> SessionStore.deleteHeld(r.id)
+                null -> Unit
+            }
         },
         submitAnswers = { sheet ->
             when (val s = AnswerPicker.submit(iv.isBlockingHook, true, sheet)) {

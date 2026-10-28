@@ -46,11 +46,16 @@ float nw_fbm(float2 p) {
 }
 """
 
-    /** aurora.glsl: curtains bent by slow noise, streaks, stars fading towards the horizon and a vignette, over the palette's sky gradient. `intensity` 0 is the bare sky (dusk). `stars` scales the scatter of stars. */
+    /**
+     * aurora.glsl: curtains bent by slow noise, streaks, stars fading towards the horizon and a vignette, over the
+     * palette's sky gradient. `intensity` 0 is the bare sky (dusk). `stars` scales the scatter of stars. `phase` moves
+     * the curtains: the GLSL's time * u_speed, accumulated in Kotlin ([nwAuroraPhase]) so a change of speed never jumps
+     * them; `time` is the stars' own twinkle clock.
+     */
     const val AURORA = COMMON + """
 uniform float2 size;
 uniform float time;
-uniform float speed;
+uniform float phase;
 uniform float starCell;
 layout(color) uniform half4 skyTop;
 layout(color) uniform half4 skyBottom;
@@ -64,7 +69,7 @@ half4 main(float2 fragCoord) {
     float2 uv = float2(fragCoord.x / size.x, 1.0 - fragCoord.y / size.y);
     float aspect = size.x / size.y;
     float2 p = float2(uv.x * aspect, uv.y);
-    float t = time * speed;
+    float t = phase;
 
     float warp = nw_fbm(p * 1.4 + float2(t * 0.6, -t * 0.25));
     float band1 = nw_ss(0.35, 0.0, abs(uv.y - 0.62 - 0.18 * sin(p.x * 1.6 + t + warp * 3.0)));

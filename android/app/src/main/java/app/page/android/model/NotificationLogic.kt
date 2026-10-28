@@ -11,6 +11,55 @@ object NotificationActionId {
 
     /** v4 "looks stuck" pages: Stop it (sent as deny; the Mac presses Esc). */
     const val STOP = "STOP"
+
+    /** Takes back a reply that is queued and not yet sent (the "Sending…" or "Queued — your Mac is offline" notification). */
+    const val DELETE = "DELETE"
+}
+
+/**
+ * What a page notification says while a reply from it is on its way, and after a delete: the copy and whether the
+ * page's own actions come back. Pure, so every outcome of a delete reads the same here as in the app. Delete is
+ * offered only on "Sending your reply…" (where it stops the send if it hasn't started) and on the queued line (where
+ * it asks the relay to take the reply back); never on anything the relay couldn't take back.
+ */
+object QueuedReplyNotification {
+    const val SENDING = "Sending your reply…"
+    const val QUEUED = "Queued — your Mac is offline. It'll be typed in when it reconnects."
+    const val DELETING = "Deleting…"
+    const val NOT_SENT = "Deleted — not sent"
+
+    /**
+     * [status] replaces the page's actions with a line (null: the page's actions are back, with [note] as the line);
+     * [deleteAgain] keeps a Delete on it (a delete that never reached the relay can be tried again).
+     */
+    data class Plan(val status: String?, val note: String?, val deleteAgain: Boolean = false)
+
+    fun after(outcome: ReplyRetract.Outcome): Plan = when (outcome) {
+        // "Deleted — not sent", or the Mac's longer sentence when it took the reply back after the relay's "forwarded".
+        is ReplyRetract.Outcome.Deleted -> Plan(null, outcome.text)
+        ReplyRetract.Outcome.NothingToDelete -> Plan(null, outcome.text)
+        is ReplyRetract.Outcome.Failed -> Plan(outcome.text, null, deleteAgain = true)
+        // The rest are final: the page closed, or the relay said it can't be taken back, in its own words.
+        else -> Plan(outcome.text, null)
+    }
+
+    /**
+     * A Delete pressed while the reply's POST was already on its way couldn't call it back; once the relay has answered
+     * the POST, this says what the notification becomes. null: the relay holds the reply and can take it back, so ask
+     * it ([ReplyRetract]). Otherwise the notification says why nothing was deleted: the Mac already has it (the relay
+     * forwarded it at once), or the relay is too old to delete queued replies, or a hook polls the page. [queued] is the
+     * relay's own answer to the POST. Pure.
+     */
+    fun afterDeleteDuringSend(queued: Boolean, relayFeatures: Set<String>?, hookBlocking: Boolean): Plan? = when {
+        !queued -> after(ReplyRetract.Outcome.TooLate(ReplyRetract.FORWARDED))
+        offersDelete(true, relayFeatures, hookBlocking) -> null
+        hookBlocking -> after(ReplyRetract.Outcome.HookHeld)
+        else -> after(ReplyRetract.Outcome.RelayTooOld)
+    }
+
+    /** Delete is on the queued line only when the relay says it can take it back (and no hook polls the page). */
+    fun offersDelete(queued: Boolean, relayFeatures: Set<String>?, hookBlocking: Boolean): Boolean =
+        queued && !hookBlocking && ReplyRetract.available(relayFeatures)
 }
 
 /**

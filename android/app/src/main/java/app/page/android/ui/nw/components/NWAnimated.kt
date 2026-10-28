@@ -29,6 +29,13 @@ import kotlin.math.min
 fun nwClockSeconds(): Double = SystemClock.elapsedRealtimeNanos() / 1e9
 
 /**
+ * [seconds] as a shader's `time` uniform: wrapped to one day before it is narrowed to a float. Uptime only grows,
+ * and a float that large moves in coarse steps, so after weeks the aurora would step instead of drift (the iOS sky
+ * froze outright on its reference-date seconds). One jump a day instead; a harness phase like 2 s stays 2 s. Pure.
+ */
+fun nwShaderSeconds(seconds: Double): Float = seconds.mod(86_400.0).toFloat()
+
+/**
  * The [nwClockSeconds] reading that corresponds to the wall-clock [instant], so a moment the stores record as an
  * `Instant` (a delivery confirmed, biometrics passed) can start a one-shot. The one-shots must never be handed epoch
  * seconds: on the monotonic base those lie decades in the future, and the frame loop would never end.

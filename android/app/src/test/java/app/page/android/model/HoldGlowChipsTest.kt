@@ -76,13 +76,13 @@ class HoldGlowChipsTest {
 
     // MARK: the hold ring
 
-    @Test fun `the Stop-all ring is hidden for the dead zone, half at 900 ms and complete at 1_5 s`() {
+    @Test fun `the Stop-all ring is hidden for the dead zone, half at 5_15 s and complete at 10 s`() {
         val stop = HoldRingSpec.stopAll
         assertEquals(0.0, stop.progress(0.3), 0.0)
         assertFalse(stop.isVisible(0.3))
-        assertTrue(near(stop.progress(0.9), 0.5))
-        assertTrue("completes at 1.5 s", stop.isComplete(1.5))
-        assertFalse("not yet at 1.49 s", stop.isComplete(1.49))
+        assertTrue(near(stop.progress(5.15), 0.5))
+        assertTrue("completes at 10 s", stop.isComplete(10.0))
+        assertFalse("not yet at 9.99 s", stop.isComplete(9.99))
     }
 
     @Test fun `the irreversible ring fills over 1_2 s after the dead zone`() {
@@ -111,6 +111,10 @@ class HoldGlowChipsTest {
         val stop = HoldRingSpec.stopAll
         assertTrue(near(stop.unwound(1.0, 0.6), 0.5))
         assertEquals(0.0, stop.unwound(0.2, 5.0), 0.0)
+        // The Room's 10 s Stop lets go as fast as a 1.2 s ring, not over ten seconds; a short ring keeps its own pace.
+        assertTrue(near(SessionStopPlan.spec.unwound(1.0, 0.6), 0.5))
+        assertEquals(0.0, SessionStopPlan.spec.unwound(1.0, HoldRingSpec.maxUnwind), 0.0)
+        assertTrue(near(HoldRingSpec(0.0, 0.6).unwound(1.0, 0.3), 0.5))
     }
 
     @Test fun `the Stop-all scope and the hold prompt read as the iOS copy`() {

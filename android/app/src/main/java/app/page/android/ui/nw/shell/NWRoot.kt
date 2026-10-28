@@ -19,6 +19,8 @@ import app.page.android.data.NowStore
 import app.page.android.data.PairingStore
 import app.page.android.data.RelayClient
 import app.page.android.data.StopCoordinator
+import app.page.android.model.Daypart
+import app.page.android.model.DaypartWeights
 import app.page.android.model.NWSheet
 import app.page.android.model.RoomEntry
 import app.page.android.model.NowRowBuilder
@@ -27,7 +29,9 @@ import app.page.android.ui.nw.room.RoomContainer
 import app.page.android.ui.nw.decision.decisionBackground
 import app.page.android.ui.nw.components.NWOverlay
 import app.page.android.ui.nw.components.NWSheetHost
+import app.page.android.ui.nw.components.rememberDaypartTicker
 import app.page.android.ui.nw.theme.LocalAnimationsPaused
+import app.page.android.ui.nw.theme.LocalDaypart
 import app.page.android.ui.nw.theme.LocalFixedNow
 import app.page.android.ui.nw.theme.LocalFixedPhase
 import app.page.android.ui.nw.theme.LocalMotionPin
@@ -40,8 +44,11 @@ fun NWRoot(onRequestNotifications: () -> Unit) {
     val pairedMac by PairingStore.pairedMac.collectAsStateWithLifecycle()
     val spec by RenderHarness.spec.collectAsStateWithLifecycle()
     val standalone = spec?.let { RenderHarness.standalone(it.screen) }
+    val daypart by rememberDaypartTicker()
     CompositionLocalProvider(
         LocalFixedPhase provides spec?.phase, LocalFixedNow provides spec?.now, LocalMotionPin provides spec?.pin,
+        // A harness frame pins a local minute of the day, never an instant: 01:12 unless asked.
+        LocalDaypart provides (spec?.let { DaypartWeights.at(it.dayTime ?: Daypart.NIGHTTIME.coreMinute) } ?: daypart),
     ) {
         Box(Modifier.fillMaxSize().background(NW.Palette.background.color)) {
             when {
@@ -97,6 +104,8 @@ private fun NWMain(onRequestNotifications: () -> Unit) {
             onDismiss = AppRouter::clearUnpairRequest,
         )
     }
+    // The shell holds still under a sheet; the sheet and the Room on top of it keep moving (iOS sets
+    // nwAnimationsPaused on the shell only).
     CompositionLocalProvider(LocalAnimationsPaused provides (sheets.current != null)) {
         NWShell(
             destination = router.destination, onDestinationChange = AppRouter::selectDestination,
@@ -105,7 +114,7 @@ private fun NWMain(onRequestNotifications: () -> Unit) {
             stop = stop, stopPlan = screen.stopPlan, biometry = biometry, held = pinnedHeld ?: held, onHeld = { held = it },
             onPulseTap = AppRouter::openDispatch, onPulseHold = { StopCoordinator.holdCompleted(screen.stopPlan) },
             now = { app.page.android.ui.nw.now.NowScreen() }, lanes = { app.page.android.ui.nw.lanes.LanesScreen() },
-            overlays = { Sheets(sheets.current, onRequestNotifications) },
+            overlays = { CompositionLocalProvider(LocalAnimationsPaused provides false) { Sheets(sheets.current, onRequestNotifications) } },
         )
     }
 }

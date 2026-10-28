@@ -83,8 +83,8 @@ class SessionRoomTest {
 
     @Test fun `a working room reads its quiet time and the Mac's five-hour use`() {
         val fresh = nwSession("r1", title = "page", state = "active", cwd = "~/projects/page", activeAt = NW_T0 - 45)
-        assertEquals(listOf("WORKING · quiet 45s", "5h 62%"), chips(fresh, fiveHour = 62.0).map { it.text })
-        assertEquals("WORKING · quiet 45s", chips(nwSession("r1", state = "active", activeAt = NW_T0 - 45)).first().text)
+        assertEquals(listOf("WORKING · last step 45s ago", "5h 62%"), chips(fresh, fiveHour = 62.0).map { it.text })
+        assertEquals("WORKING · last step 45s ago", chips(nwSession("r1", state = "active", activeAt = NW_T0 - 45)).first().text)
         assertEquals(RoomChip.Tone.WARM, chips(fresh, fiveHour = 85.0).last().tone)
     }
 
@@ -244,8 +244,8 @@ class SessionRoomTest {
         assertFalse(SessionStopPlan.build(nwSession("q3", state = "idle", canInterrupt = true), ready = true, ended = false, macName = "M").canStop)
     }
 
-    @Test fun `the room holds for 0 6 s to stop`() {
-        assertEquals(HoldRingSpec(0.0, 0.6), SessionStopPlan.spec)
+    @Test fun `the room holds for 10 s to stop`() {
+        assertEquals(HoldRingSpec(0.0, 10.0), SessionStopPlan.spec)
     }
 
     @Test fun `the room banners - ended, offline Mac, an open decision, a prompt with no page, and a pinned decision needs none`() {

@@ -85,6 +85,8 @@ data class DecisionContent(
     val informational: String?,
     val stoppable: Boolean,
     val canTell: Boolean,
+    /** A finished turn's last message ends on a plain yes/no question ([YesNoQuestion]): the sheet offers Yes and No. */
+    val yesNo: String? = null,
 ) {
     enum class AskKind { COMMAND, EDIT, PLAN, QUESTION, NOTE }
 
@@ -111,6 +113,7 @@ data class DecisionContent(
             var detail: String? = null
             var blurb: String? = null
             var summary: String? = null
+            var yesNo: String? = null
             when (iv.kind) {
                 InterventionKind.APPROVAL -> {
                     if (iv.subtype == "plan") {
@@ -139,6 +142,7 @@ data class DecisionContent(
                 InterventionKind.IDLE -> {
                     val parts = TurnSummaryLine.split(InterventionKind.IDLE, iv.context)
                     summary = parts.summary
+                    if (row.section == NowRow.Section.REVIEW) yesNo = YesNoQuestion.detect(parts.message)
                     ask = if (row.section == NowRow.Section.REVIEW) {
                         if (parts.message.isEmpty()) (summary ?: "Finished a turn") else Sw.trimWsNl(parts.message)
                     } else {
@@ -176,7 +180,7 @@ data class DecisionContent(
                 options = if (iv.kind == InterventionKind.APPROVAL) PromptOption.parse(iv.context) else emptyList(),
                 screenNote = if (unknownAgent) DeliveryPreview.unreadableNote else null,
                 decisionsOnly = iv.acceptsDecisionsOnly, isHook = iv.isBlockingHook, footer = footer, rawContext = iv.context,
-                informational = isInfo, stoppable = PageSubtype.canStop(iv.subtype), canTell = !iv.acceptsDecisionsOnly,
+                informational = isInfo, stoppable = PageSubtype.canStop(iv.subtype), canTell = !iv.acceptsDecisionsOnly, yesNo = yesNo,
             )
         }
     }

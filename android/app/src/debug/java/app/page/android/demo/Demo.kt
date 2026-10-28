@@ -45,9 +45,11 @@ import kotlinx.coroutines.launch
  *
  * Scriptable (android/tools/screens.sh does this for every screen in [screens]):
  * `adb shell am start -S -W -n app.page.android.debug/app.page.android.MainActivity --ez page_demo true
- *   --es page_render <screen> [--es page_glow off|subtle|full] [--ef page_time <seconds>] [--ez page_canvas true]`
+ *   --es page_render <screen> [--es page_glow off|subtle|full] [--ef page_time <seconds>] [--ez page_canvas true]
+ *   [--es page_daytime <earlyMorning|morning|afternoon|nighttime|HH:MM|minute>]`
  * `page_render` pins the aurora phase (default 2.0 s, or `page_time`) and the clock (Tue 27 Oct 2026, 01:12 UTC)
- * so a screen is the same every time; without it the demo is live. On a `motion-*` screen `page_time` is the
+ * so a screen is the same every time; without it the demo is live. `page_daytime` (or `page_daypart`) pins the time
+ * of day the skies are drawn at, as a local minute ([RenderHarness.minuteOfDay]); without it they are drawn at 01:12. On a `motion-*` screen `page_time` is the
  * seconds into that signature motion ([DemoMotion]; android/tools/render-motion.sh builds the contact sheets).
  * `page_canvas` draws with the Canvas fallbacks a device below Android 13 gets, instead of the AGSL shaders, and
  * `page_noblur` the Canvas aurora as a device below Android 12 draws it (no blur).
@@ -57,12 +59,12 @@ object Demo {
 
     /** Every screen name, in the order the render script captures them (the same names as iOS RenderHarness.screens). */
     val screens = listOf(
-        "now", "now-quiet", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
+        "now", "now-quiet", "now-still", "now-working", "now-dusk", "now-brief", "now-brief-quiet", "now-arming", "now-swipe",
         "now-receipt", "now-banner", "now-new",
         "now-inflight", "now-inflight-long", "now-tip-undoable", "now-tip-irreversible", "now-tip-inflight",
         "now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-flight-quiet",
         "decision-irreversible", "decision-hold", "decision-considered", "decision-undoable", "decision-question", "decision-stuck",
-        "decision-review", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
+        "decision-review", "decision-yesno", "decision-plan", "decision-standing", "decision-unknown", "decision-composer", "decision-delivered",
         "decision-failed", "decision-tip",
         "hold-stop", "stop-confirm", "stop-result", "stop-none",
         "lanes", "lanes-crowded", "lanes-empty", "lanes-problem", "lanes-paused",
@@ -70,7 +72,10 @@ object Demo {
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
-        "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
+        "room-yesno", "room-yesno-busy", "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
+        "room-choice", "room-choice-quiet", "room-codex-hold", "room-countdown", "room-held", "room-held-note", "room-yesno-arm",
+        "room-photos", "room-photos-1", "room-photos-path", "room-photos-busy", "room-photos-blocked", "room-photos-uploading", "room-photos-sent",
+        "decision-queued", "decision-held",
         "welcome", "welcome-notice", "scan", "scan-hint", "pair-checking", "pair-confirm", "pair-problem", "paired", "paired-denied",
         "problem-asleep", "problem-gone", "problem-stale", "problem-relay", "problem-pairing",
         "widgets",
@@ -166,7 +171,10 @@ object Demo {
         }
         app.page.android.ui.nw.components.NWShaders.forceCanvas = extras.getBoolean("page_canvas")
         app.page.android.ui.nw.components.NWShaders.forceNoBlur = extras.getBoolean("page_noblur")
-        renderScreen(render, CardGlow.argument(extras.getString("page_glow")) ?: CardGlow.OFF, if (extras.containsKey("page_time")) extras.getFloat("page_time").toDouble() else null)
+        renderScreen(
+            render, CardGlow.argument(extras.getString("page_glow")) ?: CardGlow.OFF, if (extras.containsKey("page_time")) extras.getFloat("page_time").toDouble() else null,
+            RenderHarness.minuteOfDay(extras.getString("page_daytime") ?: extras.getString("page_daypart")),
+        )
     }
 
     /**
@@ -230,7 +238,7 @@ object Demo {
         return when {
             screen in setOf("now-flight", "now-flight-two", "now-flight-old", "now-flight-header", "now-flight-jump", "now-inflight", "now-tip-irreversible") -> listOf(o[0])
             screen in setOf("now-inflight-long", "now-tip-undoable") -> listOf(o[1])
-            screen in setOf("now-quiet", "now-brief-quiet", "now-working", "now-flight-quiet", "now-tip-inflight") -> emptyList()
+            screen in setOf("now-quiet", "now-still", "now-brief-quiet", "now-working", "now-flight-quiet", "now-tip-inflight") -> emptyList()
             screen.startsWith("problem-") || screen == "lanes-empty" -> emptyList()
             screen == "lanes-paused" -> listOf(DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 600, sub = "low_battery"))
             screen == "now-dusk" -> listOf(DemoFixtures.iv("pz", "bottle-flip", InterventionKind.IDLE, "Page paused your agents at 10% battery.", 600, sub = "low_battery"))
@@ -243,7 +251,7 @@ object Demo {
         val st = DemoFixtures.status
         val now = DemoFixtures.now
         return when (screen) {
-            "now-quiet", "now-brief-quiet" -> st.copy(working = 0, forecast = null, usage = null, onAC = true)
+            "now-quiet", "now-still", "now-brief-quiet" -> st.copy(working = 0, forecast = null, usage = null, onAC = true)
             "now-working", "now-flight-quiet", "now-tip-inflight" -> st.copy(onAC = true, forecast = null)
             "problem-asleep", "now-banner" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(1_500))
             "problem-gone" -> st.copy(macConnected = false, lastHeartbeatAt = now.minusSeconds(3 * 3600 + 600), onAC = false, battery = 12)
@@ -257,12 +265,14 @@ object Demo {
         screen == "lanes-empty" || screen == "stop-none" -> emptyList()
         screen == "lanes-crowded" -> DemoFixtures.crowdedSessions
         screen in setOf("now-quiet", "now-brief-quiet", "now-working") -> DemoFixtures.sessions.filter { it.state != LiveSessionState.WAITING_ON_APPROVAL }
+        // Truly quiet: nothing running and nothing waiting, so the Horizon draws the quiet sky (now-quiet keeps its working sessions).
+        screen == "now-still" -> DemoFixtures.sessions.filter { it.state != LiveSessionState.ACTIVE && it.state != LiveSessionState.WAITING_ON_APPROVAL }
         screen.startsWith("now") -> DemoFixtures.nowSessions(screen)
         screen.startsWith("problem-") -> DemoFixtures.sessions
         else -> DemoFixtures.sessionsWithFlight
     }
 
-    private fun renderScreen(asked: String, glow: CardGlow, time: Double?) {
+    private fun renderScreen(asked: String, glow: CardGlow, time: Double?, dayTime: Double?) {
         // A motion screen is drawn on its base screen's fixtures, with the motion pinned (DemoMotion).
         val motion = asked
         val screen = if (DemoMotion.isMotion(asked)) DemoMotion.base(asked) else asked
@@ -287,6 +297,7 @@ object Demo {
                 dragDp = if (screen == "now-swipe") 84f else null, queuedNew = if (screen == "now-new") 1 else 0,
                 hold = if (screen == "now-hold" || screen == "decision-hold") 0.55 else null, dispatchSending = screen == "dispatch-sending",
                 lanesAvailability = if (screen == "lanes-problem") app.page.android.model.SessionAvailability.NeedsRepair(keyMismatch = false) else null,
+                dayTime = dayTime,
             ),
         )
         if (isStandalone(motion) || isUnpaired(screen)) return
@@ -297,6 +308,8 @@ object Demo {
         val extra: Map<String, app.page.android.model.ReplyDelivery> = when (screen) {
             "decision-delivered" -> mapOf("p1" to app.page.android.model.ReplyDelivery.Delivered("typed into tmux pane %3"))
             "decision-failed" -> mapOf("p1" to app.page.android.model.ReplyDelivery.Failed("The Mac didn't confirm in time. Check the session before answering again."))
+            "decision-queued" -> mapOf("p4" to app.page.android.model.ReplyDelivery.Sent(true, DemoFixtures.now.minusSeconds(40)))
+            "decision-held" -> mapOf("rl1" to app.page.android.model.ReplyDelivery.HeldOnMac("Will send it when the limit resets at 3:00 PM"))
             else -> emptyMap()
         }
         val receipt = DemoMotion.receipt(motion, DemoMotion.time(motion, time), open.firstOrNull { it.id == "p2" }?.let { NowRowBuilder.row(it, null, DemoFixtures.mac).action(RowAction.Kind.APPROVE)?.preview })

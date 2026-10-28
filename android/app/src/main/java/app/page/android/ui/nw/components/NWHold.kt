@@ -139,16 +139,15 @@ fun NWHoldSurface(
             if (!cancelled) tap?.invoke()
             return
         }
-        // Back the way it came, at the speed it filled; nothing was sent.
+        // Back the way it came, at the speed it filled but never slower than [HoldRingSpec.maxUnwind] from full (a
+        // 10 s Stop ring lets go in about a second); nothing was sent.
         val from = progress.floatValue
         if (reduceMotion || from <= 0f) { progress.floatValue = 0f; return }
         driver = scope.launch {
-            var last = SystemClock.elapsedRealtime()
+            val released = SystemClock.elapsedRealtime()
             while (isActive && progress.floatValue > 0f) {
                 withFrameNanos { }
-                val now = SystemClock.elapsedRealtime()
-                progress.floatValue = (progress.floatValue - ((now - last) / 1000.0 / spec.fill).toFloat()).coerceAtLeast(0f)
-                last = now
+                progress.floatValue = spec.unwound(from.toDouble(), (SystemClock.elapsedRealtime() - released) / 1000.0).toFloat()
             }
         }
     }

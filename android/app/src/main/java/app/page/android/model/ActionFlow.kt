@@ -147,6 +147,9 @@ sealed interface CardOutcome {
     /** Anything else, in words, with a next step. */
     data class Problem(val why: String) : CardOutcome
 
+    /** News that is neither success nor failure ("Held on your Mac until 3:00 PM"). */
+    data class Note(val text: String) : CardOutcome
+
     companion object {
         fun from(pending: PendingAction?, delivery: ReplyDelivery?, now: Instant): CardOutcome {
             val phase = pending?.phase(now)
@@ -159,6 +162,10 @@ sealed interface CardOutcome {
                 is ReplyDelivery.Failed -> Problem(delivery.message)
                 ReplyDelivery.AlreadyReplied -> Problem("Already answered at the Mac")
                 ReplyDelivery.Gone -> Problem("Prompt closed before your answer")
+                ReplyDelivery.Retracting -> Sending
+                // Deleted: the page is open for a fresh reply, so the card goes back to its actions.
+                is ReplyDelivery.Retracted -> None
+                is ReplyDelivery.HeldOnMac -> Note(HeldUntilReset.line(delivery.detail))
             }
         }
     }

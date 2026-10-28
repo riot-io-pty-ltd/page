@@ -417,6 +417,7 @@ object AnswerPicker {
             is CardOutcome.Arming, CardOutcome.Sending -> SessionDeliveryState.Sending
             is CardOutcome.Delivered -> SessionDeliveryState.Typed(outcome.detail)
             is CardOutcome.Problem -> SessionDeliveryState.Failed(outcome.why)
+            is CardOutcome.Note -> SessionDeliveryState.Queued(outcome.text)
         }
         return SentSessionCommand(
             clientId = "page-$promptKey", sessionId = sessionId, kind = SessionCommandKind.ANSWER, text = "", sentAt = now, state = state,

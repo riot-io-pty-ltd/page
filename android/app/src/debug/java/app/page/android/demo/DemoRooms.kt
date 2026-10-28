@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.statusBarsPadding
 import app.page.android.data.AnswerDraftStore
 import app.page.android.model.AgentBackend
@@ -18,7 +19,22 @@ import app.page.android.model.AskQuestion
 import app.page.android.model.DecisionContent
 import app.page.android.model.DecisionPhase
 import app.page.android.model.DiffFile
+import app.page.android.model.HeldMessage
+import app.page.android.model.HeldMessages
 import app.page.android.model.InterventionKind
+import app.page.android.model.OutboxRestore
+import app.page.android.model.PendingAction
+import app.page.android.model.PhotoDraft
+import app.page.android.model.PhotoFormat
+import app.page.android.model.PhotoOffer
+import app.page.android.model.PhotoProgress
+import app.page.android.model.PhotoStatus
+import app.page.android.model.PreparedPhoto
+import app.page.android.model.RowAction
+import app.page.android.model.ScheduledSend
+import app.page.android.model.SendOutbox
+import app.page.android.model.SendWhen
+import app.page.android.model.SessionCaps
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
 import app.page.android.model.NowRowBuilder
@@ -35,12 +51,14 @@ import app.page.android.model.TranscriptEntry
 import app.page.android.model.TranscriptRole
 import app.page.android.model.WorkflowOrbit
 import app.page.android.model.WorkflowRun
+import app.page.android.model.YesNoArm
 import app.page.android.ui.nw.decision.DecisionScreenState
 import app.page.android.ui.nw.decision.NWDecisionScreen
 import app.page.android.ui.nw.decision.DecisionScreenActions
 import app.page.android.ui.nw.decision.decisionBackground
 import app.page.android.ui.nw.room.NWAgentRoomScreen
 import app.page.android.ui.nw.room.NWSessionRoom
+import app.page.android.ui.nw.room.RoomPhotoTray
 import app.page.android.ui.nw.room.SessionRoomActions
 import app.page.android.ui.nw.room.SessionRoomData
 import java.time.Instant
@@ -55,9 +73,10 @@ object DemoRooms {
     fun session(
         id: String, title: String, backend: String = "claude", provider: String? = "anthropic", state: LiveSessionState, host: String = "cmux",
         canType: Boolean = true, blocker: String? = null, ago: Number = 4, preview: String = "", page: String? = null,
+        canHold: Boolean = false, held: List<HeldMessage> = emptyList(), attach: String? = null, attachBlocker: String? = null,
     ) = LiveSession(
         id = id, backend = AgentBackend.fromWire(backend), title = title, cwd = "~/projects/$title", state = state, host = host, canType = canType, typeBlocker = blocker,
-        canInterrupt = true, provider = provider, lastActivityAt = ago(ago), interventionId = page, preview = preview,
+        canInterrupt = true, provider = provider, lastActivityAt = ago(ago), interventionId = page, preview = preview, canHold = canHold, held = held, attach = attach, attachBlocker = attachBlocker,
     )
 
     private fun entry(id: String, role: TranscriptRole, text: String, ago: Number, tool: String? = null) = TranscriptEntry(id, role, text, ago(ago), tool)
@@ -119,6 +138,14 @@ object DemoRooms {
         "────────────────────────────────", "❯ ", "────────────────────────────────", "  ⏵⏵ auto mode on · 1 workflow · 1 shell", "  ○ review-changes   4/7 agents   2m", "  → mac-on-claude-code  main | ctx 62%",
     )
 
+    private val holdCaps = setOf(SessionCaps.HOLD, SessionCaps.RETRACT)
+    private val photoCaps = holdCaps + SessionCaps.IMAGES
+
+    private val photoSent = SentSessionCommand(
+        "c-ph", "room-claude", SessionCommandKind.INPUT, "What's wrong with these two screens?", ago(30),
+        SessionDeliveryState.Typed("Sent 2 photos to Claude in cmux", 2), photos = 2,
+    )
+
     fun inputs(screen: String): SessionRoomData.Inputs {
         var i = SessionRoomData.Inputs(
             session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.ACTIVE, preview = "Bash: iOS/Tests/run-logic-tests.sh"), macName = mac, now = now,
@@ -141,6 +168,91 @@ object DemoRooms {
                 session = session("room-local", "tokenizer-lab", "opencode", "ollama", LiveSessionState.ACTIVE, preview = "Generating…"),
                 transcript = SessionTranscript("room-local", localEntries, false), screen = null, runs = emptyList(), fiveHourPct = null, sent = emptyList(), diff = null,
             )
+            // Claude finished a turn and asked a yes/no question in plain words: Yes and No stand in for the generic replies.
+            // The busy variant has the same last message, but the session is mid-turn, so nothing is offered.
+            "room-yesno", "room-yesno-busy" -> i = i.copy(
+                session = session("room-claude", "mac-on-claude-code", state = if (screen == "room-yesno") LiveSessionState.IDLE else LiveSessionState.ACTIVE, ago = 20),
+                transcript = SessionTranscript("room-claude", claudeEntries.take(6) + entry("e9", TranscriptRole.ASSISTANT, "I've finished the refactor. Should I run the full test suite now?", 20), false),
+                screen = null, runs = emptyList(), sent = emptyList(),
+            )
+            // A busy session on a Mac that holds messages: "Now" or "When it finishes", explained the first time.
+            "room-choice", "room-choice-quiet" -> i = i.copy(
+                session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.ACTIVE, preview = "Bash: iOS/Tests/run-logic-tests.sh", canHold = true),
+                caps = holdCaps, choiceExplained = screen == "room-choice-quiet", sendWhen = if (screen == "room-choice-quiet") SendWhen.WHEN_FINISHED else null,
+            )
+            // A busy Codex session outside cmux: nothing can be typed now, but the Mac can hold a message.
+            "room-codex-hold" -> i = i.copy(
+                session = session("room-codex", "payments-api", "codex", "unknown", LiveSessionState.ACTIVE, host = "Terminal", canType = false, canHold = true, preview = "Shell: npm test -- charges.idem"),
+                transcript = SessionTranscript("room-codex", codexEntries, false), screen = null, runs = emptyList(), fiveHourPct = null, sent = emptyList(),
+                caps = holdCaps, choiceExplained = false,
+            )
+            // "Now" to a busy session: 3 s into its 10 s countdown, with Undo.
+            "room-countdown" -> {
+                val s = session("room-claude", "mac-on-claude-code", state = LiveSessionState.ACTIVE, preview = "Bash: iOS/Tests/run-logic-tests.sh", canHold = true)
+                i = i.copy(
+                    session = s, caps = holdCaps, choiceExplained = true,
+                    outbox = SendOutbox().schedule(ScheduledSend("o-1", s.id, "Run the tests, then stop", SessionTarget.of(s, mac), ago(3))),
+                )
+            }
+            // A message the Mac holds until the turn ends (and one another device sent), each with Delete.
+            "room-held", "room-held-note" -> {
+                val s = session(
+                    "room-claude", "mac-on-claude-code", state = LiveSessionState.ACTIVE, preview = "Bash: iOS/Tests/run-logic-tests.sh", canHold = true,
+                    held = listOf(
+                        HeldMessage("c-other", "Also update the changelog", ago(900), HeldMessage.State.HELD, null, null),
+                        HeldMessage("c-held", "Then run the linter", ago(240), HeldMessage.State.HELD, null, null),
+                    ),
+                )
+                val mine = SentSessionCommand(
+                    "c-held", "room-claude", SessionCommandKind.INPUT, "Then run the linter", ago(240),
+                    SessionDeliveryState.Held("Held — Page types it when Claude finishes this turn"), target = SessionTarget.of(s, mac),
+                )
+                i = i.copy(
+                    session = s, caps = holdCaps, choiceExplained = true, sent = HeldMessages.pending(s, i.sent + mine), latestInput = mine,
+                    restoredNote = if (screen == "room-held-note") OutboxRestore.NOTE_KILLED else null,
+                )
+            }
+            // Yes tapped: the 1.2 s ring and Cancel, the same as the review sheet's.
+            "room-yesno-arm" -> i = i.copy(
+                session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, ago = 20),
+                transcript = SessionTranscript("room-claude", claudeEntries.take(6) + entry("e9", TranscriptRole.ASSISTANT, "I've finished the refactor. Should I run the full test suite now?", 20), false),
+                screen = null, runs = emptyList(), sent = emptyList(),
+                yesNoArm = YesNoArm("Yes", ago(0.4)),
+            )
+            // Photos (images-v1): an idle session on a Mac that takes them. The tray is drawn by [tray].
+            "room-photos", "room-photos-1", "room-photos-path" -> i = i.copy(
+                session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, ago = 20, attach = if (screen == "room-photos-path") "path" else "image"),
+                caps = photoCaps, screen = null, runs = emptyList(), sent = emptyList(),
+            )
+            // The button is there, dim: tapping it says why (the reason is on screen as it is after a tap).
+            "room-photos-busy" -> i = i.copy(
+                session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.ACTIVE, preview = "Bash: iOS/Tests/run-logic-tests.sh", canHold = true, attach = "image"),
+                caps = photoCaps, choiceExplained = true, composerProblem = PhotoOffer.WORKING,
+            )
+            // A Codex-style row: it can type but takes no photos, and the Mac said why.
+            "room-photos-blocked" -> i = i.copy(
+                session = session("room-codex", "payments-api", "codex", "unknown", LiveSessionState.IDLE, host = "tmux", attachBlocker = "Page can't send photos to Codex yet", ago = 30),
+                transcript = SessionTranscript("room-codex", codexEntries, false), caps = photoCaps, screen = null, runs = emptyList(), fiveHourPct = null, sent = emptyList(),
+            )
+            // Photos going up: the receipt's ring fills as pieces are accepted, and the bubble says how far.
+            "room-photos-uploading" -> {
+                val s = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, ago = 20, attach = "image")
+                val sending = photoSent.copy(state = SessionDeliveryState.Sending, sentAt = ago(4), target = SessionTarget.of(s, mac))
+                i = i.copy(
+                    session = s, caps = photoCaps, screen = null, runs = emptyList(), sent = listOf(sending), latestInput = sending,
+                    uploads = mapOf(sending.clientId to PhotoProgress(15, 36, PhotoProgress.Phase.UPLOADING)),
+                )
+            }
+            // Sent: the Mac's own sentence, and the transcript's user entry carrying the count.
+            "room-photos-sent" -> {
+                val s = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, ago = 20, attach = "image")
+                val echoed = TranscriptEntry("e-ph", TranscriptRole.USER, "[Image #1] [Image #2]What's wrong with these two screens?", ago(28), null, images = 2)
+                i = i.copy(
+                    session = s, caps = photoCaps, screen = null, runs = emptyList(),
+                    transcript = SessionTranscript("room-claude", claudeEntries.take(6) + echoed + entry("e-ph2", TranscriptRole.ASSISTANT, "The second screen's header overlaps the status bar; the first looks right.", 12), false),
+                    sent = listOf(photoSent.copy(target = SessionTarget.of(s, mac))), latestInput = photoSent.copy(target = SessionTarget.of(s, mac)),
+                )
+            }
             "room-ended" -> i = i.copy(session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, ago = 400), ended = true)
             "room-blocked" -> i = i.copy(
                 session = session("room-claude", "mac-on-claude-code", state = LiveSessionState.IDLE, host = "Ghostty", canType = false, blocker = "Page can't type into Ghostty yet", ago = 300),
@@ -166,6 +278,43 @@ object DemoRooms {
         else -> RoomLens.STORY
     }
 
+    /** Colourful stand-ins for picked photos: a sky and a screenshot-like card, drawn here so no file is needed. */
+    private fun thumb(kind: Int): androidx.compose.ui.graphics.ImageBitmap {
+        val size = 192
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(bmp)
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        if (kind == 0) {
+            p.shader = android.graphics.LinearGradient(0f, 0f, 0f, size.toFloat(), intArrayOf(0xFF2B3A67.toInt(), 0xFFE0735C.toInt(), 0xFFF2C14E.toInt()), null, android.graphics.Shader.TileMode.CLAMP)
+            c.drawRect(0f, 0f, size.toFloat(), size.toFloat(), p)
+            p.shader = null
+            p.color = 0xFF1A1F36.toInt()
+            c.drawCircle(70f, 150f, 60f, p)
+            c.drawCircle(150f, 160f, 48f, p)
+        } else {
+            p.color = 0xFFEFF2F7.toInt()
+            c.drawRect(0f, 0f, size.toFloat(), size.toFloat(), p)
+            p.color = 0xFF3366CC.toInt()
+            c.drawRect(0f, 0f, size.toFloat(), 40f, p)
+            p.color = 0xFFB9C2D3.toInt()
+            for (n in 0 until 5) c.drawRoundRect(16f, 60f + n * 25f, size - 16f - (n % 3) * 30f, 76f + n * 25f, 6f, 6f, p)
+        }
+        return bmp.asImageBitmap()
+    }
+
+    private fun readyPhoto() = PhotoStatus.Ready(PreparedPhoto(ByteArray(420_000), PhotoFormat.JPEG, 2000, 1500, sha256 = "0".repeat(64)))
+
+    /** The composer's tray for a photos screen: two thumbnails (one for "-1"/"-path"), none elsewhere. */
+    fun tray(screen: String): RoomPhotoTray {
+        val ids = when (screen) {
+            "room-photos" -> listOf("a", "b")
+            "room-photos-1", "room-photos-path" -> listOf("a")
+            else -> return RoomPhotoTray()
+        }
+        val draft = ids.fold(PhotoDraft()) { d, id -> d.adding(listOf(id)).first.with(id, readyPhoto()) }
+        return RoomPhotoTray(draft, ids.mapIndexed { n, id -> id to thumb(n) }.toMap())
+    }
+
     @Composable
     fun Room(screen: String) {
         if (screen == "room-agent") {
@@ -189,9 +338,9 @@ object DemoRooms {
         val base = SessionRoomData.make(inputs(screen))
         val data = if (screen == "room-stop") base.copy(fixedStop = 0.62) else base
         var lens by remember { mutableStateOf(RoomLens.resolve(lensFor(screen), data.lenses)) }
-        var draft by remember { mutableStateOf(if (screen == "room-draft") "Run the tests, then stop" else "") }
+        var draft by remember { mutableStateOf(if (screen == "room-draft") "Run the tests, then stop" else if (screen.startsWith("room-photos") && tray(screen).draft.count > 0) "What's wrong with this screen?" else "") }
         var runId by remember { mutableStateOf<String?>("wf1") }
-        NWSessionRoom(data, SessionRoomActions(), lens, { lens = it }, draft, { draft = it }, runId, { runId = it }, focusComposer = false)
+        NWSessionRoom(data, SessionRoomActions(), lens, { lens = it }, draft, { draft = it }, runId, { runId = it }, focusComposer = false, photos = remember(screen) { tray(screen) })
     }
 
     // region Answering the terminal's questions

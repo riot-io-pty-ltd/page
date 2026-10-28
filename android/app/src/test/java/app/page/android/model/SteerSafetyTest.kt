@@ -181,7 +181,7 @@ class SteerSafetyTest {
         assertEquals(SendReceipt.Tone.WORKING, receipt(cmd(SessionDeliveryState.Sending), 1.0)?.tone)
         assertEquals("Typed into riot-io-teltonika · cmux · Studio MBP", receipt(cmd(SessionDeliveryState.Typed(null)), 2.0)?.headline)
         assertEquals(SendReceipt.Tone.GOOD, receipt(cmd(SessionDeliveryState.Typed(null)), 2.0)?.tone)
-        assertEquals("Queued — Claude reads it after this step", receipt(cmd(SessionDeliveryState.Queued(null)), 2.0)?.headline)
+        assertEquals("Already with Claude — it reads it after this step", receipt(cmd(SessionDeliveryState.Queued(null)), 2.0)?.headline)
         assertEquals("riot-io-teltonika · cmux · Studio MBP", receipt(cmd(SessionDeliveryState.Queued(null)), 2.0)?.detail)
     }
 

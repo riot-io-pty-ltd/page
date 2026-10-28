@@ -7,6 +7,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.page.android.model.Daypart
+import app.page.android.model.DaypartTone
+import app.page.android.model.DaypartWeights
 import app.page.android.model.PerceptualMix
 import app.page.android.model.NowModel
 
@@ -221,11 +224,33 @@ data class AuroraPalette(
             Rgba.hex(0x1F1608), Rgba.hex(0x05070D), 0.28, 0.2,
         )
 
-        fun of(mood: NowModel.Mood): AuroraPalette = when (mood) {
-            NowModel.Mood.NEEDS_YOU -> needsYou
-            NowModel.Mood.WORKING -> working
-            NowModel.Mood.QUIET -> quiet
-            NowModel.Mood.DUSK -> dusk
+        /**
+         * The mood's aurora at a time of day ([DaypartTone]): the hour sets the curtains and the sky, the mood their
+         * strength. Nighttime is the statics above, exactly. Needs-you keeps its amber curtains at every hour (only
+         * its sky takes the hour's hue); dusk is never tinted.
+         */
+        fun of(mood: NowModel.Mood, daypart: DaypartWeights = DaypartWeights.NIGHTTIME): AuroraPalette {
+            if (mood == NowModel.Mood.DUSK) return dusk
+            if (daypart.only == Daypart.NIGHTTIME) {
+                return when (mood) {
+                    NowModel.Mood.NEEDS_YOU -> needsYou
+                    NowModel.Mood.WORKING -> working
+                    else -> quiet
+                }
+            }
+            val tone = DaypartTone.blended(daypart)
+            return of(
+                when (mood) {
+                    NowModel.Mood.NEEDS_YOU -> tone.needsYou
+                    NowModel.Mood.WORKING -> tone.working
+                    else -> tone.quiet
+                },
+            )
+        }
+
+        fun of(a: DaypartTone.Aurora): AuroraPalette {
+            fun c(x: DaypartTone.Colour) = Rgba(x.r, x.g, x.b)
+            return AuroraPalette(c(a.c1), c(a.c2), c(a.c3), c(a.skyTop), c(a.skyBottom), a.intensity, a.speed)
         }
 
         /** The sunrise the dawn sweeps in: gold over a warm brown, no curtains of its own (the light is the sweep). Board 07, "power · dawn". (iOS NWDuskDawn.swift.) */
@@ -257,5 +282,8 @@ data class AuroraPalette(
 /** What is left of the background star field once paused (it fades with the dusk). */
 const val PAUSED_STAR_FIELD = 0.05
 
-/** The background star field [duskMix] (0..1) into the dusk. */
-fun starField(duskMix: Double): Double = 1 - (1 - PAUSED_STAR_FIELD) * duskMix.coerceIn(0.0, 1.0)
+/**
+ * The background star field [duskMix] (0..1) into the dusk, [from] the hour's own ([DaypartWeights.stars]; 1 at
+ * night). A lerp, so a settled pause shows the same few stars at every hour, even from an afternoon that had none.
+ */
+fun starField(duskMix: Double, from: Double = 1.0): Double = from + (PAUSED_STAR_FIELD - from) * duskMix.coerceIn(0.0, 1.0)

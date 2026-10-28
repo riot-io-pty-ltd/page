@@ -11,19 +11,48 @@ data class CommandResult(
     /** Short sentence from the Mac, at most 200 characters. */
     val detail: String?,
     val interventionId: String?,
+    /** `code: queued` with `held: true`: the Mac holds it until the turn ends; one more `result` (`fromHold`) follows. */
+    val held: Boolean = false,
+    /** The final `result` for a held message (same `clientId`): replaces its "Held" receipt. */
+    val fromHold: Boolean = false,
+    /** The answer to a `retract` op. */
+    val retract: Retract? = null,
+    /** `images-v1`, answers to `inputImages`: how many photos Claude received as images (0: as file locations); null when the Mac couldn't read it back. */
+    val attached: Int? = null,
+    /** `attachment_missing`: the ids of the photos whose pieces never arrived. */
+    val missing: List<String> = emptyList(),
 ) {
     enum class Code(val wire: String) {
-        DELIVERED("delivered"), QUEUED("queued"), REFUSED("refused"), FAILED("failed");
+        DELIVERED("delivered"), QUEUED("queued"), REFUSED("refused"), FAILED("failed"),
+
+        /** Only answers an `input` with `hold`: it was deleted and nothing was typed. `ok` is false, so an older app shows it as not sent. */
+        CANCELLED("cancelled");
 
         companion object {
             fun fromWire(raw: String?): Code? = entries.firstOrNull { it.wire == raw }
+        }
+    }
+
+    enum class Retract(val wire: String) {
+        DELETED("deleted"), TOO_LATE("too_late"), NOT_FOUND("not_found"),
+
+        /** A value this build doesn't know (a later Mac): read as a refusal with the result's own words, never as a delete (iOS). */
+        UNKNOWN("");
+
+        companion object {
+            /** null for an absent or empty value; [UNKNOWN] for any other string this build doesn't know. */
+            fun fromWire(raw: String?): Retract? {
+                if (raw.isNullOrEmpty()) return null
+                return entries.firstOrNull { it != UNKNOWN && it.wire == raw } ?: UNKNOWN
+            }
         }
     }
 }
 
 /** The plaintext kinds this build understands (Mac → phone). */
 sealed interface SessionsUpdate {
-    data class ListUpdate(val macName: String?, val sessions: List<LiveSession>) : SessionsUpdate
+    /** [caps] is the header's `caps` (what the Mac accepts beyond the base ops); a Mac that sends none has `[]`. */
+    data class ListUpdate(val macName: String?, val sessions: List<LiveSession>, val caps: Set<String> = emptySet()) : SessionsUpdate
     data class Transcript(val transcript: SessionTranscript) : SessionsUpdate
     data class Screen(val screen: SessionScreen) : SessionsUpdate
     data class Workflows(val sessionId: String, val runs: List<WorkflowRun>) : SessionsUpdate
@@ -76,6 +105,7 @@ data class SessionsPlaintext(
                     SessionsUpdate.ListUpdate(
                         macName = if (name.isNullOrEmpty()) null else name.capped(60),
                         sessions = list.elements.take(MAX_SESSIONS),
+                        caps = (raw["caps"] as? JsonArray)?.mapNotNull { it.asString()?.trim()?.takeIf { c -> c.isNotEmpty() && c.length <= 64 } }?.take(32)?.toSet() ?: emptySet(),
                     )
                 }
                 "transcript" -> {
@@ -125,6 +155,11 @@ data class SessionsPlaintext(
                             reason = raw.str("reason")?.takeIf { it.isNotEmpty() },
                             detail = if (detail.isNullOrEmpty()) null else detail.capped(200),
                             interventionId = raw.str("interventionId")?.takeIf { it.isNotEmpty() },
+                            held = raw.bool("held") ?: false,
+                            fromHold = raw.bool("fromHold") ?: false,
+                            retract = CommandResult.Retract.fromWire(raw.str("retract")),
+                            attached = raw.int("attached")?.takeIf { it in 0..PhotoLimits.MAX_PHOTOS },
+                            missing = (raw["missing"] as? JsonArray)?.mapNotNull { it.asString()?.takeIf { id -> id.isNotEmpty() && id.length <= 64 } }?.take(PhotoLimits.MAX_PHOTOS) ?: emptyList(),
                         )
                     )
                 }

@@ -21,7 +21,43 @@ sealed interface SessionCommand {
         val sessionId: String,
         val text: String,
         val target: SessionTarget? = null,
+        /**
+         * `hold: true`: the Mac types it when the turn ends (needs `hold-v1`; a phone sends it only when the list's
+         * caps and the row's `canHold` say so). Absent, not false, otherwise: an old Mac sees the same bytes as before.
+         */
+        val hold: Boolean = false,
     ) : SessionCommand
+
+    /**
+     * Takes back a message the Mac holds and hasn't typed (needs `retract-v1`): exactly one of [heldId] (a held
+     * `input`'s clientId) or [interventionId] (a `/reply` the Mac is holding). Never both, never neither.
+     */
+    data class Retract(val heldId: String? = null, val interventionId: String? = null) : SessionCommand
+    /**
+     * One piece of a photo (`images-v1`): at most 32 KiB of the photo's bytes as standard base64, and the photo's own
+     * metadata repeated on every piece so pieces may arrive in any order. Never answered by a `result`.
+     */
+    data class ImagePart(
+        val sessionId: String,
+        val imageId: String,
+        val index: Int,
+        val total: Int,
+        /** The whole photo's size, not this piece's. */
+        val bytes: Int,
+        val sha256: String,
+        val mime: String,
+        val data: ByteArray,
+    ) : SessionCommand
+
+    /** The photos of an [InputImages]: the id every piece carried, and the whole photo's hash, size and type. */
+    data class ImageRef(val id: String, val sha256: String, val bytes: Int, val mime: String)
+
+    /**
+     * Sends the uploaded photos with a caption into the session (`images-v1`). [text] may be empty (0 to 8000
+     * characters), so it never goes through [SessionComposer.validate]. Always answered by one `result`.
+     */
+    data class InputImages(val sessionId: String, val text: String, val images: List<ImageRef>, val target: SessionTarget? = null) : SessionCommand
+
     /** [target]'s `expectCwd` / `expectTitle` ride along like on [Input]. */
     data class Interrupt(val sessionId: String, val target: SessionTarget? = null) : SessionCommand
 
@@ -51,6 +87,9 @@ sealed interface SessionCommand {
             is Watch, is WatchAgent -> "watch"
             Refresh -> "refresh"
             is Input -> "input"
+            is Retract -> "retract"
+            is ImagePart -> "imagePart"
+            is InputImages -> "inputImages"
             is Interrupt -> "interrupt"
             is Answer -> "answer"
             InterruptAll -> "interruptAll"
@@ -72,6 +111,29 @@ sealed interface SessionCommand {
             is Input -> {
                 body["sessionId"] = JsonPrimitive(sessionId)
                 body["text"] = JsonPrimitive(text)
+                if (hold) body["hold"] = JsonPrimitive(true)
+                addExpectation(target, body)
+            }
+            is Retract -> {
+                heldId?.let { body["heldId"] = JsonPrimitive(it) }
+                interventionId?.let { body["interventionId"] = JsonPrimitive(it) }
+            }
+            is ImagePart -> {
+                body["sessionId"] = JsonPrimitive(sessionId)
+                body["imageId"] = JsonPrimitive(imageId)
+                body["index"] = JsonPrimitive(index)
+                body["total"] = JsonPrimitive(total)
+                body["bytes"] = JsonPrimitive(bytes)
+                body["sha256"] = JsonPrimitive(sha256)
+                body["mime"] = JsonPrimitive(mime)
+                body["data"] = JsonPrimitive(java.util.Base64.getEncoder().encodeToString(data))
+            }
+            is InputImages -> {
+                body["sessionId"] = JsonPrimitive(sessionId)
+                body["text"] = JsonPrimitive(text)
+                body["images"] = JsonArray(images.map { r ->
+                    JsonObject(mapOf("id" to JsonPrimitive(r.id), "sha256" to JsonPrimitive(r.sha256), "bytes" to JsonPrimitive(r.bytes), "mime" to JsonPrimitive(r.mime)))
+                })
                 addExpectation(target, body)
             }
             is Interrupt -> {
@@ -136,11 +198,15 @@ object SessionComposer {
         data class TooLong(val count: Int) : Problem
         data object TooLarge : Problem
 
+        /** "When it finishes" asked of a Mac that doesn't advertise `hold-v1` (it would type the message at once). */
+        data object HoldUnavailable : Problem
+
         val message: String
             get() = when (this) {
                 Empty -> "Type a message first."
                 is TooLong -> "That's $count characters. Keep it to $MAX_CHARACTERS or fewer."
                 TooLarge -> "That message is too large to send. Shorten it (emoji and symbols take more space)."
+                HoldUnavailable -> "Your Mac can't hold a message until Claude finishes. Update Page on your Mac, or send it now."
             }
     }
 

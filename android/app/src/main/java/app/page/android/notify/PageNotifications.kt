@@ -90,6 +90,7 @@ object PageNotifications : PageNotifier {
         val nm = NotificationManagerCompat.from(context)
         for (id in ids) nm.cancel(id, PAGE_NOTIFICATION_ID)
         PostedPages.remove(ids)
+        NotificationReplyState.clear(ids)
         // A page restored later (a blocking hook that gave up) can alert again.
         AppGraph.prefs.forgetNotified(ids)
     }
@@ -130,16 +131,18 @@ object PageNotifications : PageNotifier {
     /**
      * Posts (or replaces) a page's notification. [status] replaces the
      * actions with a one-line state after a notification action ("Sending…"),
-     * which also clears Android's reply spinner.
+     * which also clears Android's reply spinner. [note] is a line that stays with the page's own actions ("Deleted — not
+     * sent"). [deleteAction] puts a Delete on a status line, only where a Delete can work: the reply is still sending,
+     * or queued at a relay that can take it back.
      */
-    fun post(info: PageInfo, silent: Boolean, status: String?) {
+    fun post(info: PageInfo, silent: Boolean, status: String?, note: String? = null, deleteAction: Boolean = false) {
         // Our own record: actions are checked against it, never against
         // what an action intent claims.
         PostedPages.record(info)
         // Title is what it is ("Looks stuck", "Run this command?"), body the one redacted line, and the sub-text
         // says where and how reversible it is. Older records without those fall back to the plain wording.
         val title = info.headline.ifEmpty { "${info.projectName.ifEmpty { "Your Mac" }} paged you" }
-        val body = status ?: info.summary.ifEmpty { bodyText(info) }
+        val body = status ?: note ?: info.summary.ifEmpty { bodyText(info) }
         val sub = listOfNotNull(info.projectName.takeIf { it.isNotEmpty() }, classWord(info)).joinToString(" · ")
         val builder = NotificationCompat.Builder(context, CHANNEL_PAGES)
             .setSmallIcon(R.drawable.ic_stat_page)
@@ -165,6 +168,7 @@ object PageNotifications : PageNotifier {
                     .build()
             )
         if (status == null) addActions(builder, info)
+        else if (deleteAction) builder.addAction(action(info, NotificationActionId.DELETE, "Delete"))
         notifySafely(info.id, PAGE_NOTIFICATION_ID, builder.build())
     }
 

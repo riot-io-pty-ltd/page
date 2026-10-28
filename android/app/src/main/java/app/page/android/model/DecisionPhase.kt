@@ -29,7 +29,16 @@ sealed interface DecisionPhase {
     data object AlreadyReplied : DecisionPhase
     data class Resolved(val why: String) : DecisionPhase
 
-    val acceptsInput: Boolean get() = this == Open || this is Failed || this == Unconfirmed
+    /** A delete of a queued reply is waiting for its answer. */
+    data object Retracting : DecisionPhase
+
+    /** Deleted before anything was typed. The sheet stays open and takes a fresh reply. */
+    data class Retracted(val detail: String?) : DecisionPhase
+
+    /** The Mac holds it until a rate limit resets: not delivered, not lost. */
+    data class HeldOnMac(val detail: String?) : DecisionPhase
+
+    val acceptsInput: Boolean get() = this == Open || this is Failed || this == Unconfirmed || this is Retracted
 
     /** States after which the sheet closes on its own. */
     val autoCloseDelay: Double?
@@ -78,6 +87,9 @@ sealed interface DecisionPhase {
         Unconfirmed -> StatusLine("Your Mac never confirmed this. If the session is still waiting, you can answer again.", Tone.WARN)
         AlreadyReplied -> StatusLine("Already answered at the Mac", Tone.NEUTRAL)
         is Resolved -> StatusLine("Resolved · $why", Tone.NEUTRAL)
+        Retracting -> StatusLine("Deleting…", Tone.NEUTRAL)
+        is Retracted -> StatusLine(if (detail == null || detail == HeldMessages.DELETED_COPY) "Deleted — not sent. Nothing was typed." else detail, Tone.NEUTRAL)
+        is HeldOnMac -> StatusLine(HeldUntilReset.line(detail), Tone.WARN)
     }
 
     companion object {
@@ -99,6 +111,9 @@ sealed interface DecisionPhase {
                 is ReplyDelivery.Failed -> if (i.isLive) Failed(d.message) else closed(true)
                 ReplyDelivery.AlreadyReplied -> AlreadyReplied
                 ReplyDelivery.Gone -> Resolved("This page was already resolved.")
+                ReplyDelivery.Retracting -> Retracting
+                is ReplyDelivery.Retracted -> if (i.isLive) Retracted(d.detail) else closed(true)
+                is ReplyDelivery.HeldOnMac -> HeldOnMac(d.detail)
                 null -> {
                     if (i.isLive) Open
                     else if (i.hasSnapshot) closed(false)

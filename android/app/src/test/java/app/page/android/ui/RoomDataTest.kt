@@ -57,4 +57,27 @@ class RoomDataTest {
         )
         assertEquals(1, withStory.story.count { it is app.page.android.model.StoryBlock.User })
     }
+
+    private fun entries(vararg e: Pair<TranscriptRole, String>) =
+        SessionTranscript("w1", e.mapIndexed { n, (r, t) -> TranscriptEntry("e$n", r, t, now, null) }, false)
+
+    private val question = TranscriptRole.ASSISTANT to "I've finished the refactor. Should I run the full test suite now?"
+
+    @Test fun `an idle session whose last message asks yes or no offers Yes and No`() {
+        val d = SessionRoomData.make(SessionRoomData.Inputs(session = session(LiveSessionState.IDLE), macName = "m", now = now, transcript = entries(TranscriptRole.USER to "Refactor it", question)))
+        assertEquals("Should I run the full test suite now?", d.yesNo)
+    }
+
+    @Test fun `nothing is offered mid-turn, where Page cannot type, once the user has answered, or after a tool step`() {
+        fun yesNo(state: LiveSessionState, canType: Boolean = true, t: SessionTranscript = entries(question), sent: List<app.page.android.model.SentSessionCommand> = emptyList()) =
+            SessionRoomData.make(SessionRoomData.Inputs(session = session(state, canType), macName = "m", now = now, transcript = t, sent = sent)).yesNo
+        assertNull(yesNo(LiveSessionState.ACTIVE))
+        assertNull(yesNo(LiveSessionState.IDLE, canType = false))
+        assertNull(yesNo(LiveSessionState.WAITING_ON_APPROVAL))
+        assertNull(yesNo(LiveSessionState.IDLE, t = entries(question, TranscriptRole.USER to "Yes")))
+        assertNull(yesNo(LiveSessionState.IDLE, t = entries(question, TranscriptRole.TOOL to "Bash: swift test")))
+        val sent = app.page.android.model.SentSessionCommand("c1", "w1", app.page.android.model.SessionCommandKind.INPUT, "Yes", now, app.page.android.model.SessionDeliveryState.Sending)
+        assertNull(yesNo(LiveSessionState.IDLE, sent = listOf(sent)))
+        assertNull(SessionRoomData.make(SessionRoomData.Inputs(session = session(LiveSessionState.IDLE), ended = true, macName = "m", now = now, transcript = entries(question))).yesNo)
+    }
 }

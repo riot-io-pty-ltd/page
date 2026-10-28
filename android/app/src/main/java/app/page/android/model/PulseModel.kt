@@ -2,6 +2,7 @@ package app.page.android.model
 
 import java.time.Instant
 import kotlin.math.PI
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -145,6 +146,16 @@ class PulseModel(working: Int, waiting: Int, longestWait: Double = 0.0, paused: 
 
         /** The longest wait among the rows' `waitingSince`, at [now]. Pure. */
         fun longestWait(since: List<Instant>, now: Instant): Double = since.maxOfOrNull { max(0.0, now.secondsSince(it)) } ?: 0.0
+
+        /** The pulse is built with the longest wait in steps this long, so the ripple's pace changes at most this often. */
+        const val waitStep: Double = 15.0
+
+        /**
+         * A longest wait as the pulse is built with it: down to a whole [waitStep]. A ring's place is the clock over
+         * [emissionInterval], so any change of pace makes the rings jump, and Now is rebuilt whenever anything changes;
+         * with the wait unrounded they would jump on every rebuild, not once a step. Pure.
+         */
+        fun steppedWait(seconds: Double): Double = floor(max(0.0, seconds) / waitStep) * waitStep
 
         /** A ring's opacity at [progress], the Mac's curve. Pure. */
         fun ringOpacity(progress: Double): Double {

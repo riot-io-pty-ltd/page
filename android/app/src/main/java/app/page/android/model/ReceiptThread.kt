@@ -61,6 +61,15 @@ data class ReceiptThread(
         /** The relay holds it until the Mac is back online. */
         data object Queued : Stage
 
+        /** A delete is waiting for its answer. */
+        data object Deleting : Stage
+
+        /** Deleted before anything was typed: the thread has snapped back, and says so. */
+        data object Deleted : Stage
+
+        /** The Mac holds it until a rate limit resets. */
+        data object Held : Stage
+
         /** Confirmed by the Mac: the thread has reached it. */
         data object Typed : Stage
 
@@ -139,7 +148,16 @@ data class ReceiptThread(
                 is ReplyDelivery.Failed -> failed(delivery.message.ifEmpty { "Couldn't deliver the reply" }, since)
                 ReplyDelivery.AlreadyReplied -> failed("Already answered at the Mac", since)
                 ReplyDelivery.Gone -> failed("Prompt closed before your answer", since)
+                ReplyDelivery.Retracting -> sending(since).copy(stage = Stage.Deleting, word = "deleting")
+                is ReplyDelivery.Retracted -> deleted(since)
+                is ReplyDelivery.HeldOnMac -> ReceiptThread(Stage.Held, arm = 1.0, reach = 0.5, relayLit = true, word = "held on your Mac")
             }
+        }
+
+        /** DELETED, [t] seconds after: the thread snaps back, quietly (no shake: nothing went wrong). */
+        fun deleted(t: Double): ReceiptThread {
+            val reach = 0.5 * (1 - MotionCurve.easeIn(t / snapBack))
+            return ReceiptThread(Stage.Deleted, arm = 0.0, reach = reach, word = "deleted · not sent", moving = t < snapBack)
         }
 
         fun sending(t: Double): ReceiptThread {
@@ -201,6 +219,9 @@ data class ReceiptThreadInput(
             is ReplyDelivery.Sent -> if (delivery.queued) null else delivery.at.plusSeconds(t.glintFor)
             is ReplyDelivery.Delivered -> changedAt?.plusSeconds(t.resolveDuration)
             is ReplyDelivery.Failed, ReplyDelivery.AlreadyReplied, ReplyDelivery.Gone -> changedAt?.plusSeconds(maxOf(t.snapBack, t.shakeDuration))
+            ReplyDelivery.Retracting -> changedAt?.plusSeconds(t.reachRelay)
+            is ReplyDelivery.Retracted -> changedAt?.plusSeconds(t.snapBack)
+            is ReplyDelivery.HeldOnMac -> null
         }
     }
 }

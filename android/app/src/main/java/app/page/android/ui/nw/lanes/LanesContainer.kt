@@ -16,6 +16,7 @@ import app.page.android.model.SessionAvailability
 import app.page.android.model.SessionAvailabilityCopy
 import app.page.android.model.TowerSection
 import app.page.android.ui.nw.components.rememberNWNow
+import app.page.android.ui.nw.theme.LocalDaypart
 import kotlinx.coroutines.launch
 
 /** LANES, live: the fleet as a list of lanes, from the session list. (iOS LanesContainer.) */
@@ -31,7 +32,7 @@ fun LanesScreen(modifier: Modifier = Modifier) {
     val data = LanesScreenData(
         fleet = screen.sky, lanes = screen.lanes,
         availability = if (availability != SessionAvailability.Ready) SessionAvailabilityCopy.of(availability) else null,
-        duskDawn = power,
+        duskDawn = power, daypart = LocalDaypart.current,
     )
     val scope = rememberCoroutineScope()
     val actions = LanesScreenActions(

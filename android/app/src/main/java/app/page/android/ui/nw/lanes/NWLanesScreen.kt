@@ -50,12 +50,15 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import app.page.android.model.DaypartWeights
 import app.page.android.model.DuskDawnLog
 import app.page.android.model.LaneGroup
 import app.page.android.model.LaneRow
 import app.page.android.model.LanesModel
+import app.page.android.model.NowModel
 import app.page.android.model.NowBanner
 import app.page.android.model.SessionAvailabilityCopy
 import app.page.android.model.SkyModel
@@ -70,6 +73,8 @@ import app.page.android.ui.nw.components.NWLivingAurora
 import app.page.android.ui.nw.components.NWStarGlyph
 import app.page.android.ui.nw.components.color
 import app.page.android.ui.nw.shell.NWCappedFontScale
+import app.page.android.ui.nw.theme.AuroraPalette
+import app.page.android.ui.nw.theme.LocalDaypart
 import app.page.android.ui.nw.theme.LocalFixedNow
 import app.page.android.ui.nw.theme.LocalFixedPhase
 import app.page.android.ui.nw.theme.LocalMotionPin
@@ -89,6 +94,8 @@ data class LanesScreenData(
     val availability: SessionAvailabilityCopy? = null,
     /** The last battery pause: the dusk and the dawn ([LanesPowerStory]). */
     val duskDawn: DuskDawnLog = DuskDawnLog(),
+    /** The time of day the sky is drawn at ([LocalDaypart]); nighttime unless set. */
+    val daypart: DaypartWeights = DaypartWeights.NIGHTTIME,
 )
 
 class LanesScreenActions(
@@ -114,6 +121,7 @@ fun NWLanesScreen(data: LanesScreenData, actions: LanesScreenActions, modifier: 
     val lift = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + 84.dp + 8.dp
     BoxWithConstraints(modifier.fillMaxSize()) {
         val bandY = maxHeight - lift
+        LanesAurora(data, power, top)
         PowerBackdrop(power)
         DawnLight(bandY, power)
         Column(Modifier.fillMaxSize()) {
@@ -160,7 +168,10 @@ private class PowerContext(val story: LanesPowerStory, val live: Boolean, val fi
 @Composable
 private fun rememberPower(data: LanesScreenData): PowerContext {
     val ids = data.lanes.groups.flatMap { g -> g.rows.map { it.id } }
-    val story = remember(data.fleet.paused, data.duskDawn, ids) { LanesPowerStory(data.fleet.paused, data.duskDawn, ids) }
+    // The dusk falls from the hour's sky, and the dawn rises back into it.
+    val base = AuroraPalette.of(NowModel.Mood.WORKING, data.daypart)
+    val stars = data.daypart.stars
+    val story = remember(data.fleet.paused, data.duskDawn, ids, base, stars) { LanesPowerStory(data.fleet.paused, data.duskDawn, ids, base, stars) }
     val live = !LocalReduceMotion.current && LocalFixedPhase.current == null
     var stopped by remember { mutableIntStateOf(0) }
     LaunchedEffect(story, live) {
@@ -172,10 +183,77 @@ private fun rememberPower(data: LanesScreenData): PowerContext {
     return PowerContext(story, live, LocalFixedNow.current, LocalMotionPin.current)
 }
 
+// MARK: The day band
+
+/**
+ * The fleet's mood for the day band: teal while anything works, else the quiet sky. A lane paused for battery still
+ * counts as working, so the band keeps its palette while the dusk rises over it. Never amber: on Lanes amber stays in
+ * the group heads. Pure.
+ */
+internal fun lanesFleetMood(lanes: LanesModel): NowModel.Mood =
+    if (lanes.groups.any { g -> g.rows.any { it.state == StarState.WORKING || it.state == StarState.PAUSED } }) NowModel.Mood.WORKING else NowModel.Mood.QUIET
+
+/** The day band's geometry, the same numbers as iOS's `lanesAurora`. */
+internal object LanesDayBand {
+    /** How far below the status bar the band reaches. */
+    val depth = 280.dp
+    const val opacity = 0.8
+
+    /** The scrim at the very top of the screen, behind the status bar. */
+    const val scrimTop = 0.06
+
+    /**
+     * The scrim's stops between the top and the band's bottom (where it is gone): dp below the status bar, and how
+     * deep the page colour lies there. The title's row is light; the caption and the axis are deep.
+     */
+    val scrim: List<Pair<Float, Double>> = listOf(
+        0f to 0.12, 20f to 0.24, 40f to 0.44, 56f to 0.64, 66f to 0.72, 104f to 0.72, 140f to 0.6, 190f to 0.36,
+    )
+}
+
+/**
+ * The living sky behind the header, at the time of day: the Horizon's aurora as a crown over the top of Lanes, its
+ * curtains glowing above and behind the title and gone into the page by the first lane. The scrim is weighted onto
+ * the caption and the axis, the small dim text, so the glow can stay bright where only the bold title sits. It gives
+ * way to the power story's cover as the dusk rises and comes back as the dawn settles, never a cut; a settled pause
+ * draws none of it (and runs no clock). Each layer takes the band's opacity on its own, as iOS's does. (iOS
+ * NWLanesScreen.lanesAurora.)
+ */
+@Composable
+private fun LanesAurora(data: LanesScreenData, power: PowerContext, inset: Dp) {
+    if (data.fleet.paused && !power.moving) return
+    val palette = AuroraPalette.of(lanesFleetMood(data.lanes), data.daypart)
+    val stars = data.daypart.stars
+    NWAnimated(fps = 15.0) { t ->
+        val cover = power.story.skyLight(power.now, power.pin).cover
+        val alpha = (LanesDayBand.opacity * (1 - cover)).toFloat()
+        Box(Modifier.fillMaxWidth().height(inset + LanesDayBand.depth).clearAndSetSemantics {}) {
+            NWLivingAurora(palette, t, Modifier.fillMaxSize().graphicsLayer { this.alpha = alpha }, stars = stars)
+            Canvas(Modifier.fillMaxSize()) {
+                val deep = NW.Palette.backgroundDeep
+                // The Horizon's own fade into the page.
+                drawRect(
+                    Brush.verticalGradient(0f to Color.Transparent, 0.35f to deep.opacity(0.0).color, 0.88f to deep.opacity(0.85).color, 1f to deep.color),
+                    alpha = alpha,
+                )
+                // The header scrim, deepest behind the caption and the axis.
+                val h = size.height
+                val top = inset.toPx()
+                val stops = listOf(0f to deep.opacity(LanesDayBand.scrimTop).color) +
+                    LanesDayBand.scrim.map { (y, a) -> (top + y.dp.toPx()) / h to deep.opacity(a).color } +
+                    listOf(1f to deep.opacity(0.0).color)
+                drawRect(Brush.verticalGradient(*stops.toTypedArray()), alpha = alpha)
+            }
+        }
+    }
+}
+
+// MARK: The power story
+
 /**
  * The aurora behind the list, only while the power story is on screen: fading to dusk, settled in the night of a
- * pause, or fading back into the day as the dawn ends. Otherwise the shell's own sky shows, as it always has behind
- * Lanes.
+ * pause, or fading back into the day as the dawn ends. Otherwise the day band ([LanesAurora]) crowns the header over
+ * the shell's own sky.
  */
 @Composable
 private fun PowerBackdrop(power: PowerContext) {

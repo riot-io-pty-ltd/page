@@ -220,7 +220,9 @@ object NowStore {
 
         val sky = SkyModel.build(s.sessions, a.inbox, a.status, model.rings, macName, model.paused, now)
         val lanes = LanesModel.build(sky, ActivityStore.log, now)
-        val pulse = PulseModel(model.workingCount, model.pulseWaiting, PulseModel.longestWait(model.pulseRows.map { it.waitingSince }, now), model.paused)
+        // The wait in 15 s steps, so a rebuild for any other reason leaves the ripple's pace, and its rings, where they
+        // were (the nav pulse reads it from here too).
+        val pulse = PulseModel(model.workingCount, model.pulseWaiting, PulseModel.steppedWait(PulseModel.longestWait(model.pulseRows.map { it.waitingSince }, now)), model.paused)
         return Screen(
             model = model, rows = merged.rows, queuedNew = merged.queuedNew, inFlight = inFlight, settled = settled, banners = banners,
             problem = problem, brief = brief, handover = handover, macChip = MacChipModel.build(macName, a.status, now),

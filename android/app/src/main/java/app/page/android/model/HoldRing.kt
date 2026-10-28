@@ -32,14 +32,18 @@ data class HoldRingSpec(
     fun isComplete(elapsed: Double): Boolean = elapsed >= deadZone + fill
 
     /**
-     * Progress while the ring unwinds after an early release: it runs back at the speed it filled.
+     * Progress while the ring unwinds after an early release: it runs back at the speed it filled, but never
+     * slower than an empty-to-full in [maxUnwind] (a 10 s Stop ring lets go in about a second, not ten).
      * [released] is the progress at release. Pure.
      */
-    fun unwound(released: Double, since: Double): Double = max(0.0, released - since / fill)
+    fun unwound(released: Double, since: Double): Double = max(0.0, released - since / min(fill, maxUnwind))
 
     companion object {
-        /** Hold the pulse (Stop-all): appears after 300 ms, fills over 1.2 s, full at 1.5 s. */
-        val stopAll = HoldRingSpec(0.3, 1.2)
+        /** Hold the pulse (Stop-all): appears after 300 ms, fills over 9.7 s, full at 10 s. Esc in every session is never something to do by accident. */
+        val stopAll = HoldRingSpec(0.3, 9.7)
+
+        /** The longest an unwind from full takes. */
+        const val maxUnwind = 1.2
 
         /** Hold to approve an Irreversible action: the same ring, the same timing. */
         val irreversible = HoldRingSpec(0.3, 1.2)

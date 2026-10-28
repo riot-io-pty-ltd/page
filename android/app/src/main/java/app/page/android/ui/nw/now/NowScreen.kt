@@ -79,6 +79,7 @@ import app.page.android.model.NowTipInputs
 import app.page.android.model.ProblemState
 import app.page.android.model.ReceiptThread
 import app.page.android.model.ReceiptThreadInput
+import app.page.android.model.QueuedDelete
 import app.page.android.model.RoomEntry
 import app.page.android.model.RowAction
 import app.page.android.model.TowerSection
@@ -107,6 +108,7 @@ import app.page.android.ui.nw.theme.pinned
 import app.page.android.ui.nw.shell.NWHorizon
 import app.page.android.ui.nw.shell.WorkingJump
 import app.page.android.ui.nw.theme.AuroraPalette
+import app.page.android.ui.nw.theme.LocalDaypart
 import app.page.android.ui.nw.theme.LocalFixedNow
 import app.page.android.ui.nw.theme.NW
 import java.time.Instant
@@ -128,6 +130,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
     val deliveryTimes by RelayClient.deliveryTimes.collectAsStateWithLifecycle()
     val inbox by RelayClient.inbox.collectAsStateWithLifecycle()
     val sessionState by SessionStore.state.collectAsStateWithLifecycle()
+    val retractNotes by RelayClient.retractNotes.collectAsStateWithLifecycle()
     val book by TipStore.book.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val biometry = remember { BiometricGate.methodName(context) }
@@ -146,6 +149,8 @@ fun NowScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(touching, listState.isScrollInProgress) { NowStore.setFrozen(touching || listState.isScrollInProgress) }
 
     val armingUntil = pending.values.filter { it.armed }.maxOfOrNull { it.startedAt.plusSeconds(2) }
+    // 10 Hz is enough for the cards' outcomes; the arm ring keeps its own 30 fps clock (ArmingStrip), so the whole
+    // list is not recomposed 30 times a second while something arms.
     val liveNow by rememberNWNow(until = armingUntil, fastMs = 100)
     val now = LocalFixedNow.current ?: liveNow
 
@@ -182,7 +187,14 @@ fun NowScreen(modifier: Modifier = Modifier) {
     fun statusOf(row: NowRow): RowStatus {
         val receipt = ReceiptThreadInput(pending[row.id], deliveries[row.id], problems[row.id], deliveryTimes[row.id])
         val outcome = problems[row.id]?.let { CardOutcome.Problem(it) } ?: CardOutcome.from(pending[row.id], deliveries[row.id], now)
-        return RowStatus(outcome, pending[row.id], receipt.takeIf { !it.isEmpty })
+        // Delete for a reply that is queued and not yet sent, where the relay (or the Mac) says it can take it back.
+        val layer = QueuedDelete.reply(deliveries[row.id], inbox.firstOrNull { it.id == row.id }?.isBlockingHook ?: false, sessionState.relayFeatures, sessionState.caps)
+        val onDelete: (() -> Unit)? = when (layer) {
+            QueuedDelete.Layer.RELAY_QUEUE -> ({ scope.launch { RelayClient.retractReply(row.id) }; Unit })
+            QueuedDelete.Layer.MAC_RATE_LIMIT -> ({ RelayClient.deleteHeldReply(row.id) })
+            else -> null
+        }
+        return RowStatus(outcome, pending[row.id], receipt.takeIf { !it.isEmpty }, onDelete, retractNotes[row.id])
     }
 
     fun actionsOf(row: NowRow) = RowActions(
@@ -191,7 +203,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
         holdComplete = { TipStore.retire(NWTip.HOLD_TO_APPROVE); ActionCoordinator.commitHold(row, macName) },
         deny = { ActionCoordinator.begin(row, RowAction.Kind.DENY) },
         looksGood = { ActionCoordinator.begin(row, RowAction.Kind.CARRY_ON) },
-        steer = { AppRouter.open(row.id, switchTab = false) },
+        steer = { AppRouter.open(row.id, switchTab = false, composer = true) },
         // The ring, if it is still running; otherwise the sheet, to see and retry.
         cancel = { if (ActionCoordinator.isArming(row.id)) ActionCoordinator.cancel(row.id) else AppRouter.open(row.id, switchTab = false) },
     )
@@ -301,7 +313,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
                 Box(im) {
                     val p = problem
                     NWHorizon(
-                        palette = p?.let { if (it.tone == ProblemState.Tone.SLATE) AuroraPalette.asleep else AuroraPalette.problem } ?: AuroraPalette.of(m.mood),
+                        palette = p?.let { if (it.tone == ProblemState.Tone.SLATE) AuroraPalette.asleep else AuroraPalette.problem } ?: AuroraPalette.of(m.mood, LocalDaypart.current),
                         pulse = p?.let { if (it.tone == ProblemState.Tone.SLATE) NWPulseStyle.Style.HOLLOW_SLATE else NWPulseStyle.Style.HOLLOW_AMBER } ?: NWPulseStyle.Style.of(m.mood),
                         headline = p?.title ?: screen.handover ?: m.headline,
                         subline = p?.subtitle ?: (if (screen.handover == null) NowModel.sublineBesideChip(m.subline, screen.macChip.text) else m.headline),

@@ -130,6 +130,9 @@ data class DispatchStatus(
                 is SessionDeliveryState.Refused -> DispatchStatus(state.message, Tone.PROBLEM, false)
                 is SessionDeliveryState.Failed -> DispatchStatus(state.message, Tone.PROBLEM, false)
                 SessionDeliveryState.NoAnswer -> DispatchStatus("No answer from your Mac", Tone.WARN, false)
+                // A start is never held or deleted; if one is ever reported so, say it can't be confirmed.
+                is SessionDeliveryState.CheckSession -> DispatchStatus(state.message, Tone.WARN, false)
+                is SessionDeliveryState.Held, is SessionDeliveryState.Deleted -> DispatchStatus("No answer from your Mac", Tone.WARN, false)
             }
         }
     }

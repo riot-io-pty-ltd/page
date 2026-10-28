@@ -168,7 +168,7 @@ object RoomHeader {
                 LiveSessionState.ACTIVE -> {
                     val word = if (character.kind == AgentCharacter.Kind.LOCAL) "GENERATING" else "WORKING"
                     if (since != null && since >= 30) {
-                        out.add(RoomChip("$word · quiet ${RelativeTime.compact(since.toLong())}", RoomChip.Tone.WORKING, null))
+                        out.add(RoomChip("$word · last step ${RelativeTime.compact(since.toLong())} ago", RoomChip.Tone.WORKING, null))
                     } else {
                         out.add(RoomChip(word, RoomChip.Tone.WORKING, null))
                     }
@@ -213,8 +213,14 @@ sealed interface RoomComposerMode {
     /** Page cannot type in this session's terminal. */
     data class Blocked(val why: String) : RoomComposerMode
 
-    /** Busy: text plus Return, which queues behind the current step. */
+    /** Busy: text plus Return, which queues behind the current step (after a 10 s Undo), or is held until the turn ends. */
     data object Steer : RoomComposerMode
+
+    /**
+     * Busy, and Page can't type into the terminal now but the Mac can hold a message until the turn ends (a busy
+     * Codex session outside cmux: `canType` false, `canHold` true). The only way to send is "When it finishes".
+     */
+    data object HoldOnly : RoomComposerMode
 
     /** Idle: the next task. */
     data object NextTask : RoomComposerMode
@@ -234,6 +240,8 @@ sealed interface RoomComposerMode {
         val ended: Boolean = false,
         /** Live sessions are available (the Mac is connected and sending). */
         val ready: Boolean = true,
+        /** The Mac holds messages (`hold-v1`) and this row's `canHold` is true. */
+        val canHold: Boolean = false,
     )
 
     data class Copy(
@@ -244,19 +252,20 @@ sealed interface RoomComposerMode {
     )
 
     /** The composer takes text at all. */
-    val acceptsText: Boolean get() = this is TellInstead || this == Steer || this == NextTask
+    val acceptsText: Boolean get() = this is TellInstead || this == Steer || this == NextTask || this == HoldOnly
 
     /** A written reply goes through the page (Esc, text, Return), never as session input. */
     val routesThroughPage: Boolean get() = this is TellInstead
 
     /** Send as the session's own input (text plus Return). */
-    val usesSessionInput: Boolean get() = this == Steer || this == NextTask
+    val usesSessionInput: Boolean get() = this == Steer || this == NextTask || this == HoldOnly
 
     /** Placeholder and hint, in the agent's own voice. Codex reads a message when its turn ends; a local model when generation stops. */
     fun copy(character: AgentCharacter): Copy {
         val who = if (character.kind == AgentCharacter.Kind.LOCAL) "the model" else character.name
         return when (this) {
             is TellInstead -> Copy("Tell it instead…", "sends Esc first, then your words — never answers the menu", "Send, after Esc")
+            HoldOnly -> Copy("Message $who…", "held on your Mac, typed when this turn ends", "Send message")
             Steer -> when (character.kind) {
                 AgentCharacter.Kind.CODEX -> Copy("Message Codex…", "delivered when this turn ends", "Send message")
                 AgentCharacter.Kind.LOCAL -> Copy("Message the model…", "sent when generation stops", "Send message")
@@ -273,16 +282,21 @@ sealed interface RoomComposerMode {
     }
 
     /** The delivery preview: what will be typed, where, on which Mac. null when nothing would be sent. Pure. */
-    fun preview(character: AgentCharacter, route: String?, mac: String, pagePreview: String? = null): String? = when (this) {
+    fun preview(character: AgentCharacter, route: String?, mac: String, pagePreview: String? = null, sendWhen: SendWhen = SendWhen.NOW): String? = when (this) {
         // The page knows how its answer is delivered: through a hook, or Esc then your words.
         is TellInstead -> pagePreview ?: DeliveryPreview.tellInstead(route, mac)
+        HoldOnly -> DeliveryPreview.line("Held on your Mac · typed when ${character.name} finishes", route, mac)
         Steer -> {
-            val tail = when (character.kind) {
-                AgentCharacter.Kind.CODEX -> "delivered when this turn ends"
-                AgentCharacter.Kind.LOCAL -> "sent when generation stops"
-                else -> "queues after this step"
+            if (sendWhen == SendWhen.WHEN_FINISHED) {
+                DeliveryPreview.line("Held on your Mac · typed when ${character.name} finishes", route, mac)
+            } else {
+                val tail = when (character.kind) {
+                    AgentCharacter.Kind.CODEX -> "delivered when this turn ends"
+                    AgentCharacter.Kind.LOCAL -> "sent when generation stops"
+                    else -> "queues after this step"
+                }
+                DeliveryPreview.line("Your message, then Return · $tail", route, mac)
             }
-            DeliveryPreview.line("Your message, then Return · $tail", route, mac)
         }
         NextTask -> DeliveryPreview.message(route, mac)
         is Blocked -> DeliveryPreview.cannotType(why, mac)
@@ -290,7 +304,7 @@ sealed interface RoomComposerMode {
     }
 
     /** Quick replies belong where a message is the next thing: idle or steering. */
-    val offersQuickReplies: Boolean get() = this == Steer || this == NextTask
+    val offersQuickReplies: Boolean get() = this == Steer || this == NextTask || this == HoldOnly
 
     companion object {
         /**
@@ -306,7 +320,8 @@ sealed interface RoomComposerMode {
                 if (i.pageArriving) return Locked("Its decision is still arriving. Answer on your Mac, or wait a moment.")
                 return Locked("Answer the prompt on your Mac. Page won't type over a prompt.")
             }
-            if (!i.canType) return Blocked(i.typeBlocker ?: LiveSession.DEFAULT_BLOCKER)
+            // A busy session Page can't type into right now but the Mac can hold a message for: the hold is the way in.
+            if (!i.canType) return if (i.state == LiveSessionState.ACTIVE && i.canHold) HoldOnly else Blocked(i.typeBlocker ?: LiveSession.DEFAULT_BLOCKER)
             return if (i.state == LiveSessionState.ACTIVE) Steer else NextTask
         }
 
@@ -328,13 +343,13 @@ sealed interface RoomComposerMode {
 // MARK: - Stop
 
 /**
- * Stop in the room: a 0.6 s hold, because Esc interrupts the turn. No biometrics (this is one session's Esc,
+ * Stop in the room: a 10 s hold, because Esc interrupts the turn. No biometrics (this is one session's Esc,
  * not Stop-all), and a mis-hold is undone by letting go early.
  */
 data class SessionStopPlan(val canStop: Boolean, val scope: String, val preview: String) {
     companion object {
         /** The hold that confirms a Stop. */
-        val spec = HoldRingSpec(0.0, 0.6)
+        val spec = HoldRingSpec(0.0, 10.0)
 
         /** Offered only mid-turn, where the Mac says Esc works, with the relay ready. */
         fun build(session: LiveSession, ready: Boolean, ended: Boolean, macName: String): SessionStopPlan {
@@ -367,6 +382,10 @@ data class RoomPlan(
         val ended: Boolean,
         val ready: Boolean,
         val macName: String,
+        /** `hold-v1` in the Mac's caps and the row's `canHold`: a busy session may be sent "When it finishes". */
+        val canHold: Boolean = false,
+        /** The side of the busy-session choice that is selected (its delivery preview follows it). */
+        val sendWhen: SendWhen = SendWhen.NOW,
     )
 
     companion object {
@@ -380,11 +399,11 @@ data class RoomPlan(
                     pageId = pinned?.id, pageIsDecide = pinned?.section == NowRow.Section.DECIDE,
                     pageAcceptsReply = pinned?.action(RowAction.Kind.TELL_INSTEAD) != null,
                     pageArriving = s.interventionId != null && pinned == null,
-                    ended = i.ended, ready = i.ready,
+                    ended = i.ended, ready = i.ready, canHold = i.canHold,
                 ),
             )
             val route = DeliveryPreview.route(s.host, SessionTarget.of(s, i.macName).project)
-            val preview = mode.preview(i.character, route, i.macName, pinned?.action(RowAction.Kind.TELL_INSTEAD)?.preview)
+            val preview = mode.preview(i.character, route, i.macName, pinned?.action(RowAction.Kind.TELL_INSTEAD)?.preview, i.sendWhen)
             return RoomPlan(pinned, review, mode, preview)
         }
     }

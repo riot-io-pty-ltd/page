@@ -17,7 +17,7 @@ object NotificationActionUri {
     /** The actions a notification can carry. */
     val knownActions: Set<String> = setOf(
         NotificationActionId.APPROVE, NotificationActionId.DENY, NotificationActionId.REPLY,
-        NotificationActionId.CARRY_ON, NotificationActionId.STOP,
+        NotificationActionId.CARRY_ON, NotificationActionId.STOP, NotificationActionId.DELETE,
     )
 
     data class Parsed(val interventionId: String, val action: String)

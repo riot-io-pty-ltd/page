@@ -95,6 +95,9 @@ object ReceiptBuilder {
             is ReplyDelivery.Failed -> make(DeliveryReceipt.Outcome.Other(delivery.message), stamp)
             ReplyDelivery.AlreadyReplied -> make(DeliveryReceipt.Outcome.AnsweredAtMac, stamp)
             ReplyDelivery.Gone -> make(DeliveryReceipt.Outcome.PromptClosed, stamp)
+            // Being deleted, or deleted: the page is open again, so there is nothing to settle.
+            ReplyDelivery.Retracting, is ReplyDelivery.Retracted -> null
+            is ReplyDelivery.HeldOnMac -> make(DeliveryReceipt.Outcome.Other(HeldUntilReset.line(delivery.detail)), stamp)
         }
     }
 }

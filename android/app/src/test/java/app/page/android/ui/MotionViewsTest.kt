@@ -3,10 +3,12 @@ package app.page.android.ui
 import app.page.android.model.ApproachModel
 import app.page.android.model.DawnModel
 import app.page.android.model.DuskDawnLog
+import app.page.android.model.PulseModel
 import app.page.android.model.StarState
 import app.page.android.data.NowTicker
 import app.page.android.ui.nw.components.nwClockSleepMillis
 import app.page.android.ui.nw.components.nwClockStepNanos
+import app.page.android.ui.nw.components.nwShaderSeconds
 import app.page.android.ui.nw.now.ArrivalBook
 import app.page.android.ui.nw.lanes.LanesPowerStory
 import app.page.android.ui.nw.theme.AuroraPalette
@@ -164,6 +166,39 @@ class MotionViewsTest {
         assertTrue("the app is up", NowTicker.ticks(visible = true, holdingSocket = false))
         assertTrue("Stay connected's notification shows Now", NowTicker.ticks(visible = false, holdingSocket = true))
         assertFalse("nothing live shows it: no rebuilds", NowTicker.ticks(visible = false, holdingSocket = false))
+    }
+
+    @Test
+    fun theShaderTimeWrapsDailySoTheSkyNeverGoesSteppy() {
+        assertEquals("a harness phase is drawn as it is", 2f, nwShaderSeconds(2.0), 0f)
+        assertEquals("a day on, the same moment of the sky", 2.5f, nwShaderSeconds(86_402.5), 1e-3f)
+        assertTrue("never negative", nwShaderSeconds(-1.0) in 0f..86_400f)
+        // A month of uptime: unwrapped, two frames 33 ms apart are the same float and the sky stands still.
+        val month = 30 * 86_400.0 + 1_234.0
+        assertEquals(0f, (month + 0.033).toFloat() - month.toFloat(), 0f)
+        assertTrue("wrapped, every 30 fps frame still moves it", nwShaderSeconds(month + 0.033) - nwShaderSeconds(month) > 0.025f)
+        assertTrue("even at the end of the day", nwShaderSeconds(86_399.9) - nwShaderSeconds(86_399.9 - 0.033) > 0.02f)
+    }
+
+    // endregion
+
+    // region The ripple's pace
+
+    @Test
+    fun theRipplesPaceMovesOnOnlyOnceAStep() {
+        assertEquals("a fresh wait", 0.0, PulseModel.steppedWait(14.9), 0.0)
+        assertEquals(15.0, PulseModel.steppedWait(15.0), 0.0)
+        assertEquals("never negative", 0.0, PulseModel.steppedWait(-3.0), 0.0)
+        // Now rebuilds for anything (a tick, an arrival); two rebuilds inside one step keep the pace, so no ring jumps.
+        val a = PulseModel(0, 1, PulseModel.steppedWait(61.0))
+        val b = PulseModel(0, 1, PulseModel.steppedWait(74.5))
+        assertEquals(a.emissionInterval, b.emissionInterval, 0.0)
+        val uptime = 500_000.0
+        assertEquals(a.ripples(uptime), b.ripples(uptime))
+        assertTrue("the next step quickens it", PulseModel(0, 1, PulseModel.steppedWait(75.0)).emissionInterval < a.emissionInterval)
+        // Unstepped, half a second more wait moves the rings by a large part of a ring at that uptime.
+        val drift = PulseModel(0, 1, 61.5).ripples(uptime)[0].progress - PulseModel(0, 1, 61.0).ripples(uptime)[0].progress
+        assertTrue("unstepped, they would jump ($drift)", abs(drift) > 0.05)
     }
 
     // endregion

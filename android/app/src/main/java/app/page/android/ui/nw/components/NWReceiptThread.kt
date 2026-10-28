@@ -50,7 +50,7 @@ import java.time.Instant
  * (iOS NWReceiptThreadView.)
  */
 @Composable
-fun NWReceiptThreadView(input: ReceiptThreadInput, modifier: Modifier = Modifier, onTap: () -> Unit = {}) {
+fun NWReceiptThreadView(input: ReceiptThreadInput, modifier: Modifier = Modifier, armingLabel: String? = null, onTap: () -> Unit = {}) {
     val reduce = LocalReduceMotion.current
     // A thread of light is thin and slow: 30 fps while it moves (Remove animations still ticks the arm countdown, at 10 Hz).
     val now by rememberNWNow(input.movingUntil(Instant.now()), fastMs = if (reduce) 100 else 33)
@@ -59,7 +59,8 @@ fun NWReceiptThreadView(input: ReceiptThreadInput, modifier: Modifier = Modifier
     val tone = tone(f)
     val arming = f.stage == ReceiptThread.Stage.Arming
     val shape = RoundedCornerShape(NW.Radius.button)
-    val label = accessibility(f)
+    // [armingLabel]: what TalkBack says while the ring runs, when the caller can name it ("Sending Yes, tap to cancel").
+    val label = if (arming && armingLabel != null) armingLabel else accessibility(f)
     Column(
         modifier
             .fillMaxWidth()
@@ -91,8 +92,9 @@ fun NWReceiptThreadView(input: ReceiptThreadInput, modifier: Modifier = Modifier
 
 /** Reduce Motion: each stage drawn where it ends, with nothing travelling (the arm ring still counts down). */
 fun still(f: ReceiptThread): ReceiptThread = when (f.stage) {
-    ReceiptThread.Stage.Sending -> f.copy(reach = 0.42, glint = null, shake = 0.0)
-    ReceiptThread.Stage.Sent, ReceiptThread.Stage.Queued -> f.copy(reach = 0.5, glint = null, shake = 0.0)
+    ReceiptThread.Stage.Sending, ReceiptThread.Stage.Deleting -> f.copy(reach = 0.42, glint = null, shake = 0.0)
+    ReceiptThread.Stage.Sent, ReceiptThread.Stage.Queued, ReceiptThread.Stage.Held -> f.copy(reach = 0.5, glint = null, shake = 0.0)
+    ReceiptThread.Stage.Deleted -> f.copy(reach = 0.0, glint = null, shake = 0.0)
     ReceiptThread.Stage.Typed, ReceiptThread.Stage.Verified -> f.copy(reach = 1.0, macLit = true, dotTeal = 1.0, rings = 0.0, glint = null, shake = 0.0)
     is ReceiptThread.Stage.Failed -> f.copy(reach = 0.0, glint = null, shake = 0.0)
     else -> f.copy(glint = null, shake = 0.0)
@@ -100,8 +102,9 @@ fun still(f: ReceiptThread): ReceiptThread = when (f.stage) {
 
 private fun tone(f: ReceiptThread): Rgba = when (f.stage) {
     ReceiptThread.Stage.Idle, ReceiptThread.Stage.Arming -> Rgba(1.0, 1.0, 1.0, 0.92)
-    ReceiptThread.Stage.Sending, ReceiptThread.Stage.Sent, ReceiptThread.Stage.Typed -> NW.Palette.sky
-    ReceiptThread.Stage.Queued -> NW.Palette.amber
+    ReceiptThread.Stage.Sending, ReceiptThread.Stage.Sent, ReceiptThread.Stage.Typed, ReceiptThread.Stage.Deleting -> NW.Palette.sky
+    ReceiptThread.Stage.Queued, ReceiptThread.Stage.Held -> NW.Palette.amber
+    ReceiptThread.Stage.Deleted -> NW.Palette.textSecondary
     ReceiptThread.Stage.Verified -> NW.Palette.green
     is ReceiptThread.Stage.Failed -> NW.Palette.amber
 }
@@ -111,6 +114,9 @@ private fun accessibility(f: ReceiptThread): String = when (val s = f.stage) {
     ReceiptThread.Stage.Sending -> "Sending"
     ReceiptThread.Stage.Sent -> "Sent, waiting for your Mac to confirm"
     ReceiptThread.Stage.Queued -> "Queued until your Mac is back online"
+    ReceiptThread.Stage.Deleting -> "Deleting"
+    ReceiptThread.Stage.Deleted -> "Deleted, not sent"
+    ReceiptThread.Stage.Held -> "Held on your Mac until the limit resets"
     ReceiptThread.Stage.Typed, ReceiptThread.Stage.Verified -> "Delivered and verified on your Mac"
     is ReceiptThread.Stage.Failed -> s.why
     ReceiptThread.Stage.Idle -> ""

@@ -6,12 +6,15 @@ import android.net.NetworkCapabilities
 import android.util.Log
 import app.page.android.model.CloseReason
 import app.page.android.model.Intervention
+import app.page.android.model.MacRetract
 import app.page.android.model.MacStatusSnapshot
 import app.page.android.model.PageDate
 import app.page.android.model.ReconnectBackoff
 import app.page.android.model.ReplyAction
 import app.page.android.model.ReplyDelivery
 import app.page.android.model.ReplyOutcome
+import app.page.android.model.ReplyResultFrame
+import app.page.android.model.ReplyRetract
 import app.page.android.model.SessionCommandOutcome
 import app.page.android.model.TokenRetirement
 import app.page.android.model.ValidatedPairing
@@ -113,6 +116,16 @@ object RelayClient {
     val retiredWhy: StateFlow<String?> = _retiredWhy.asStateFlow()
     private val _deliveries = MutableStateFlow<Map<String, ReplyDelivery>>(emptyMap())
     val deliveries: StateFlow<Map<String, ReplyDelivery>> = _deliveries.asStateFlow()
+
+    /**
+     * What a delete answered when it could not take a reply back ("Too late — your Mac already has it"), by
+     * intervention id: shown under the reply's status until its delivery next changes.
+     */
+    private val _retractNotes = MutableStateFlow<Map<String, String>>(emptyMap())
+    val retractNotes: StateFlow<Map<String, String>> = _retractNotes.asStateFlow()
+
+    /** Where a reply stood before the Mac was asked to delete it, so a "too late" can put the hold back. */
+    private val heldReplyPrev = HashMap<String, ReplyDelivery?>()
 
     /** When each delivery last changed on this phone, so a failure or a receipt can age out of Now (iOS `deliveryTimes`). */
     private val _deliveryTimes = MutableStateFlow<Map<String, Instant>>(emptyMap())
@@ -293,6 +306,8 @@ object RelayClient {
         _retiredWhy.value = null
         _deliveries.value = emptyMap()
         _deliveryTimes.value = emptyMap()
+        _retractNotes.value = emptyMap()
+        heldReplyPrev.clear()
         deliveryTouchedSeq.clear()
         _recentCloseReasons.value = emptyMap()
         inboxEvents.clear()
@@ -330,6 +345,7 @@ object RelayClient {
         val b = Request.Builder().url(url).header("Authorization", "Bearer $token").header("Cache-Control", "no-store")
         val body = rawBody ?: json?.toString()
         if (method == "POST") b.post((body ?: "{}").toRequestBody(JSON))
+        if (method == "DELETE") b.delete()
         return b.build()
     }
 
@@ -421,7 +437,10 @@ object RelayClient {
                 val touched = deliveryTouchedSeq[iv.id]
                 if (touched != null && touched > startSeq) continue
                 val local = map[iv.id]
-                val next = ReplyDelivery.synced(local, iv.deliveryStatus, iv.deliveryDetail, iv.repliedAt, now)
+                val next = ReplyDelivery.synced(
+                    local, iv.deliveryStatus, iv.deliveryDetail, iv.repliedAt, now,
+                    deliveryMethod = iv.deliveryMethod, forwardedAt = iv.deliveryForwardedAt, hookBlocking = iv.isBlockingHook,
+                )
                 if (next != local) {
                     if (next == null) map.remove(iv.id) else map[iv.id] = next
                 }
@@ -443,6 +462,8 @@ object RelayClient {
 
     /** Records a local delivery change so an in-flight fetch can't undo it. */
     private fun setDelivery(id: String, state: ReplyDelivery) {
+        // A note about a delete that could not happen belongs to the state it was said about.
+        if (_retractNotes.value.containsKey(id)) _retractNotes.value = _retractNotes.value - id
         inboxSeq += 1
         deliveryTouchedSeq[id] = inboxSeq
         if (deliveryTouchedSeq.size > 200) {
@@ -586,6 +607,92 @@ object RelayClient {
             is ReplyOutcome.Failed -> setDelivery(interventionId, ReplyDelivery.Failed(outcome.message))
         }
         return outcome
+    }
+
+    /**
+     * Deletes a reply still waiting in the relay's queue for an offline Mac (`DELETE /reply/:id`, `reply-retract-v1`).
+     * A relay without the feature is never asked: [ReplyRetract.Outcome.RelayTooOld]. The outcome is mapped to
+     * the reply's delivery by [ReplyDelivery.afterRetract]; a delete that could not happen leaves the reply as it
+     * was, with the relay's words as a note ([retractNotes]).
+     */
+    suspend fun retractReply(interventionId: String, onAskingMac: () -> Unit = {}): ReplyRetract.Outcome {
+        if (isDemoMode) return simulateDemoRetract(interventionId)
+        // A cold process (a notification's Delete) has not read /status yet.
+        if (SessionStore.state.value.relayFeatures == null) refreshStatus()
+        val creds = credentials()
+        val url = creds?.url("reply", interventionId)
+        if (creds == null || url == null) return ReplyRetract.Outcome.Failed("Page isn't paired with a Mac.")
+        // Features still unknown: /status couldn't be read, which says nothing about the relay's age. Not "update your
+        // relay": a delete that never reached it, which can be tried again.
+        if (SessionStore.state.value.relayFeatures == null) return ReplyRetract.Outcome.Failed(ReplyRetract.TRANSPORT)
+        if (!ReplyRetract.available(SessionStore.state.value.relayFeatures)) {
+            _retractNotes.value = _retractNotes.value + (interventionId to ReplyRetract.Outcome.RelayTooOld.text)
+            return ReplyRetract.Outcome.RelayTooOld
+        }
+        val prev = _deliveries.value[interventionId]
+        setDelivery(interventionId, ReplyDelivery.Retracting)
+        var outcome = try {
+            val r = perform(request(url, creds.token, "DELETE"))
+            ReplyRetract.from(r.status, r.body)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            ReplyRetract.Outcome.Failed(ReplyRetract.TRANSPORT)
+        }
+        if (creds != credentials()) return outcome
+        when (outcome) {
+            ReplyRetract.Outcome.Unauthorized -> _authRejected.value = true
+            is ReplyRetract.Outcome.Retired -> markRetired(outcome.why)
+            else -> Unit
+        }
+        // `409 too_late` "forwarded": the relay handed it to the Mac, which may still hold it (a rate-limit or resume
+        // queue). A Mac that advertises `retract-v1` is asked with `retract {interventionId}` (up to 20 s); its answer, or
+        // none, is the delete's outcome. "delivered" never gets here: the Mac reported it typed.
+        val chained = ReplyRetract.chainsToMac(outcome, SessionStore.state.value.caps)
+        if (chained) {
+            _retractNotes.value = _retractNotes.value + (interventionId to ReplyRetract.ASKING_MAC)
+            onAskingMac()
+            val answer = SessionStore.askMacToRetractReply(interventionId)
+            if (creds != credentials()) return outcome
+            _retractNotes.value = _retractNotes.value - interventionId
+            outcome = ReplyRetract.afterMac(answer)
+        }
+        // After a wait on the Mac (up to 20 s) the reply may have moved on: newer news is never undone.
+        val (next, note) = if (chained) ReplyDelivery.afterMacFollowUp(_deliveries.value[interventionId], prev, outcome, Instant.now())
+        else ReplyDelivery.afterRetract(prev, outcome, Instant.now())
+        if (next != null) setDelivery(interventionId, next)
+        if (note != null) _retractNotes.value = _retractNotes.value + (interventionId to note)
+        if (outcome is ReplyRetract.Outcome.PageGone) applyClose(interventionId, _recentCloseReasons.value[interventionId])
+        // Nothing live, too late or unsure: the relay's own record says what the reply became.
+        if (outcome == ReplyRetract.Outcome.NothingToDelete || outcome is ReplyRetract.Outcome.TooLate || outcome == ReplyRetract.Outcome.CouldntTakeBack) {
+            scope.launch { refreshInbox() }
+        }
+        return outcome
+    }
+
+    /** Deletes a reply the Mac holds for a rate limit: `retract {interventionId}`, answered through [macRetractAnswered]. */
+    fun deleteHeldReply(interventionId: String) {
+        val prev = _deliveries.value[interventionId]
+        if (prev !is ReplyDelivery.HeldOnMac) return
+        heldReplyPrev[interventionId] = prev
+        setDelivery(interventionId, ReplyDelivery.Retracting)
+        SessionStore.retractReply(interventionId)
+    }
+
+    /** The Mac answered (or didn't, in 20 s) a retract for a reply it holds. */
+    fun macRetractAnswered(interventionId: String, outcome: MacRetract.Outcome) {
+        val prev = heldReplyPrev.remove(interventionId) ?: _deliveries.value[interventionId]?.takeIf { it != ReplyDelivery.Retracting }
+        val (next, note) = ReplyDelivery.afterMacRetract(prev, outcome)
+        if (next != null) setDelivery(interventionId, next)
+        if (note != null) _retractNotes.value = _retractNotes.value + (interventionId to note)
+    }
+
+    private suspend fun simulateDemoRetract(id: String): ReplyRetract.Outcome {
+        val prev = _deliveries.value[id]
+        updateDeliveries { it[id] = ReplyDelivery.Retracting }
+        delay(700)
+        val (next, _) = ReplyDelivery.afterRetract(prev, ReplyRetract.Outcome.Deleted(), Instant.now())
+        updateDeliveries { if (next != null) it[id] = next else it.remove(id) }
+        return ReplyRetract.Outcome.Deleted()
     }
 
     /**
@@ -900,11 +1007,9 @@ object RelayClient {
             "reply.result" -> {
                 val id = payload.str("interventionId") ?: return
                 val detail = payload.str("detail")?.takeIf { it.isNotEmpty() }
-                if (payload.bool("success") == true) {
-                    setDelivery(id, ReplyDelivery.Delivered(detail))
-                } else {
-                    setDelivery(id, ReplyDelivery.Failed(detail ?: "Your Mac couldn't deliver the reply."))
-                }
+                // A delete (method "retracted", with or without `cancelled`) is never a failure, and a hold the
+                // Mac took until a rate limit resets ("held_until_reset") is never a delivery.
+                setDelivery(id, ReplyResultFrame.delivery(payload.bool("success") == true, payload.str("method"), detail, payload.bool("cancelled") == true))
             }
             // Unknown frame types are ignored (PROTOCOL.md §2).
             else -> Unit

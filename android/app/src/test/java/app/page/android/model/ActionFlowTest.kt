@@ -21,8 +21,9 @@ class ActionFlowTest {
         assertEquals(PulsePress.TAP, PulsePress.onRelease(0.1))
         assertEquals("dead zone is exclusive", PulsePress.TAP, PulsePress.onRelease(0.3))
         assertEquals(PulsePress.ABANDONED_HOLD, PulsePress.onRelease(0.31))
-        assertEquals(PulsePress.ABANDONED_HOLD, PulsePress.onRelease(1.49))
-        assertEquals("a full ring completes", PulsePress.COMPLETED_HOLD, PulsePress.onRelease(1.5))
+        assertEquals("the old 1.5 s hold no longer stops everything", PulsePress.ABANDONED_HOLD, PulsePress.onRelease(1.5))
+        assertEquals(PulsePress.ABANDONED_HOLD, PulsePress.onRelease(9.99))
+        assertEquals("a full ring completes, after 10 s", PulsePress.COMPLETED_HOLD, PulsePress.onRelease(10.0))
     }
 
     private val nine: List<LiveSession> = (1..9).map { i ->

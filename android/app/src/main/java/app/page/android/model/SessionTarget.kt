@@ -78,8 +78,11 @@ data class SessionTarget(
 
 object RoomSend {
     sealed interface Decision {
-        /** Type into this session (text plus Return), carrying what the room showed. */
-        data class Input(val target: SessionTarget) : Decision
+        /**
+         * Type into this session (text plus Return), carrying what the room showed. [sendWhen] is the busy-session
+         * choice: NOW goes after the 10 s countdown, WHEN_FINISHED is held by the Mac (`hold: true`).
+         */
+        data class Input(val target: SessionTarget, val sendWhen: SendWhen = SendWhen.NOW) : Decision
 
         /** The page's own path: Esc, then the text, then Return. */
         data object TellInstead : Decision
@@ -96,6 +99,8 @@ object RoomSend {
     fun decide(
         mode: RoomComposerMode, text: String, shown: LiveSession, routeSessionId: String,
         live: LiveSession?, ended: Boolean, hasReplyAction: Boolean, macName: String,
+        /** The busy-session choice as the composer shows it; null for an idle session (sent at once). */
+        choice: SendChoice.Plan? = null,
     ): Decision {
         if (shown.id != routeSessionId) {
             return Decision.Refuse("This room is showing a different session than it would type into, so nothing was sent. Close it and open the session again.")
@@ -108,11 +113,17 @@ object RoomSend {
                 if (!hasReplyAction) Decision.Refuse("This prompt's page isn't loaded yet, so nothing was sent. Answer on your Mac, or try again in a moment.")
                 else if (Sw.trimWsNl(text).isEmpty()) Decision.Refuse(SessionComposer.Problem.Empty.message) else Decision.TellInstead
             }
-            RoomComposerMode.Steer, RoomComposerMode.NextTask -> {
+            RoomComposerMode.Steer, RoomComposerMode.NextTask, RoomComposerMode.HoldOnly -> {
                 if (ended || live == null) return Decision.Refuse("This session isn't on your Mac's list any more, so nothing was sent.")
                 val v = SessionComposer.validate(text)
                 if (v is SessionComposer.Validation.Bad) return Decision.Refuse(v.problem.message)
-                Decision.Input(SessionTarget.of(shown, macName))
+                // Where nothing can be typed now, the only way is to hold it; never a "now" the Mac would refuse.
+                val sendWhen = when {
+                    mode == RoomComposerMode.HoldOnly -> SendWhen.WHEN_FINISHED
+                    mode == RoomComposerMode.Steer -> choice?.selected ?: SendWhen.NOW
+                    else -> SendWhen.NOW
+                }
+                Decision.Input(SessionTarget.of(shown, macName), sendWhen)
             }
         }
     }
@@ -158,8 +169,20 @@ data class SendReceipt(
     /** The target (or what was not done to it), as a second line. */
     val detail: String?,
     val tone: Tone,
+    /** The one thing the receipt lets the person do (Undo a countdown, Delete a held message). */
+    val action: Action? = null,
+    /** A countdown's seconds left as a fraction of its 10 s (1 .. 0), for the ring beside it; null otherwise. */
+    val progress: Double? = null,
+    /**
+     * What TalkBack reads for a receipt whose words tick (a countdown, an upload's percentage): the same while it
+     * ticks, so its live region speaks once instead of every second. null: the receipt's own words.
+     */
+    val spoken: String? = null,
 ) {
-    enum class Tone { WORKING, GOOD, PROBLEM }
+    /** HELD: the Mac holds it (amber, waiting). NOTE: news that is neither good nor bad ("Deleted — not sent"). */
+    enum class Tone { WORKING, GOOD, PROBLEM, HELD, NOTE }
+
+    enum class Action(val label: String) { UNDO("Undo"), DELETE("Delete") }
 
     companion object {
         /** Typed and queued fade after this long; a problem stays until dismissed or replaced. */
@@ -167,15 +190,52 @@ data class SendReceipt(
         const val problemVisibleFor: Double = 10 * 60.0
 
         /** The receipt for the newest message sent from this room, null once it is no longer news. Pure. */
-        fun build(c: SentSessionCommand?, agent: String, now: Instant): SendReceipt? {
+        fun build(
+            c: SentSessionCommand?, agent: String, now: Instant,
+            /** The next message still counting down before its POST (nothing has left the phone). */
+            scheduled: ScheduledSend? = null,
+            /** Where a delete of the held message stands. */
+            delete: HeldDelete? = null,
+            /** The held message can be deleted now (the Mac says it can take it back; see [QueuedDelete.heldMessage]). */
+            canDelete: Boolean = false,
+            /** A photo message's upload, while its pieces go. */
+            uploading: PhotoProgress? = null,
+        ): SendReceipt? {
+            if (scheduled != null) {
+                return SendReceipt(
+                    scheduled.id, SendCountdown.headline(scheduled, now), scheduled.target?.route, Tone.WORKING, Action.UNDO,
+                    progress = SendCountdown.remaining(scheduled, now) / SendCountdown.SECONDS,
+                    spoken = SendCountdown.SPOKEN,
+                )
+            }
             if (c == null || c.kind != SessionCommandKind.INPUT) return null
             val age = now.secondsSince(c.sentAt)
             val route = c.target?.route
             val place = route ?: "the session"
             return when (val s = c.state) {
-                SessionDeliveryState.Sending -> SendReceipt(c.clientId, "Sending to $place…", null, Tone.WORKING)
-                is SessionDeliveryState.Typed -> if (age < goodVisibleFor) SendReceipt(c.clientId, "Typed into $place", null, Tone.GOOD) else null
-                is SessionDeliveryState.Queued -> if (age < goodVisibleFor) SendReceipt(c.clientId, "Queued — $agent reads it after this step", route, Tone.GOOD) else null
+                SessionDeliveryState.Sending ->
+                    if (c.photos > 0) SendReceipt(c.clientId, "Sending photos to $place…", uploading?.line(c.photos, c.target?.host), Tone.WORKING, progress = uploading?.fraction, spoken = "Sending photos to $place…")
+                    else SendReceipt(c.clientId, "Sending to $place…", null, Tone.WORKING)
+                // A photo isn't typed: the Mac's own sentence ("Sent 2 photos to Claude in tmux pane %3"), amber when Claude got fewer than were sent.
+                is SessionDeliveryState.Typed ->
+                    if (age >= goodVisibleFor) null
+                    else if (c.photos > 0) SendReceipt(
+                        c.clientId, s.detail ?: "Sent ${PhotoText.chip(c.photos)} to $place", null,
+                        if (PhotoReceipt.partial(s.attached, c.photos)) Tone.PROBLEM else Tone.GOOD,
+                    )
+                    else SendReceipt(c.clientId, "Typed into $place", null, Tone.GOOD)
+                // Typed into the agent's own queue: said plainly, since there is nothing to delete.
+                is SessionDeliveryState.Queued -> if (age < goodVisibleFor) SendReceipt(c.clientId, QueuedDelete.alreadyWithAgent(agent), route, Tone.GOOD) else null
+                // Held by the Mac until the turn ends: stays until it is typed, deleted or settled, however long.
+                is SessionDeliveryState.Held -> when {
+                    delete is HeldDelete.Deleting -> SendReceipt(c.clientId, "Deleting…", route, Tone.WORKING)
+                    else -> SendReceipt(
+                        c.clientId, if (s.typing) "Typing it now" else HeldMessages.heldHeadline(s.detail, agent),
+                        delete?.text ?: s.note ?: route, Tone.HELD, if (canDelete) Action.DELETE else null,
+                    )
+                }
+                is SessionDeliveryState.Deleted -> if (age < problemVisibleFor) SendReceipt(c.clientId, s.detail ?: HeldMessages.DELETED_COPY, route, Tone.NOTE) else null
+                is SessionDeliveryState.CheckSession -> if (age < problemVisibleFor) SendReceipt(c.clientId, s.message, "Target: $place", Tone.PROBLEM) else null
                 is SessionDeliveryState.Refused -> if (age < problemVisibleFor) SendReceipt(c.clientId, "Refused: ${s.message}", "Target: $place", Tone.PROBLEM) else null
                 is SessionDeliveryState.Failed -> if (age < problemVisibleFor) SendReceipt(c.clientId, "Not sent: ${s.message}", "Target: $place", Tone.PROBLEM) else null
                 SessionDeliveryState.NoAnswer -> if (age < problemVisibleFor) {
@@ -194,7 +254,8 @@ data class SendReceipt(
             return when (c.state) {
                 SessionDeliveryState.Sending -> "Stopping $place…"
                 is SessionDeliveryState.Typed, is SessionDeliveryState.Queued -> "Stopped · pressed Esc in $place"
-                is SessionDeliveryState.Refused, is SessionDeliveryState.Failed, SessionDeliveryState.NoAnswer ->
+                is SessionDeliveryState.Refused, is SessionDeliveryState.Failed, SessionDeliveryState.NoAnswer,
+                is SessionDeliveryState.Held, is SessionDeliveryState.Deleted, is SessionDeliveryState.CheckSession ->
                     "Couldn't stop $place: ${c.state.explanation(SessionCommandKind.INTERRUPT, agent) ?: ""}"
             }
         }

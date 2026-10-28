@@ -26,6 +26,8 @@ class PageApplication : Application() {
         ActivityStore.init()
         RelayClient.notifier = PageNotifications
         SessionStore.reloadKey()
+        // What was still counting down when the app last died was never sent: it comes back as a draft.
+        SessionStore.restorePersistedOutbox()
         PairingStore.init()
         BackgroundConnection.init()
         NotificationAccess.refresh(this)

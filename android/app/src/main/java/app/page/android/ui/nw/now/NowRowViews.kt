@@ -2,6 +2,9 @@
 
 package app.page.android.ui.nw.now
 
+import androidx.compose.animation.core.EaseOut
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -29,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -47,6 +51,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import app.page.android.model.ArmSpec
 import app.page.android.model.CardOutcome
 import app.page.android.model.ChipKind
 import app.page.android.model.NWDestination
@@ -55,6 +60,7 @@ import app.page.android.model.PendingAction
 import app.page.android.model.ReceiptThreadInput
 import app.page.android.model.RowAction
 import app.page.android.model.TurnSummaryChips
+import app.page.android.model.plusSeconds
 import app.page.android.model.waitingText
 import app.page.android.ui.nw.components.NWArmRing
 import app.page.android.ui.nw.components.NWButton
@@ -62,18 +68,23 @@ import app.page.android.ui.nw.components.NWButtonKind
 import app.page.android.ui.nw.components.NWChip
 import app.page.android.ui.nw.components.NWGlassCard
 import app.page.android.ui.nw.components.NWHoldButton
+import app.page.android.ui.nw.components.NWReceiptAction
 import app.page.android.ui.nw.components.NWReceiptLine
 import app.page.android.ui.nw.components.NWReceiptThreadView
 import app.page.android.ui.nw.components.NWTurnChip
 import app.page.android.ui.nw.components.color
 import app.page.android.ui.nw.components.nwIcon
 import app.page.android.ui.nw.components.rememberHaptics
+import app.page.android.ui.nw.components.rememberNWNow
 import app.page.android.ui.nw.components.symbol
 import app.page.android.ui.nw.components.tint
+import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.NW
 import app.page.android.ui.nw.theme.Rgba
 import java.time.Instant
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 // The Now stream's building blocks: the Decide cards shaped by reversibility, the swipeable Undoable row, Look and
 // Review cards. They draw a NowRow and hand every action to a closure; the screen that hosts them routes it
@@ -84,6 +95,10 @@ data class RowStatus(
     val outcome: CardOutcome = CardOutcome.None,
     val pending: PendingAction? = null,
     val receipt: ReceiptThreadInput? = null,
+    /** Delete a reply that is queued and not yet sent (at the relay, or held on the Mac for a rate limit); null when it can't be. */
+    val onDelete: (() -> Unit)? = null,
+    /** What the last delete answered ("Too late — your Mac already has it"). */
+    val note: String? = null,
 )
 
 class RowActions(
@@ -127,7 +142,16 @@ private fun CardTopLine(row: NowRow, now: Instant) {
 fun NWOutcomeStrip(status: RowStatus, now: Instant, onCancel: () -> Unit, modifier: Modifier = Modifier) {
     val receipt = status.receipt
     if (receipt != null && !receipt.isEmpty && status.outcome != CardOutcome.None) {
-        NWReceiptThreadView(receipt, modifier, onTap = onCancel)
+        if (status.onDelete == null && status.note == null) {
+            NWReceiptThreadView(receipt, modifier, onTap = onCancel)
+        } else {
+            Column(modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                NWReceiptThreadView(receipt, Modifier, onTap = onCancel)
+                status.note?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textTertiary.color, modifier = Modifier.padding(horizontal = 4.dp)) }
+                // Queued, not yet sent: Delete takes it back (never offered where it can't work).
+                status.onDelete?.let { NWReceiptAction("Delete", it, tone = NW.Palette.red.mixed(NW.Palette.white, 0.2), hint = "Takes this reply back. Nothing is typed.") }
+            }
+        }
         return
     }
     when (val o = status.outcome) {
@@ -143,12 +167,17 @@ fun NWOutcomeStrip(status: RowStatus, now: Instant, onCancel: () -> Unit, modifi
         }
         is CardOutcome.Delivered -> NWReceiptLine("Delivered · ${o.detail}", modifier)
         is CardOutcome.Problem -> NWReceiptLine(o.why, modifier.clickable(role = Role.Button, onClickLabel = "Open the decision to try again", onClick = onCancel), failed = true)
+        is CardOutcome.Note -> NWReceiptLine(o.text, modifier)
     }
 }
 
 @Composable
 private fun ArmingStrip(p: PendingAction, now: Instant, onCancel: () -> Unit, modifier: Modifier) {
-    val phase = p.phase(now)
+    // The ring keeps its own clock, 30 fps while it runs (iOS draws it in its own 1/30 s TimelineView), since the
+    // screen around it may tick only every few seconds (the Room). Remove animations still counts down, at 10 Hz.
+    val tick by rememberNWNow(p.startedAt.plusSeconds(ArmSpec.duration), fastMs = if (LocalReduceMotion.current) 100 else 33)
+    val at = maxOf(now, tick)
+    val phase = p.phase(at)
     val progress = (phase as? PendingAction.Phase.Arming)?.progress ?: 1.0
     val shape = RoundedCornerShape(NW.Radius.button)
     Row(
@@ -160,7 +189,7 @@ private fun ArmingStrip(p: PendingAction, now: Instant, onCancel: () -> Unit, mo
     ) {
         NWArmRing(progress, size = 26.dp)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(p.armLabel(now), style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color)
+            Text(p.armLabel(at), style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color)
             p.preview?.let { Text(it, style = NW.Typo.monoMicro, color = NW.Palette.textTertiary.color, maxLines = 2) }
         }
         Text("Cancel", style = NW.Typo.captionStrong, color = NW.Palette.amber.color)
@@ -262,6 +291,15 @@ fun NWUndoableRow(row: NowRow, now: Instant, status: RowStatus, actions: RowActi
     var drag by remember { mutableFloatStateOf(0f) }
     var passed by remember { mutableStateOf(false) }
     val approve by rememberUpdatedState(actions.approve)
+    val reduce by rememberUpdatedState(LocalReduceMotion.current)
+    val scope = rememberCoroutineScope()
+    var settle by remember { mutableStateOf<Job?>(null) }
+    // Let go, the row eases home over 0.2 s (iOS easeOut); Remove animations puts it straight back.
+    fun release() {
+        passed = false
+        if (reduce) { drag = 0f; return }
+        settle = scope.launch { animate(drag, 0f, animationSpec = tween(200, easing = EaseOut)) { v, _ -> drag = v } }
+    }
     val x = fixedDrag ?: drag
     val shape = RoundedCornerShape(NW.Radius.row)
     if (status.outcome != CardOutcome.None) {
@@ -298,13 +336,14 @@ fun NWUndoableRow(row: NowRow, now: Instant, status: RowStatus, actions: RowActi
                 .pointerInput(row.canSwipeApprove) {
                     if (!row.canSwipeApprove) return@pointerInput
                     detectHorizontalDragGestures(
+                        // A new drag catches the row wherever its way home has got to.
+                        onDragStart = { settle?.cancel() },
                         onDragEnd = {
                             val go = drag >= commitAt
-                            passed = false
-                            drag = 0f
+                            release()
                             if (go) approve()
                         },
-                        onDragCancel = { drag = 0f; passed = false },
+                        onDragCancel = { release() },
                         onHorizontalDrag = { change, dx ->
                             change.consume()
                             drag = (drag + dx).coerceIn(0f, maxDrag)

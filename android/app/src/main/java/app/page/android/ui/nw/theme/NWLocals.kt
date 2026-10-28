@@ -10,13 +10,15 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalContext
 import app.page.android.model.CardGlow
+import app.page.android.model.DaypartWeights
 import java.time.Instant
 
-// The environment Night Watch surfaces read: the Card glow setting, Reduce Motion, and the render harness's
-// pins (iOS NWTheme.swift `EnvironmentValues`). Each is provided once at the root; nothing below draws its own.
+// The environment Night Watch surfaces read: the Card glow setting, Reduce Motion, the time of day, and the render
+// harness's pins (iOS NWTheme.swift `EnvironmentValues`). Each is provided once at the root; nothing below draws its own.
 
 /** The Card glow setting. The one place every glass surface reads it from; set once at the app root. Off unless the user turns it on. */
 val LocalCardGlow = staticCompositionLocalOf { CardGlow.default }
@@ -36,6 +38,13 @@ val LocalFixedPhase = staticCompositionLocalOf<Double?> { null }
 
 /** When set, the arm ring and ages use this clock instead of the real one: the render harness pins it so a ring is drawn part-way. */
 val LocalFixedNow = staticCompositionLocalOf<Instant?> { null }
+
+/**
+ * The time of day the Now and Lanes skies are drawn at. The root's ticker ([rememberDaypartTicker]) reads the local
+ * clock every two minutes; anything without one (widgets, the gallery, previews) draws nighttime, today's aurora, and
+ * the render harness pins it (`page_daytime`). Dynamic, so a tick recomposes only the skies that read it.
+ */
+val LocalDaypart = compositionLocalOf { DaypartWeights.NIGHTTIME }
 
 /**
  * A signature motion pinned at one moment, for the render harness: the views that play [kind] draw the frame

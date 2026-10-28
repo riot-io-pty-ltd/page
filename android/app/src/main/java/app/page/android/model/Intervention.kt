@@ -117,6 +117,11 @@ data class Intervention(
     val deliveryDetail: String? = null,
     val deliveryMethod: String? = null,
     /**
+     * When the relay handed the reply to a Mac socket (not just queued it). A reply that is `pending` with none, on a
+     * page no blocking hook polls, is still waiting in the relay's queue for an offline Mac.
+     */
+    val deliveryForwardedAt: Instant? = null,
+    /**
      * Worker-managed: a page from a v1 blocking hook (`hook-` id). The hook
      * polls for the answer itself and can only apply Approve or Deny.
      */
@@ -179,6 +184,7 @@ data class Intervention(
                 deliveryStatus = o.str("deliveryStatus"),
                 deliveryDetail = o.str("deliveryDetail"),
                 deliveryMethod = o.str("deliveryMethod"),
+                deliveryForwardedAt = PageDate.parseAny(o["deliveryForwardedAt"]),
                 hookBlocking = o.bool("hookBlocking"),
             )
         }

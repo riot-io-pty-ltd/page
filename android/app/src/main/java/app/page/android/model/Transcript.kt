@@ -20,6 +20,8 @@ data class TranscriptEntry(
     val at: Instant?,
     /** Tool name for `tool` rows ("Bash"). */
     val tool: String?,
+    /** `user` entries only: how many photos the message carried (the Mac sends the count, never the pictures). */
+    val images: Int? = null,
 ) {
     companion object {
         fun decode(element: JsonElement): TranscriptEntry? {
@@ -34,6 +36,7 @@ data class TranscriptEntry(
                 text = (c.str("text") ?: "").capped(2400),
                 at = PageDate.parseAny(c["at"]),
                 tool = c.str("tool")?.takeIf { it.isNotEmpty() }?.capped(40),
+                images = c.int("images")?.takeIf { it in 1..PhotoLimits.MAX_PHOTOS },
             )
         }
     }

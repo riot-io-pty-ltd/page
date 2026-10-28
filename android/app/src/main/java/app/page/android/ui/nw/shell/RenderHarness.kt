@@ -2,6 +2,7 @@ package app.page.android.ui.nw.shell
 
 import androidx.compose.runtime.Composable
 import app.page.android.model.CardGlow
+import app.page.android.model.Daypart
 import app.page.android.ui.nw.theme.NWMotionPin
 import java.time.Instant
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * What the debug render harness (the demo's `page_render` launch extra) tells the app to pin, so a screenshot of
  * one Night Watch screen is the same every time: a fixed aurora phase, a fixed "now", a glow setting, a motion
- * pinned at one moment. Plain state: nothing here is ever set outside the debug build's Demo (a release build has
+ * pinned at one moment, the time of day. Plain state: nothing here is ever set outside the debug build's Demo (a release build has
  * no way to set it), and nothing here sends or stores anything. (iOS RenderHarness.swift `-NWRender`.)
  */
 object RenderHarness {
@@ -41,7 +42,33 @@ object RenderHarness {
         val pinnedArrival: String? = null,
         /** Now: these rows are drawn folding away (their reply confirmed), as if their pages had just closed. */
         val ghosts: Set<String> = emptySet(),
+        /**
+         * The local minute of the day (0 ..< 1440) the Now and Lanes skies are drawn at, never an instant, so an
+         * emulator in any time zone draws the same sky. null is 01:12, nighttime, so every frame without it is unchanged.
+         */
+        val dayTime: Double? = null,
     )
+
+    /**
+     * A time of day as a minute (the demo's `page_daytime`): a phase's name (the middle of its core: earlyMorning,
+     * morning, afternoon, nighttime), "HH:MM" (00:00 to 23:59), or a plain minute 0 ..< 1440. Anything else is null.
+     * (iOS RenderArguments.minuteOfDay.) Pure.
+     */
+    fun minuteOfDay(s: String?): Double? {
+        if (s == null) return null
+        Daypart.of(s)?.let { return it.coreMinute }
+        val parts = s.split(":")
+        if (parts.size == 2) {
+            val (hh, mm) = parts
+            if (hh.isEmpty() || hh.length > 2 || mm.length != 2 || !hh.all { it.isDigit() } || !mm.all { it.isDigit() }) return null
+            val h = hh.toInt()
+            val m = mm.toInt()
+            if (h !in 0..23 || m !in 0..59) return null
+            return (h * 60 + m).toDouble()
+        }
+        val m = s.toDoubleOrNull() ?: return null
+        return if (m.isFinite() && m >= 0 && m < 1440) m else null
+    }
 
     private val _spec = MutableStateFlow<Spec?>(null)
     val spec: StateFlow<Spec?> = _spec.asStateFlow()

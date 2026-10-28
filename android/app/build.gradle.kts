@@ -94,6 +94,7 @@ dependencies {
     implementation(libs.glance.appwidget)
 
     testImplementation(libs.junit)
+    testImplementation(project(":photo-testkit"))
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)

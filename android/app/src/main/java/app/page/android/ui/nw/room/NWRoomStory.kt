@@ -25,11 +25,13 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
 import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -58,7 +60,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.page.android.model.AgentCharacter
 import app.page.android.model.ChipKind
+import app.page.android.model.HeldDelete
+import app.page.android.model.HeldMessages
+import app.page.android.model.QueuedDelete
 import app.page.android.model.NowRow
+import app.page.android.model.PhotoText
 import app.page.android.model.SentSessionCommand
 import app.page.android.model.SessionCommandKind
 import app.page.android.model.SessionDeliveryState
@@ -67,6 +73,7 @@ import app.page.android.model.StoryStep
 import app.page.android.ui.nw.components.NWAnimated
 import app.page.android.ui.nw.components.NWSpinner
 import app.page.android.ui.nw.components.NWAnswerHost
+import app.page.android.ui.nw.components.NWReceiptAction
 import app.page.android.ui.nw.components.nwIcon
 import app.page.android.ui.nw.now.NWDecideCard
 import app.page.android.ui.nw.now.NWLookCard
@@ -126,8 +133,12 @@ fun NWRoomStory(data: SessionRoomData, actions: SessionRoomActions, modifier: Mo
 private fun BlockView(block: StoryBlock, isLast: Boolean, data: SessionRoomData, actions: SessionRoomActions, opened: Set<String>, toggle: (String) -> Unit) {
     when (block) {
         is StoryBlock.Divider -> Divider(block.label)
-        is StoryBlock.User -> UserBubble(block.entry.text, block.delivery, false, data.character.name, data.session.interventionId, actions)
-        is StoryBlock.Pending -> UserBubble(block.command.text, block.command, true, data.character.name, data.session.interventionId, actions)
+        is StoryBlock.User -> {
+            // A message with photos reads as its words (Claude Code's "[Image #1]" chips are replaced by a chip of ours).
+            val photos = PhotoText.count(block.entry.text, block.entry.images)
+            UserBubble(if (photos > 0) PhotoText.caption(block.entry.text) else block.entry.text, photos, block.delivery, false, data, actions)
+        }
+        is StoryBlock.Pending -> UserBubble(block.command.text, block.command.photos, block.command, true, data, actions)
         is StoryBlock.Assistant -> {
             val clip = androidx.compose.ui.platform.LocalClipboardManager.current
             var menu by remember { mutableStateOf(false) }
@@ -154,7 +165,7 @@ private fun Pinned(row: NowRow, data: SessionRoomData, actions: SessionRoomActio
     val status = RowStatus(data.pageOutcome, data.pagePending, null)
     val ra = RowActions(
         open = { actions.openDecision(row.id) }, approve = { actions.approve(row) }, holdComplete = { actions.holdComplete(row) }, deny = { actions.deny(row) },
-        looksGood = { actions.looksGood(row) }, steer = { actions.openDecision(row.id) }, cancel = { actions.cancel(row.id) },
+        looksGood = { actions.looksGood(row) }, steer = { actions.steer(row.id) }, cancel = { actions.cancel(row.id) },
     )
     when {
         row.section == NowRow.Section.DECIDE && row.chip == ChipKind.QUESTION -> {
@@ -195,25 +206,31 @@ private fun Divider(label: String) {
 
 /** Your message: right-aligned, with its delivery state underneath. A refusal says why and, for a waiting prompt, offers the decision. */
 @Composable
-private fun UserBubble(text: String, delivery: SentSessionCommand?, pending: Boolean, agent: String, pageId: String?, actions: SessionRoomActions) {
+private fun UserBubble(text: String, photos: Int, delivery: SentSessionCommand?, pending: Boolean, data: SessionRoomData, actions: SessionRoomActions) {
+    val agent = data.character.name
+    val pageId = data.session.interventionId
     val clip = androidx.compose.ui.platform.LocalClipboardManager.current
     var menu by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
             Box(Modifier.width(48.dp))
             @OptIn(ExperimentalFoundationApi::class)
-            Text(
-                text, style = NW.Typo.subline, color = NW.Palette.textPrimary.color,
-                modifier = Modifier.weight(1f, fill = false)
+            Column(
+                Modifier.weight(1f, fill = false)
                     .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 8.dp))
                     .background(NW.Palette.sky.mixed(NW.Palette.backgroundDeep, if (pending) 0.88 else 0.74).color)
-                    .combinedClickable(onLongClickLabel = "Copy", onLongClick = { menu = true }, onClick = {})
+                    .combinedClickable(onLongClickLabel = if (text.isEmpty()) null else "Copy", onLongClick = { if (text.isNotEmpty()) menu = true }, onClick = {})
                     .padding(horizontal = 18.dp, vertical = 14.dp)
                     .semantics(mergeDescendants = true) {
-                        contentDescription = "You: $text"
+                        contentDescription = "You: " + listOf(text, if (photos > 0) PhotoText.chip(photos) else "").filter { it.isNotEmpty() }.joinToString(", ")
                         delivery?.let { stateDescription = it.state.spokenBubbleStatus(SessionCommandKind.INPUT, agent) }
                     },
-            )
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // "2 photos": the pictures themselves never come back from the Mac, only how many there were.
+                if (photos > 0) PhotosChip(photos)
+                if (text.isNotEmpty()) Text(text, style = NW.Typo.subline, color = NW.Palette.textPrimary.color)
+            }
             DropdownMenu(menu, { menu = false }) { DropdownMenuItem({ Text("Copy") }, { menu = false; clip.setText(androidx.compose.ui.text.AnnotatedString(text)); actions.copy(text) }) }
         }
         if (delivery != null) {
@@ -222,26 +239,68 @@ private fun UserBubble(text: String, delivery: SentSessionCommand?, pending: Boo
                 SessionDeliveryState.Sending -> NW.Palette.textTertiary
                 is SessionDeliveryState.Typed -> NW.Palette.teal
                 is SessionDeliveryState.Queued -> NW.Palette.textSecondary
+                is SessionDeliveryState.Deleted -> NW.Palette.textTertiary
                 else -> NW.Palette.amber
             }
-            val explanation = state.bubbleExplanation(SessionCommandKind.INPUT, agent)
+            // Photos going up say how far; a sent message says what the Mac did with them.
+            val uploading = data.uploads[delivery.clientId]
+            val explanation = when {
+                state == SessionDeliveryState.Sending && uploading != null && photos > 0 -> uploading.line(photos, delivery.target?.host)
+                state is SessionDeliveryState.Typed && photos > 0 -> state.detail
+                // Held: the headline here; why the last try didn't type it is its own quieter line below.
+                state is SessionDeliveryState.Held && !state.typing -> HeldMessages.heldHeadline(state.detail, agent)
+                else -> state.bubbleExplanation(SessionCommandKind.INPUT, agent)
+            }
+            // A held message: its delete's answer, and Delete while the Mac holds it and can take it back.
+            val delete = data.deletes[delivery.clientId]
+            val canDelete = QueuedDelete.heldMessage(state, data.caps, delete)
             Column(Modifier.padding(start = 56.dp).clearAndSetSemantics {}, horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                     when (state) {
                         SessionDeliveryState.Sending -> CircularProgressIndicator(Modifier.size(10.dp), color = color.color, strokeWidth = 1.5.dp)
                         is SessionDeliveryState.Typed -> Icon(Icons.Outlined.Check, null, tint = color.color, modifier = Modifier.size(12.dp))
-                        is SessionDeliveryState.Queued -> Icon(Icons.Outlined.Schedule, null, tint = color.color, modifier = Modifier.size(12.dp))
+                        is SessionDeliveryState.Queued, is SessionDeliveryState.Held -> Icon(Icons.Outlined.Schedule, null, tint = color.color, modifier = Modifier.size(12.dp))
+                        is SessionDeliveryState.Deleted -> Icon(Icons.Outlined.Close, null, tint = color.color, modifier = Modifier.size(12.dp))
                         SessionDeliveryState.NoAnswer -> Icon(Icons.Outlined.HelpOutline, null, tint = color.color, modifier = Modifier.size(12.dp))
                         else -> Icon(Icons.Outlined.ErrorOutline, null, tint = color.color, modifier = Modifier.size(12.dp))
                     }
-                    Text(state.label(SessionCommandKind.INPUT), style = NW.Typo.captionStrong, color = color.color)
+                    Text(state.label(SessionCommandKind.INPUT, photos), style = NW.Typo.captionStrong, color = color.color)
                 }
                 explanation?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textTertiary.color, textAlign = TextAlign.End) }
-                if (state is SessionDeliveryState.Refused && state.reason == "waiting" && pageId != null) {
-                    Text("Open decision", style = NW.Typo.bodyStrong, color = NW.Palette.amber.color, modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { actions.openDecision(pageId) }.padding(horizontal = 8.dp).padding(top = 12.dp))
+                if (state is SessionDeliveryState.Held && !state.typing) state.note?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textQuiet.color, textAlign = TextAlign.End) }
+                if (state is SessionDeliveryState.Held && delivery.fromOtherDevice) {
+                    Text("Sent from another device", style = NW.Typo.caption, color = NW.Palette.textQuiet.color, textAlign = TextAlign.End)
+                }
+                when {
+                    delete is HeldDelete.Deleting -> Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(10.dp), color = NW.Palette.textTertiary.color, strokeWidth = 1.5.dp)
+                        Text("Deleting…", style = NW.Typo.caption, color = NW.Palette.textTertiary.color)
+                    }
+                    // A delete that could not happen says why, in the Mac's own words.
+                    delete?.text != null && state is SessionDeliveryState.Held -> Text(delete.text!!, style = NW.Typo.caption, color = NW.Palette.amber.color, textAlign = TextAlign.End)
                 }
             }
+            // The things to do are outside the silenced status column, so TalkBack reaches them.
+            if (canDelete) NWReceiptAction(
+                "Delete", { actions.deleteHeld(delivery.clientId) }, Modifier.padding(start = 56.dp), tone = NW.Palette.red.mixed(NW.Palette.white, 0.2),
+                hint = "Takes this held message back. Nothing is typed.",
+            )
+            if (state is SessionDeliveryState.Refused && state.reason == "waiting" && pageId != null) {
+                Text("Open decision", style = NW.Typo.bodyStrong, color = NW.Palette.amber.color, modifier = Modifier.heightIn(min = 48.dp).clickable(role = Role.Button) { actions.openDecision(pageId) }.padding(horizontal = 8.dp).padding(top = 12.dp))
+            }
         }
+    }
+}
+
+/** "2 photos" with a picture glyph, at the top of a bubble whose message carried photos. */
+@Composable
+private fun PhotosChip(count: Int) {
+    Row(
+        Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.10f)).padding(horizontal = 10.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Outlined.Image, null, tint = NW.Palette.textSecondary.color, modifier = Modifier.size(14.dp))
+        Text(PhotoText.chip(count), style = NW.Typo.captionStrong, color = NW.Palette.textSecondary.color)
     }
 }
 

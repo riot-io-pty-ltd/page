@@ -22,7 +22,8 @@ data class NWLanesLight(
     val stars: Double = 1.0,
     /**
      * How much of the aurora behind the list shows: it fades in with the dusk, holds through the night of a pause,
-     * and fades out as the dawn settles. 0 in the day, when only the shell's own sky shows.
+     * and fades out as the dawn settles. 0 in the day, when the day band (`LanesAurora`) shows instead and hands over
+     * to this as the dusk rises.
      */
     val cover: Double = 0.0,
 )
@@ -37,8 +38,17 @@ data class NWLanesLight(
  *
  * `now` is the wall clock while the screen is live, and null when it is drawn still (Remove animations, a harness
  * frame with no motion pinned): then a pause is drawn settled and no dawn plays, every change a cut.
+ *
+ * [base] and [baseStars] are the hour's working sky and star field (`AuroraPalette.of(WORKING, daypart)`,
+ * `DaypartWeights.stars`): the dusk falls from them and the dawn rises back into them.
  */
-class LanesPowerStory(private val paused: Boolean, private val log: DuskDawnLog, laneIds: List<String>) {
+class LanesPowerStory(
+    private val paused: Boolean,
+    private val log: DuskDawnLog,
+    laneIds: List<String>,
+    private val base: AuroraPalette = AuroraPalette.working,
+    private val baseStars: Double = 1.0,
+) {
     /** Every lane as a height in the list: 0 the top lane .. 1 the bottom one. */
     private val laneHeights: Map<String, Double> = run {
         val n = max(1, laneIds.size).toDouble()
@@ -99,21 +109,21 @@ class LanesPowerStory(private val paused: Boolean, private val log: DuskDawnLog,
         return dawn.plusMillis(((lit + DawnModel.settle) * 1000).toLong())
     }
 
-    /** The light at [now]: the day (nothing drawn behind the list), the dusk falling with the band holding, or the gold dawn. */
+    /** The light at [now]: the day (nothing drawn behind the list), the dusk falling with the band holding, or the gold dawn rising back into the hour's sky. */
     fun skyLight(now: Instant?, pin: NWMotionPin?): NWLanesLight {
         duskElapsed(now, pin)?.let { d ->
             val f = DawnModel.dusk(d)
-            return NWLanesLight(AuroraPalette.working.towardNight(f.aurora), f.band, null, starField(f.aurora), cover = f.aurora)
+            return NWLanesLight(base.towardNight(f.aurora), f.band, null, starField(f.aurora, from = baseStars), cover = f.aurora)
         }
         dawnElapsed(now, pin)?.let { w ->
             val f = DawnModel.dawn(w, lastRelight)
             if (!f.finished) {
                 // Up from the night; the sweep carries the gold, the sky behind it only warms a little.
                 val sunrise = AuroraPalette.night.mixed(AuroraPalette.dawn, 0.35 * f.warmth)
-                return NWLanesLight(sunrise.mixed(AuroraPalette.working, 1 - f.aurora), f.band, f, starField(f.aurora), cover = f.aurora)
+                return NWLanesLight(sunrise.mixed(base, 1 - f.aurora), f.band, f, starField(f.aurora, from = baseStars), cover = f.aurora)
             }
         }
-        return NWLanesLight(AuroraPalette.working, 0.0, null)
+        return NWLanesLight(base, 0.0, null, stars = baseStars, cover = 0.0)
     }
 
     /**

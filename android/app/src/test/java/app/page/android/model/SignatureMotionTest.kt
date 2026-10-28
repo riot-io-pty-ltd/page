@@ -410,8 +410,8 @@ class SignatureMotionTest {
     fun holdRingTimingTicksWarmthAndCopy() {
         val stop = HoldRingSpec.stopAll
         assertTrue("pulse ring hidden at 300 ms", stop.progress(0.3) == 0.0 && !stop.isVisible(0.3))
-        assertNear("pulse ring half at 900 ms", 0.5, stop.progress(0.9))
-        assertTrue("pulse ring completes at 1.5 s (board 07)", stop.isComplete(1.5) && !stop.isComplete(1.49))
+        assertNear("pulse ring half at 5.15 s", 0.5, stop.progress(5.15))
+        assertTrue("Stop-all completes only after a 10 s hold", stop.isComplete(10.0) && !stop.isComplete(9.99))
         val irr = HoldRingSpec.irreversible
         assertTrue("irreversible ring hidden for 300 ms", irr.progress(0.3) == 0.0 && !irr.isVisible(0.3))
         assertTrue("irreversible ring fills over 1.2 s after the dead zone", near(irr.progress(0.9), 0.5) && irr.isComplete(1.5))
@@ -440,7 +440,8 @@ class SignatureMotionTest {
         assertTrue("the core flashes a quarter of the way through", near(b15.scale, 1.2602, 1e-3) && near(b15.opacity, 0.8859, 1e-3) && near(b15.flash, 1.0))
         val bEnd = HoldRingSpec.burst(0.6)
         assertTrue("and is gone by 600 ms", near(bEnd.scale, 1.0) && near(bEnd.opacity, 0.0) && near(bEnd.flash, 0.0))
-        assertEquals("Stop-all and Irreversible share one ring", HoldRingSpec.stopAll, HoldRingSpec.irreversible)
+        assertEquals("Stop-all and Irreversible share the dead zone", HoldRingSpec.stopAll.deadZone, HoldRingSpec.irreversible.deadZone, 0.0)
+        assertEquals("Stop-all is a 10 s hold; Irreversible stays 1.5 s", 10.0, HoldRingSpec.stopAll.deadZone + HoldRingSpec.stopAll.fill, 1e-9)
         assertFalse(HoldRingSpec.stopAll.isVisible(0.0))
     }
 

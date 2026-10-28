@@ -3,6 +3,14 @@ package app.page.android.ui.nw.room
 import app.page.android.model.AgentCharacter
 import app.page.android.model.AnswerPicker
 import app.page.android.model.CardOutcome
+import app.page.android.model.HeldDelete
+import app.page.android.model.PhotoOffer
+import app.page.android.model.PhotoProgress
+import app.page.android.model.QueuedDelete
+import app.page.android.model.SendChoice
+import app.page.android.model.SendOutbox
+import app.page.android.model.SendWhen
+import app.page.android.model.SessionCaps
 import app.page.android.model.ChangesModel
 import app.page.android.model.LiveSession
 import app.page.android.model.LiveSessionState
@@ -29,6 +37,8 @@ import app.page.android.model.StoryBlock
 import app.page.android.model.StoryBuilder
 import app.page.android.model.TranscriptTimeline
 import app.page.android.model.WorkflowRun
+import app.page.android.model.YesNoArm
+import app.page.android.model.YesNoReply
 import java.time.Instant
 
 /** Everything the room draws. (iOS SessionRoomData.) */
@@ -58,6 +68,8 @@ data class SessionRoomData(
     val ask: SessionAsk? = null,
     val askDelivery: SentSessionCommand? = null,
     val askViaHook: Boolean = false,
+    /** The plain-text yes/no question Claude's last message ends on, while the session waits for its next message (Yes and No send those words). */
+    val yesNo: String? = null,
     // Screen
     val screen: SessionScreen? = null,
     val screenFreshness: ScreenFreshness? = null,
@@ -74,6 +86,20 @@ data class SessionRoomData(
     val target: SessionTarget? = null,
     val receipt: SendReceipt? = null,
     val stopNote: StopNote? = null,
+    /** How a message to this busy session goes ("Now" / "When it finishes"); null when idle or nothing is on offer. */
+    val choice: SendChoice.Plan? = null,
+    /** The one-line explanations under the choice have been shown once. */
+    val choiceExplained: Boolean = true,
+    /** The Mac's caps, so a held bubble offers Delete only where it can work. */
+    val caps: Set<String> = emptySet(),
+    /** Where a delete of each held message stands, by its clientId. */
+    val deletes: Map<String, HeldDelete> = emptyMap(),
+    /** The Yes / No chip tapped and still in its 1.2 s window (nothing has been sent; Cancel works). */
+    val yesNoArm: YesNoArm? = null,
+    /** The photo button (`images-v1`): there or not, working or not, and the lines that explain it. */
+    val photos: PhotoOffer = PhotoOffer.none,
+    /** Photos going up, by the sending bubble's clientId. */
+    val uploads: Map<String, PhotoProgress> = emptyMap(),
     // Stop
     val stop: SessionStopPlan,
     val stopping: Boolean = false,
@@ -115,6 +141,21 @@ data class SessionRoomData(
         val pageIsHook: Boolean = false,
         val pageContext: String? = null,
         val zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+        /** The Mac's caps (`hold-v1`, `retract-v1`, ...); a Mac that sends none has none. */
+        val caps: Set<String> = emptySet(),
+        /** The last "Now" / "When it finishes" picked on this device. */
+        val sendWhen: SendWhen? = null,
+        val choiceExplained: Boolean = true,
+        /** Messages counting down before their POST. */
+        val outbox: SendOutbox = SendOutbox(),
+        val deletes: Map<String, HeldDelete> = emptyMap(),
+        /** "Page closed before this was sent..." for a draft put back in the box. */
+        val restoredNote: String? = null,
+        val yesNoArm: YesNoArm? = null,
+        /** Photos going up (`images-v1`), by the sending bubble's clientId. */
+        val uploads: Map<String, PhotoProgress> = emptyMap(),
+        /** Photos already in the composer's tray: a Mac that stops offering photos meanwhile is said out loud. */
+        val stagedPhotos: Int = 0,
     )
 
     companion object {
@@ -126,7 +167,10 @@ data class SessionRoomData(
             val busy = s.state == LiveSessionState.ACTIVE && !i.ended
 
             // What the page and composer do is one pure decision (RoomPlan).
-            val plan = RoomPlan.build(RoomPlan.Inputs(s, character, i.pageRow, i.ended, ready, i.macName))
+            val busyChoice = SendChoice.forSession(s, i.ended, i.caps, i.sendWhen)
+            val plan = RoomPlan.build(
+                RoomPlan.Inputs(s, character, i.pageRow, i.ended, ready, i.macName, canHold = SessionCaps.canHold(i.caps, s), sendWhen = busyChoice?.selected ?: SendWhen.NOW),
+            )
             val pinned = plan.pinned
             val review = plan.review
             val mode = plan.mode
@@ -151,7 +195,18 @@ data class SessionRoomData(
                 if (i.pageIsHook) AnswerPicker.delivery(i.pageOutcome, s.id, a.id, i.now)
                 else i.answerDelivery?.takeIf { it.promptKey == a.id }
             }
-            val receipt = SendReceipt.build(i.latestInput, character.name, i.now)?.takeIf { it.id != i.dismissedReceipt }
+            // Only where a typed message would go to a session that has finished its turn; a question picker has its own taps.
+            val yesNo = YesNoReply.roomOffer(mode, s.state, i.ended, ready, ask != null, items)
+            // The choice belongs to the busy composer only (a waiting or idle session has none).
+            val choice = busyChoice?.takeIf { mode == RoomComposerMode.Steer || mode == RoomComposerMode.HoldOnly }
+            val latest = i.latestInput
+            val receipt = (
+                SendReceipt.build(
+                    latest, character.name, i.now, scheduled = i.outbox.next(s.id), delete = latest?.let { i.deletes[it.clientId] },
+                    canDelete = latest != null && QueuedDelete.heldMessage(latest.state, i.caps, i.deletes[latest.clientId]),
+                    uploading = latest?.let { i.uploads[it.clientId] },
+                ) ?: i.restoredNote?.let { SendReceipt("restored", it, null, SendReceipt.Tone.NOTE) }
+                )?.takeIf { it.id != i.dismissedReceipt }
             val stopNote = i.latestStop?.let { stop ->
                 SendReceipt.stopLine(stop, character.name)?.let { line ->
                     when (stop.state) {
@@ -169,11 +224,13 @@ data class SessionRoomData(
                 now = i.now, macName = i.macName, story = story, truncated = i.transcript?.truncated ?: false, emptyStory = emptyStory, storyLoading = loading,
                 liveLine = if (i.ended) null else StoryBuilder.liveLine(s, character, trailingLive),
                 timingNote = RoomComposerMode.timingNote(character, busy),
-                pageRow = pinned, pageOutcome = i.pageOutcome, pagePending = i.pagePending, ask = ask, askViaHook = askViaHook, askDelivery = askDelivery,
+                pageRow = pinned, pageOutcome = i.pageOutcome, pagePending = i.pagePending, ask = ask, askViaHook = askViaHook, askDelivery = askDelivery, yesNo = yesNo,
                 screen = i.screen, screenFreshness = i.screen?.let { ScreenFreshness.evaluate(it.at, i.now, busy) }, runs = i.runs,
                 changes = i.diff?.let { ChangesModel.build(it) }, changesLoad = ChangesModel.load(i.diff != null, i.diffError, i.diffRequestedAt, i.now),
                 reviewRow = review, composer = mode, composerCopy = mode.copy(character), preview = plan.preview, composerProblem = i.composerProblem,
                 target = SessionTarget.of(s, i.macName), receipt = receipt, stopNote = stopNote,
+                choice = choice, choiceExplained = i.choiceExplained, caps = i.caps, deletes = i.deletes, yesNoArm = i.yesNoArm,
+                photos = PhotoOffer.evaluate(i.caps, s, mode, staged = i.stagedPhotos, ended = i.ended), uploads = i.uploads,
                 stop = SessionStopPlan.build(s, ready, i.ended, i.macName), stopping = i.latestStop?.state?.isPending == true,
             )
         }

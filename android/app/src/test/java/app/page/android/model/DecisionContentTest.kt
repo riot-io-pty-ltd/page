@@ -94,4 +94,14 @@ class DecisionContentTest {
             DecisionContent.undoNote(Reversibility.CONSIDERED, listOf(Reversibility.Tag.EDITS_IN_REPO)),
         )
     }
+
+    @Test fun `a finished turn that ends on a yes or no question carries it, and other pages do not`() {
+        val asks = nwIv("r1", InterventionKind.IDLE, "Changed 2 files (+40 −6) · tests passed\n\nI've finished the refactor. Should I run the full test suite now?", session = "s1")
+        assertEquals("Should I run the full test suite now?", content(asks).yesNo)
+        val plain = nwIv("r2", InterventionKind.IDLE, "Changed 2 files (+40 −6) · tests passed\n\nAll done.", session = "s1")
+        assertNull(content(plain).yesNo)
+        // A permission prompt already has Approve and Deny.
+        val approval = nwIv("r3", InterventionKind.APPROVAL, "Should I run the full test suite now?", session = "s1")
+        assertNull(content(approval).yesNo)
+    }
 }

@@ -123,6 +123,20 @@ data class LiveSession(
      * (docs/SESSIONS-PROTOCOL.md); an older Mac sends none and the card shows what it has.
      */
     val flight: SessionFlight? = null,
+    /**
+     * Page can type into this terminal once the turn ends, so the phone may offer "When it finishes" (needs `hold-v1`
+     * in the list's caps too). A busy Codex session outside cmux is `canType` false with this true.
+     */
+    val canHold: Boolean = false,
+    /** What the Mac holds for this session until its turn ends, and entries settled in the last 15 minutes. Oldest first. */
+    val held: List<HeldMessage> = emptyList(),
+    /**
+     * `images-v1`: how a photo sent from the room reaches this session. [ATTACH_IMAGE]: pasted, so Claude attaches it as
+     * an image. [ATTACH_PATH]: the file's location is typed and Claude opens it itself. null: no photos here.
+     */
+    val attach: String? = null,
+    /** Why a session Page can type into takes no photos ("Page can't send photos to Codex yet"). */
+    val attachBlocker: String? = null,
 ) {
     val hostLabel: String
         get() {
@@ -140,6 +154,8 @@ data class LiveSession(
 
     companion object {
         const val DEFAULT_BLOCKER = "Page can't type into this session."
+        const val ATTACH_IMAGE = "image"
+        const val ATTACH_PATH = "path"
 
         /**
          * Lenient like [Intervention]: only `id` is required. A malformed
@@ -177,6 +193,11 @@ data class LiveSession(
                 preview = (c.str("preview") ?: "").capped(300),
                 ask = SessionAsk.decode(c["ask"]),
                 flight = SessionFlight.decode(c),
+                canHold = c.bool("canHold") ?: false,
+                held = lossyList(c["held"], HeldMessage::decode)?.elements?.take(20) ?: emptyList(),
+                // A value this build doesn't know is no photo route at all, never a guess.
+                attach = c.str("attach")?.trim()?.takeIf { it == ATTACH_IMAGE || it == ATTACH_PATH },
+                attachBlocker = c.str("attachBlocker")?.trim()?.takeIf { it.isNotEmpty() }?.capped(200),
             )
         }
     }

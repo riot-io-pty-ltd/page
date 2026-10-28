@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -35,6 +36,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Lock
@@ -77,7 +79,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.page.android.model.AgentCharacter
+import app.page.android.model.DeliveryPreview
 import app.page.android.model.DraftSubmit
+import app.page.android.model.LiveSession
 import app.page.android.model.HoldRingSpec
 import app.page.android.model.LiveSessionState
 import app.page.android.model.NowRow
@@ -87,9 +91,18 @@ import app.page.android.model.RoomComposerMode
 import app.page.android.model.RoomLens
 import app.page.android.model.SendReceipt
 import app.page.android.model.SessionComposer
+import app.page.android.model.YesNoArm
+import app.page.android.model.YesNoQuestion
+import app.page.android.model.YesNoReply
 import app.page.android.model.SessionStopPlan
 import app.page.android.ui.nw.components.NWAnimated
 import app.page.android.ui.nw.components.NWAuroraCanvas
+import app.page.android.ui.nw.components.NWSendReceiptView
+import app.page.android.ui.nw.components.NWReceiptThreadView
+import app.page.android.ui.nw.components.NWRing
+import app.page.android.ui.nw.components.rememberNWNow
+import app.page.android.ui.nw.components.NWSendChoice
+import app.page.android.model.ReceiptThreadInput
 import app.page.android.ui.nw.components.NWBackdrop
 import app.page.android.ui.nw.components.NWButton
 import app.page.android.ui.nw.components.NWButtonKind
@@ -129,6 +142,8 @@ class SessionRoomActions(
     val openRun: (String) -> Unit = {},
     val openAgent: (String, String) -> Unit = { _, _ -> },
     val openDecision: (String) -> Unit = {},
+    /** Steer on the pinned Look or Review card: the decision sheet opens with its composer up. */
+    val steer: (String) -> Unit = {},
     val banner: (RoomBanner.Action) -> Unit = {},
     val approve: (NowRow) -> Unit = {},
     val holdComplete: (NowRow) -> Unit = {},
@@ -140,6 +155,22 @@ class SessionRoomActions(
     val dismissReceipt: (String) -> Unit = {},
     /** "Submit all": the draft's answers, for the container to send. */
     val submitAnswers: (app.page.android.model.AnswerSheet) -> Unit = {},
+    /** The busy-session choice: "Now" or "When it finishes". */
+    val selectWhen: (app.page.android.model.SendWhen) -> Unit = {},
+    /** A receipt's one action: Undo a countdown, Delete a held message. */
+    val receiptAction: (SendReceipt) -> Unit = {},
+    /** Delete a held message from its bubble (by the message's clientId). */
+    val deleteHeld: (String) -> Unit = {},
+    /** A Yes / No chip tapped: it arms for 1.2 s, then sends. */
+    val armYesNo: (String) -> Unit = {},
+    val cancelYesNo: () -> Unit = {},
+    /** The photo button: open the system photo picker. */
+    val addPhoto: () -> Unit = {},
+    /** The photo button where it can't work: say why (its tap). */
+    val photoUnavailable: (String) -> Unit = {},
+    val removePhoto: (String) -> Unit = {},
+    /** Send with photos in the tray: the caption (which may be empty). */
+    val sendPhotos: (String) -> Unit = {},
 )
 
 @Composable
@@ -157,6 +188,8 @@ fun NWSessionRoom(
     focusComposer: Boolean = false,
     /** The room was opened with Stop: say what holding the stop button does. */
     stopHint: Boolean = false,
+    /** The photos picked for the next message. */
+    photos: RoomPhotoTray = RoomPhotoTray(),
 ) {
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     var stopHeld by remember { mutableStateOf<Double?>(null) }
@@ -194,7 +227,7 @@ fun NWSessionRoom(
                     RoomLens.WORKFLOWS -> NWRoomWorkflowsLens(data, actions, runId, onRunId)
                 }
             }
-            NWRoomComposer(data, draft, onDraft, actions, focusOnAppear = focusComposer)
+            NWRoomComposer(data, draft, onDraft, actions, focusOnAppear = focusComposer, tray = photos)
         }
     }
 }
@@ -308,7 +341,7 @@ fun RoomBannerView(banner: RoomBanner, onAction: (RoomBanner.Action) -> Unit, mo
 }
 
 /**
- * Stop in the room: hold for 0.6 s (a ring fills round the button, amber warming to red), then Esc goes to the
+ * Stop in the room: hold for 10 s (a ring fills round the button, amber warming to red), then Esc goes to the
  * session. Letting go early unwinds the ring and sends nothing. While it is held, [onHeld] reports the seconds so
  * the room can say what will be pressed, where, on which Mac. TalkBack gets a "Stop" action (it confirms first).
  */
@@ -324,7 +357,7 @@ fun NWRoomStopButton(plan: SessionStopPlan, stopping: Boolean, agent: String, fi
                 SessionStopPlan.spec, Modifier.size(width = 104.dp, height = 52.dp).semantics {
                     role = Role.Button
                     contentDescription = "Stop $agent"
-                    stateDescription = "Hold for a moment. ${plan.preview}"
+                    stateDescription = "Hold for 10 seconds. ${plan.preview}"
                     customActions = listOf(CustomAccessibilityAction("Stop") { confirm = true; true })
                 },
                 fixedProgress = fixedProgress, onHeld = onHeld, onComplete = onComplete,
@@ -363,13 +396,16 @@ fun NWRoomStopButton(plan: SessionStopPlan, stopping: Boolean, agent: String, fi
  * instead...", which the page sends as Esc, then your words.
  */
 @Composable
-fun NWRoomComposer(data: SessionRoomData, draft: String, onDraft: (String) -> Unit, actions: SessionRoomActions, focusOnAppear: Boolean = false, modifier: Modifier = Modifier) {
+fun NWRoomComposer(data: SessionRoomData, draft: String, onDraft: (String) -> Unit, actions: SessionRoomActions, focusOnAppear: Boolean = false, modifier: Modifier = Modifier, tray: RoomPhotoTray = RoomPhotoTray()) {
     val focus = remember { FocusRequester() }
     var didFocus by remember { mutableStateOf(false) }
     val hasText = draft.trim().isNotEmpty()
+    // With photos in the tray, Send goes as `inputImages` (the caption may be empty) and waits until every one is encoded.
+    val photosPicked = !tray.draft.isEmpty
+    val canSend = if (photosPicked) tray.draft.isSendable else hasText
     fun submit(raw: String) {
         val text = raw.trim()
-        if (text.isNotEmpty()) actions.send(text)
+        if (photosPicked) { if (tray.draft.isSendable) actions.sendPhotos(text) } else if (text.isNotEmpty()) actions.send(text)
     }
     LaunchedEffect(data.composer.acceptsText, focusOnAppear) {
         if (!focusOnAppear || didFocus || !data.composer.acceptsText) return@LaunchedEffect
@@ -382,9 +418,23 @@ fun NWRoomComposer(data: SessionRoomData, draft: String, onDraft: (String) -> Un
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         data.stopNote?.let { n -> NoteStrip(n.text, when (n.tone) { SessionRoomData.StopNoteTone.GOOD -> NW.Palette.teal; SessionRoomData.StopNoteTone.PROBLEM -> NW.Palette.amber; else -> NW.Palette.textSecondary }, n.tone == SessionRoomData.StopNoteTone.WORKING, if (n.tone == SessionRoomData.StopNoteTone.GOOD) "stop" else "warn") }
-        data.receipt?.let { ReceiptView(it, actions) }
+        data.receipt?.let { NWSendReceiptView(it, actions.receiptAction, actions.dismissReceipt) }
         data.composerProblem?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.amber.color, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).semantics { liveRegion = LiveRegionMode.Polite }) }
-        if (data.composer.offersQuickReplies && data.character.kind != AgentCharacter.Kind.LOCAL && draft.isEmpty()) {
+        val yesNo = data.yesNo?.takeIf { data.composer.acceptsText && draft.isEmpty() }
+        val arm = data.yesNoArm
+        if (arm != null) {
+            // A Yes or No was tapped: the same 1.2 s ring and Cancel the review sheet uses, so a mis-tap on "Should I
+            // deploy?" can be taken back. Nothing has left the phone until it runs out.
+            NWArmedReply(arm, actions.cancelYesNo)
+        } else if (yesNo != null) {
+            // Claude's last message ends on a yes/no question: the pair stands in for the generic replies. They send
+            // exactly "Yes" or "No" through the same path as a typed message (after the arm ring), so the receipt and
+            // the gating are the same.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                YesNoChip(YesNoReply.YES, yesNo, primary = true) { actions.armYesNo(YesNoReply.YES) }
+                YesNoChip(YesNoReply.NO, yesNo, primary = false) { actions.armYesNo(YesNoReply.NO) }
+            }
+        } else if (data.composer.offersQuickReplies && data.character.kind != AgentCharacter.Kind.LOCAL && draft.isEmpty()) {
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (q in RoomComposerMode.quickReplies) Text(
                     q, style = NW.Typo.captionStrong, color = NW.Palette.textSecondary.color,
@@ -398,23 +448,81 @@ fun NWRoomComposer(data: SessionRoomData, draft: String, onDraft: (String) -> Un
             is RoomComposerMode.Locked -> LockedBlock(if (mode.routesThroughPage) "keyboard" else "lock", data.composerCopy.placeholder, mode.why)
             is RoomComposerMode.Disabled -> LockedBlock("lock", data.composerCopy.placeholder, mode.why)
             is RoomComposerMode.Blocked -> LockedBlock("keyboard", mode.why, "You can still follow along here, and answer pages from Now.")
-            else -> Field(data, draft, onDraft, focus, hasText, ::submit)
+            else -> {
+                // A busy session: Now (after a 10 s Undo) or When it finishes (held on the Mac).
+                data.choice?.let { NWSendChoice(it, data.character.name, data.choiceExplained, actions.selectWhen) }
+                NWPhotoTray(tray, actions.removePhoto)
+                // How photos reach this terminal, or why this session takes none: one quiet line.
+                if (data.photos.enabled) data.photos.pathNote?.let { NWPhotoNote(it) }
+                data.photos.blockerNote?.let { NWPhotoNote(it) }
+                Field(data, draft, onDraft, focus, canSend, ::submit, actions, photosPicked)
+            }
         }
     }
 }
 
 private fun Modifier.wrapCenter(): Modifier = this.padding(vertical = 12.dp)
 
+/**
+ * A Yes or No tapped in the room: the same row as iOS's `NWArmedReply`, a ring, "Sending “Yes” in 0.8 s" and Cancel, so
+ * a mis-tap on "Should I deploy?" can still be taken back. Nothing is sent until the ring is full.
+ */
 @Composable
-private fun Field(data: SessionRoomData, draft: String, onDraft: (String) -> Unit, focus: FocusRequester, hasText: Boolean, submit: (String) -> Unit) {
-    val shape = RoundedCornerShape(30.dp)
+private fun NWArmedReply(arm: YesNoArm, onCancel: () -> Unit) {
+    // Its own fast clock while the ring runs (the room's ticks at 4 fps): the same as the Now row's arm ring.
+    val now by rememberNWNow(arm.deadline.plusMillis(100), fastMs = 33)
+    val shape = RoundedCornerShape(NW.Radius.button)
     Row(
-        Modifier.fillMaxWidth().clip(shape).background(NW.Palette.surface.opacity(0.95).color, shape).border(1.dp, Color.White.copy(alpha = 0.08f), shape).padding(horizontal = 14.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom,
+        Modifier.fillMaxWidth().heightIn(min = 52.dp).clip(shape).background(NW.Palette.amber.opacity(0.12).color, shape)
+            .border(1.dp, NW.Palette.amber.opacity(0.4).color, shape)
+            .clickable(role = Role.Button, onClick = onCancel)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .clearAndSetSemantics { contentDescription = "Sending ${arm.word}, tap to cancel"; role = Role.Button },
+        horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically,
     ) {
+        NWRing(arm.progress(now), NW.Palette.amber, lineWidth = 3.5.dp, size = 26.dp)
+        Text(arm.label(now), style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color, modifier = Modifier.weight(1f))
+        Text(YesNoArm.CANCEL, style = NW.Typo.captionStrong, color = NW.Palette.amber.color)
+    }
+}
+
+/** Yes (the accent) or No (quiet): one tap sends that word. Read out as "Reply Yes", with the question as its hint. */
+@Composable
+fun YesNoChip(word: String, question: String, primary: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val shape = CircleShape
+    val brief = YesNoQuestion.brief(question)
+    Text(
+        word, style = NW.Typo.bodyStrong, color = (if (primary) NW.Palette.onBright else NW.Palette.textPrimary).color,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = modifier.widthIn(min = 88.dp).heightIn(min = 48.dp).clip(shape)
+            .then(
+                if (primary) Modifier.background(Brush.linearGradient(listOf(NW.Palette.teal.color, NW.Palette.sky.color)), shape)
+                else Modifier.background(Color.White.copy(alpha = 0.10f), shape).border(1.dp, Color.White.copy(alpha = 0.16f), shape),
+            )
+            .clickable(role = Role.Button, onClickLabel = "Sends $word. Answers: $brief", onClick = onClick)
+            .padding(horizontal = 22.dp).wrapCenter()
+            .semantics { contentDescription = "Reply $word" },
+    )
+}
+
+@Composable
+private fun Field(
+    data: SessionRoomData, draft: String, onDraft: (String) -> Unit, focus: FocusRequester, canSend: Boolean, submit: (String) -> Unit,
+    actions: SessionRoomActions = SessionRoomActions(), withPhotos: Boolean = false,
+) {
+    val shape = RoundedCornerShape(30.dp)
+    // With photos in the tray the line says what they will do, not what a typed message does.
+    val shownPreview = if (withPhotos) {
+        DeliveryPreview.line(if (data.session.attach == LiveSession.ATTACH_PATH) "Photo locations, then your words" else "Photos attached, then your words", data.answerRoute, data.macName)
+    } else data.preview ?: data.composerCopy.hint
+    Row(
+        Modifier.fillMaxWidth().clip(shape).background(NW.Palette.surface.opacity(0.95).color, shape).border(1.dp, Color.White.copy(alpha = 0.08f), shape).padding(start = if (data.photos.shown) 4.dp else 14.dp, end = 14.dp, top = 10.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (data.photos.shown) 2.dp else 8.dp), verticalAlignment = Alignment.Bottom,
+    ) {
+        if (data.photos.shown) NWPhotoButton(data.photos, actions.addPhoto, actions.photoUnavailable)
         Column(Modifier.weight(1f).padding(start = 6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Box(Modifier.heightIn(min = 28.dp), contentAlignment = Alignment.CenterStart) {
-                if (draft.isEmpty()) Text(data.composerCopy.placeholder, style = NW.Typo.subline, color = NW.Palette.textQuiet.color, maxLines = 1)
+                if (draft.isEmpty()) Text(if (withPhotos) "Add a caption…" else data.composerCopy.placeholder, style = NW.Typo.subline, color = NW.Palette.textQuiet.color, maxLines = 1)
                 BasicTextField(
                     draft, { v ->
                         // The keyboard's Send key is the same Send as the button; one Return typed at the end counts too.
@@ -425,7 +533,7 @@ private fun Field(data: SessionRoomData, draft: String, onDraft: (String) -> Uni
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send), keyboardActions = KeyboardActions(onSend = { submit(draft) }),
                 )
             }
-            Text(data.preview ?: data.composerCopy.hint, style = NW.Typo.monoMicro, color = NW.Palette.textQuiet.color, maxLines = 3)
+            Text(shownPreview, style = NW.Typo.monoMicro, color = NW.Palette.textQuiet.color, maxLines = 3)
             if (draft.length >= SessionComposer.COUNTER_FROM) Text(
                 "${draft.length} / ${SessionComposer.MAX_CHARACTERS}", style = NW.Typo.monoMicro,
                 color = (if (draft.length > SessionComposer.MAX_CHARACTERS) NW.Palette.amber else NW.Palette.textTertiary).color,
@@ -433,8 +541,8 @@ private fun Field(data: SessionRoomData, draft: String, onDraft: (String) -> Uni
         }
         Box(
             Modifier.size(48.dp).clip(CircleShape)
-                .background(if (hasText) Brush.linearGradient(listOf(NW.Palette.teal.color, NW.Palette.sky.color)) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.14f))))
-                .clickable(enabled = hasText, role = Role.Button, onClickLabel = data.preview ?: data.composerCopy.hint) { submit(draft) }
+                .background(if (canSend) Brush.linearGradient(listOf(NW.Palette.teal.color, NW.Palette.sky.color)) else Brush.linearGradient(listOf(Color.White.copy(alpha = 0.14f), Color.White.copy(alpha = 0.14f))))
+                .clickable(enabled = canSend, role = Role.Button, onClickLabel = shownPreview) { submit(draft) }
                 .semantics { contentDescription = data.composerCopy.sendLabel },
             contentAlignment = Alignment.Center,
         ) { Icon(Icons.Outlined.ArrowUpward, null, tint = NW.Palette.onBright.color, modifier = Modifier.size(22.dp)) }
@@ -450,25 +558,6 @@ private fun NoteStrip(text: String, tone: Rgba, working: Boolean, icon: String) 
         if (working) CircularProgressIndicator(Modifier.size(16.dp), color = tone.color, strokeWidth = 2.dp)
         else Icon(if (icon == "stop") Icons.Outlined.StopCircle else Icons.Outlined.ErrorOutline, null, tint = tone.color, modifier = Modifier.size(18.dp))
         Text(text, style = NW.Typo.caption, color = tone.color, modifier = Modifier.weight(1f))
-    }
-}
-
-@Composable
-private fun ReceiptView(r: SendReceipt, actions: SessionRoomActions) {
-    val tone = when (r.tone) { SendReceipt.Tone.GOOD -> NW.Palette.teal; SendReceipt.Tone.PROBLEM -> NW.Palette.amber; else -> NW.Palette.textSecondary }
-    Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tone.opacity(0.09).color).padding(horizontal = 14.dp, vertical = 10.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
-        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top,
-    ) {
-        if (r.tone == SendReceipt.Tone.WORKING) CircularProgressIndicator(Modifier.size(16.dp), color = tone.color, strokeWidth = 2.dp)
-        else Icon(if (r.tone == SendReceipt.Tone.GOOD) nwIcon("checkmark.circle") else Icons.Outlined.ErrorOutline, null, tint = tone.color, modifier = Modifier.size(18.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(r.headline, style = NW.Typo.captionStrong, color = tone.color)
-            r.detail?.let { Text(it, style = NW.Typo.monoMicro, color = NW.Palette.textTertiary.color) }
-        }
-        if (r.tone == SendReceipt.Tone.PROBLEM) Box(Modifier.size(32.dp).clickable(role = Role.Button, onClickLabel = "Dismiss") { actions.dismissReceipt(r.id) }, contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.Close, "Dismiss", tint = NW.Palette.textTertiary.color, modifier = Modifier.size(16.dp))
-        }
     }
 }
 

@@ -4,6 +4,7 @@ import android.graphics.RuntimeShader
 import android.os.Build
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -30,11 +31,12 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import app.page.android.model.AuroraPhaseClock
 import app.page.android.model.MotionCurve
 import app.page.android.model.NowModel
 import app.page.android.model.PulseModel
 import app.page.android.ui.nw.theme.AuroraPalette
+import app.page.android.ui.nw.theme.LocalFixedPhase
 import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.NW
 import app.page.android.ui.nw.theme.Rgba
@@ -55,6 +57,17 @@ private fun hash01(x: Double, k: Double): Double {
 }
 
 /**
+ * The curtains' phase at clock time [seconds]: the boards' u_speed (0.4 at a palette speed of 1) accumulated by the
+ * view's [AuroraPhaseClock], so a time-of-day tick, a mood change or the exhale changes the pace without a jump. A
+ * still frame (the harness's pinned phase, Remove animations) is the plain product, so a pinned frame is the same
+ * frame every time. (iOS NWAuroraPhase.)
+ */
+fun nwAuroraPhase(seconds: Double, palette: AuroraPalette, clock: AuroraPhaseClock, still: Boolean): Double {
+    val rate = 0.4 * palette.speed
+    return if (still) seconds * rate else clock.advance(seconds, rate)
+}
+
+/**
  * The aurora itself, drawn without shaders: a sky gradient, soft ribbons that drift, upward rays and a scatter
  * of stars (iOS `NWAuroraCanvas`). [seconds] moves it; the palette's `intensity` scales it (0 draws only the
  * sky, as at dusk). On Android 12 and later the ribbons and rays are blurred as on iOS (a [BlurEffect] on their own
@@ -65,10 +78,12 @@ private fun hash01(x: Double, k: Double): Double {
 fun NWAuroraCanvas(palette: AuroraPalette, seconds: Double, modifier: Modifier = Modifier.fillMaxSize(), starField: Double = 1.0) {
     val blur = Build.VERSION.SDK_INT >= 31 && !NWShaders.forceNoBlur
     val density = LocalDensity.current.density
+    // The ribbons' phase, accumulated so a change of speed never jumps them; read once per frame, outside the Canvases.
+    val clock = remember { AuroraPhaseClock() }
+    val t = nwAuroraPhase(seconds, palette, clock, still = LocalFixedPhase.current != null || LocalReduceMotion.current)
     Box(modifier) {
         Canvas(Modifier.matchParentSize()) { drawRect(Brush.verticalGradient(listOf(palette.skyTop.color, palette.skyBottom.color))) }
         if (palette.intensity > 0) {
-            val t = seconds * 0.4 * palette.speed
             Canvas(Modifier.matchParentSize().then(if (blur) Modifier.graphicsLayer { renderEffect = BlurEffect(16 * density, 16 * density, TileMode.Decal) } else Modifier)) {
                 drawRibbons(palette, t, soft = !blur)
             }
@@ -171,11 +186,14 @@ fun NWLivingAurora(palette: AuroraPalette, seconds: Double, modifier: Modifier =
     if (NWShaders.available && Build.VERSION.SDK_INT >= 33) {
         val shader = remember { RuntimeShader(NWShaders.AURORA) }
         val density = LocalDensity.current.density
+        // The curtains' phase, accumulated so a change of speed never jumps them; read once per frame, outside the Canvas.
+        val clock = remember { AuroraPhaseClock() }
+        val phase = AuroraPhaseClock.shaderPhase(nwAuroraPhase(seconds, palette, clock, still = LocalFixedPhase.current != null || LocalReduceMotion.current))
         Canvas(modifier) {
             shader.setFloatUniform("size", size.width, size.height)
-            shader.setFloatUniform("time", seconds.toFloat())
-            // The boards' u_speed is 0.4 at a palette speed of 1.
-            shader.setFloatUniform("speed", (0.4 * palette.speed).toFloat())
+            shader.setFloatUniform("time", nwShaderSeconds(seconds))
+            // The boards' u_speed is 0.4 at a palette speed of 1 ([nwAuroraPhase]).
+            shader.setFloatUniform("phase", phase)
             shader.setFloatUniform("starCell", 1.5f * density)
             NWShaders.setColor(shader, "skyTop", palette.skyTop)
             NWShaders.setColor(shader, "skyBottom", palette.skyBottom)
@@ -399,11 +417,14 @@ private fun OrbFrame(style: NWPulseStyle.Style, pulse: PulseModel, hollow: Boole
             }
         }
         if (count != null) {
-            val s = 1f
-            Text(
-                "$count", color = color.color, fontWeight = FontWeight.Bold,
-                fontSize = (24 * s).sp, // scales with the orb's own size via the box
-            )
+            // A fifth of the orb, as iOS draws it, so it scales with the orb and not with the system text size.
+            BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                val side = minOf(maxWidth, maxHeight)
+                Text(
+                    "$count", color = color.color, fontWeight = FontWeight.Bold, maxLines = 1,
+                    fontSize = with(LocalDensity.current) { (side * 0.2f).toSp() },
+                )
+            }
         }
     }
 }
@@ -420,7 +441,7 @@ fun NWPulseLight(color: Rgba, ripples: List<PulseModel.Ripple>, glow: Double, se
     Canvas(modifier) {
         val r = ripples.map { it.progress.toFloat() } + List(maxOf(0, 4 - ripples.size)) { -1f }
         shader.setFloatUniform("size", size.width, size.height)
-        shader.setFloatUniform("time", seconds.toFloat())
+        shader.setFloatUniform("time", nwShaderSeconds(seconds))
         NWShaders.setColor(shader, "core", color.mixed(Rgba(1.0, 1.0, 1.0), 0.25))
         NWShaders.setColor(shader, "edge", color)
         shader.setFloatUniform("coreSize", 0.09f)

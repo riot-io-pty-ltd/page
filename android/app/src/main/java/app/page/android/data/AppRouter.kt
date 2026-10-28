@@ -58,9 +58,32 @@ object AppRouter {
 
     fun selectDestination(d: NWDestination) = update { it.copy(destination = d) }
 
-    /** Opens a page's Decision sheet over Now. */
-    fun open(interventionId: String, switchTab: Boolean = true) = update {
-        it.copy(destination = if (switchTab) NWDestination.NOW else it.destination, sheets = it.sheets.request(NWSheet.Decision(interventionId)))
+    /** Opens a page's Decision sheet over Now. [composer]: Steer on a card, so the sheet opens with its composer already up and focused (one tap). */
+    fun open(interventionId: String, switchTab: Boolean = true, composer: Boolean = false) {
+        sheetComposer = if (composer) PendingComposer(interventionId, Instant.now()) else null
+        update {
+            it.copy(destination = if (switchTab) NWDestination.NOW else it.destination, sheets = it.sheets.request(NWSheet.Decision(interventionId)))
+        }
+    }
+
+    /** The Decision sheet to open with its composer up, read once by that sheet. */
+    private data class PendingComposer(val interventionId: String, val at: Instant)
+
+    private var sheetComposer: PendingComposer? = null
+
+    /** A sheet the caller opens itself (a room's own sheet) with its composer up: say so before it opens. */
+    fun requestSheetComposer(interventionId: String) {
+        sheetComposer = PendingComposer(interventionId, Instant.now())
+    }
+
+    /**
+     * Whether the sheet for [interventionId] was asked for with its composer open, once: a request older than a few
+     * seconds belongs to an earlier opening and is dropped.
+     */
+    fun takeSheetComposer(interventionId: String, now: Instant = Instant.now()): Boolean {
+        val c = sheetComposer
+        sheetComposer = null
+        return c != null && c.interventionId == interventionId && now.toEpochMilli() - c.at.toEpochMilli() < 5000
     }
 
     /** How the next room opens (Screen, Type, Stop), read once by that room. */
@@ -117,6 +140,7 @@ object AppRouter {
 
     fun reset() {
         roomEntry = null
+        sheetComposer = null
         update { it.copy(destination = NWDestination.NOW, sheets = SheetQueue(), confirmingUnpair = false) }
     }
 
