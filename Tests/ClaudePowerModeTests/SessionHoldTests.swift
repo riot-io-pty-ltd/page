@@ -527,6 +527,18 @@ final class SessionHoldTests: XCTestCase {
         XCTAssertTrue(HeldOutboxStore(url: store).load(now: t0).isEmpty, "and from disk")
     }
 
+    func testNothingIsTypedOnceThePhoneIsUnpaired() {
+        backends.statuses = ["s1": .busy]
+        setSessions([session("s1", .active)])
+        hold("c1")
+        remote.attach(sink: sink, rootKey: nil)
+        remote.waitUntilIdle()
+        backends.statuses = ["s1": .idle]
+        setSessions([session("s1", .idle)])
+        advance(30)
+        XCTAssertTrue(backends.tries.isEmpty, "the unpaired phone's message is never typed")
+    }
+
     func testThePanelHearsOfChanges() {
         let heard = expectation(description: "changed")
         heard.assertForOverFulfill = false

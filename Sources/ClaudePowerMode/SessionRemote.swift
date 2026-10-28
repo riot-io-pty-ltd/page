@@ -1683,7 +1683,7 @@ final class SessionRemote {
 
     /// The held sessions' readiness, from a fresh read of their sessions
     /// files (one small file each). A session not in the list is `gone`;
-    /// nothing is ready while live sessions are turned off.
+    /// nothing is ready while live sessions are turned off or no phone is paired.
     private func heldReadiness() -> [String: HeldOutbox.Readiness] {
         let ids = Set(outbox.sessionIds)
         guard !ids.isEmpty else { return [:] }
@@ -1692,8 +1692,10 @@ final class SessionRemote {
         let fresh = backends.liveStatuses(held.filter { $0.backend == .claude })
         let t = now()
         var out: [String: HeldOutbox.Readiness] = [:]
+        // No pairing (the phone was unpaired): nothing the old phone asked for is typed.
+        let paired = keys != nil
         for s in held {
-            out[s.sessionId] = enabled
+            out[s.sessionId] = enabled && paired
                 ? Self.heldReadiness(backend: s.backend, state: s.state, fresh: fresh[s.sessionId],
                                      rateLimitedUntil: rateLimited[s.sessionId], now: t)
                 : .wait
