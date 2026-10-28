@@ -40,6 +40,13 @@ val LocalFixedPhase = staticCompositionLocalOf<Double?> { null }
 val LocalFixedNow = staticCompositionLocalOf<Instant?> { null }
 
 /**
+ * The render harness's script for the Workflows lens: the run as it was at each moment (seconds after the lens
+ * appeared, the first at 0), so a frame pinned at [LocalFixedPhase] can be drawn part-way through an agent finishing or
+ * the run completing. Null in the app, where the lens watches the run itself.
+ */
+val LocalWorkflowScript = staticCompositionLocalOf<List<Pair<Double, app.page.android.model.WorkflowRun>>?> { null }
+
+/**
  * The time of day the Now and Lanes skies are drawn at. The root's ticker ([rememberDaypartTicker]) reads the local
  * clock every two minutes; anything without one (widgets, the gallery, previews) draws nighttime, today's aurora, and
  * the render harness pins it (`page_daytime`). Dynamic, so a tick recomposes only the skies that read it.

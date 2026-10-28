@@ -3,6 +3,7 @@ package app.page.android.demo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,6 +50,7 @@ import app.page.android.model.SessionTarget
 import app.page.android.model.SessionTranscript
 import app.page.android.model.TranscriptEntry
 import app.page.android.model.TranscriptRole
+import app.page.android.model.WorkflowMotion
 import app.page.android.model.WorkflowOrbit
 import app.page.android.model.WorkflowRun
 import app.page.android.model.YesNoArm
@@ -61,6 +63,8 @@ import app.page.android.ui.nw.room.NWSessionRoom
 import app.page.android.ui.nw.room.RoomPhotoTray
 import app.page.android.ui.nw.room.SessionRoomActions
 import app.page.android.ui.nw.room.SessionRoomData
+import app.page.android.ui.nw.theme.LocalFixedPhase
+import app.page.android.ui.nw.theme.LocalWorkflowScript
 import java.time.Instant
 
 /** The Session Room and the question card, drawn from fixtures (the Android side of iOS RenderFixtures3 and RenderHarnessAnswers). Pure views over in-memory values: nothing is sent. */
@@ -130,6 +134,36 @@ object DemoRooms {
         val done1 = WorkflowRun(id = "wf2", name = "design-pass", status = "completed", done = 12, total = 12, startedAt = ago(3_000), endedAt = ago(1_800))
         val done2 = WorkflowRun(id = "wf3", name = "port-android", status = "completed", done = 9, total = 9, startedAt = ago(2_400), endedAt = ago(900))
         listOf(running, done1, done2)
+    }
+
+    /**
+     * The Workflows lens's scripted runs, the run as it was at each moment after the lens appeared, for the frames the
+     * render harness pins (`--ef page_time <s>`): one of the running agents finishing at 2 s, and the last agent
+     * finishing (so the run completes) at 2 s. "room-workflows" is the running run on its own, as the board draws it.
+     */
+    fun workflowScript(screen: String): List<Pair<Double, WorkflowRun>>? {
+        val r = runs[0]
+        return when (screen) {
+            // The board's run, running (iOS's name for it; "room-workflows" draws the same).
+            "room-workflows-running" -> listOf(0.0 to r)
+            // verify: iOS logic tests passes: 4/7 becomes 5/7 and its node fills.
+            "room-workflows-finish" -> listOf(0.0 to r, 2.0 to r.copy(done = 5, agents = r.agents.map { if (it.id == "a2") it.copy(state = "done", lastActivityAt = ago(0)) else it }))
+            // The last agent finishes and the run with it: 6/7 becomes 7/7, RUNNING turns DONE, and the ring closes with its pulse.
+            "room-workflows-complete" -> {
+                val before = r.copy(done = 6, agents = r.agents.map { if (it.state == "done" || it.id == "a1") it else it.copy(state = "done", lastActivityAt = ago(0)) })
+                listOf(0.0 to before, 2.0 to before.copy(status = "completed", done = 7, endedAt = ago(0), agents = before.agents.map { if (it.id == "a1") it.copy(state = "done", lastActivityAt = ago(0)) else it }))
+            }
+            else -> null
+        }
+    }
+
+    /** A run that had already completed when the lens opened: its ring closes with the pulse at the end of the sweep, then holds still. */
+    private val completedRun: WorkflowRun get() = runs[0].copy(status = "completed", done = 7, endedAt = ago(40), agents = runs[0].agents.map { it.copy(state = "done") })
+
+    /** The runs a Workflows screen shows at [t]: the script's snapshot then, or the completed run; one run, as the board (and iOS's fixture) draws it, no picker. */
+    private fun runsAt(screen: String, t: Double): List<WorkflowRun>? {
+        workflowScript(screen)?.let { s -> return listOf(s.last { it.first <= t }.second) }
+        return if (screen == "room-workflows-done") listOf(completedRun) else null
     }
 
     val screenLines = listOf(
@@ -274,7 +308,7 @@ object DemoRooms {
     fun lensFor(screen: String): RoomLens = when (screen) {
         "room-screen" -> RoomLens.SCREEN
         "room-changes", "room-review" -> RoomLens.CHANGES
-        "room-workflows" -> RoomLens.WORKFLOWS
+        "room-workflows", "room-workflows-running", "room-workflows-finish", "room-workflows-complete", "room-workflows-done" -> RoomLens.WORKFLOWS
         else -> RoomLens.STORY
     }
 
@@ -320,27 +354,87 @@ object DemoRooms {
         if (screen == "room-agent") {
             val run = runs[0]
             val agent = run.agents[2]
-            NWAgentRoomScreen(
-                "${run.name} › agent 7", agent.label, WorkflowOrbit.NodeState.FAILED,
-                AgentRoomModel.build(
-                    listOf(
-                        entry("g1", TranscriptRole.USER, "Check the Android port matches iOS usage-card logic exactly; run ./gradlew test.", 200),
-                        entry("g2", TranscriptRole.TOOL, "Read: UsageDisplay.swift", 190, "Read"), entry("g3", TranscriptRole.TOOL, "Read: UsageDisplay.kt", 180, "Read"),
-                        entry("g4", TranscriptRole.TOOL, "Bash: ./gradlew --offline test", 100, "Bash"),
-                        entry("g5", TranscriptRole.ASSISTANT, "Couldn't run the build without the SDK path, so I'm stopping here and reporting it.", 60),
-                    ),
-                    finished = true,
+            val model = AgentRoomModel.build(
+                listOf(
+                    entry("g1", TranscriptRole.USER, "Check the Android port matches iOS usage-card logic exactly; run ./gradlew test.", 200),
+                    entry("g2", TranscriptRole.TOOL, "Read: UsageDisplay.swift", 190, "Read"), entry("g3", TranscriptRole.TOOL, "Read: UsageDisplay.kt", 180, "Read"),
+                    entry("g4", TranscriptRole.TOOL, "Bash: ./gradlew --offline test", 100, "Bash"),
+                    entry("g5", TranscriptRole.ASSISTANT, "Couldn't run the build without the SDK path, so I'm stopping here and reporting it.", 60),
                 ),
-                onBack = {},
+                finished = true,
             )
+            // Opened at 0 (`page_time` pins the moment): its items rise in staggered, as the app's do (WorkflowMotion.Arrivals).
+            val opened = WorkflowMotion.Arrivals().observe(listOfNotNull(model.task?.let { "task" }) + model.blocks.map { it.id }, 0.0)
+            NWAgentRoomScreen("${run.name} › agent 7", agent.label, WorkflowOrbit.NodeState.FAILED, model, onBack = {}, arrivedAt = opened)
             return
         }
-        val base = SessionRoomData.make(inputs(screen))
+        // The pinned moment (`page_time`, 2 s by default): seconds since the room, and its Workflows lens, appeared.
+        val t = LocalFixedPhase.current ?: 2.0
+        if (screen == "room-agent-live") {
+            AgentLive(t)
+            return
+        }
+        if (screen.startsWith("room-workflows") && screen.endsWith("-live")) {
+            WorkflowsLive(screen.removeSuffix("-live"))
+            return
+        }
+        val base = SessionRoomData.make(inputs(screen).let { i -> runsAt(screen, t)?.let { i.copy(runs = it) } ?: i })
         val data = if (screen == "room-stop") base.copy(fixedStop = 0.62) else base
         var lens by remember { mutableStateOf(RoomLens.resolve(lensFor(screen), data.lenses)) }
         var draft by remember { mutableStateOf(if (screen == "room-draft") "Run the tests, then stop" else if (screen.startsWith("room-photos") && tray(screen).draft.count > 0) "What's wrong with this screen?" else "") }
         var runId by remember { mutableStateOf<String?>("wf1") }
-        NWSessionRoom(data, SessionRoomActions(), lens, { lens = it }, draft, { draft = it }, runId, { runId = it }, focusComposer = false, photos = remember(screen) { tray(screen) })
+        CompositionLocalProvider(LocalWorkflowScript provides workflowScript(screen)) {
+            NWSessionRoom(data, SessionRoomActions(), lens, { lens = it }, draft, { draft = it }, runId, { runId = it }, focusComposer = false, photos = remember(screen) { tray(screen) })
+        }
+    }
+
+    /**
+     * A Workflows screen on the real clock, not pinned ("room-workflows-finish-live" and so on): the lens watches the run
+     * itself, and the script's next snapshot arrives after its delay, as the Mac's update would, so the live timeline,
+     * the observed changes and the clock stopping once a finished run settles all run as they do in the app.
+     */
+    @Composable
+    private fun WorkflowsLive(base: String) {
+        val script = workflowScript(base) ?: listOf(0.0 to (runsAt(base, 0.0)?.first() ?: runs[0]))
+        var step by remember { mutableStateOf(0) }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            for (k in 1 until script.size) {
+                kotlinx.coroutines.delay(((script[k].first - script[k - 1].first) * 1000).toLong())
+                step = k
+            }
+        }
+        val data = SessionRoomData.make(inputs(base).copy(runs = listOf(script[step].second) + runs.drop(1)))
+        var lens by remember { mutableStateOf(RoomLens.WORKFLOWS) }
+        var draft by remember { mutableStateOf("") }
+        var runId by remember { mutableStateOf<String?>("wf1") }
+        CompositionLocalProvider(LocalFixedPhase provides null) {
+            NWSessionRoom(data, SessionRoomActions(), lens, { lens = it }, draft, { draft = it }, runId, { runId = it }, focusComposer = false)
+        }
+    }
+
+    /**
+     * A running workflow agent's screen [t] seconds after it opened: its dot breathes, its transcript loads just after
+     * it opened and rises in staggered, and one more line arrives at 2 s and rises on its own.
+     */
+    @Composable
+    private fun AgentLive(t: Double) {
+        val run = runs[0]
+        val model = AgentRoomModel.build(
+            listOf(
+                entry("v1", TranscriptRole.USER, "Run iOS/Tests/run-logic-tests.sh and report any failure with its file and line.", 40),
+                entry("v2", TranscriptRole.TOOL, "Read: iOS/Tests/run-logic-tests.sh", 36, "Read"),
+                entry("v3", TranscriptRole.ASSISTANT, "The script builds the logic tests for the host and runs them; starting it now.", 30),
+                entry("v4", TranscriptRole.TOOL, "Bash: iOS/Tests/run-logic-tests.sh", 24, "Bash"),
+                entry("v5", TranscriptRole.ASSISTANT, "402 checks so far, no failures. Waiting for the rest to finish.", 1),
+            ),
+            finished = false,
+        )
+        val arrivals = model.blocks.mapIndexed { k, b -> b.id to if (k == model.blocks.lastIndex) 2.0 else 0.2 + 0.04 * k }.toMap()
+        val shown = model.copy(blocks = model.blocks.filter { arrivals.getValue(it.id) <= t })
+        NWAgentRoomScreen(
+            "${run.name} › agent 2", run.agents[1].label, WorkflowOrbit.NodeState.RUNNING, shown, onBack = {},
+            arrivedAt = arrivals.filterKeys { id -> shown.blocks.any { it.id == id } },
+        )
     }
 
     // region Answering the terminal's questions

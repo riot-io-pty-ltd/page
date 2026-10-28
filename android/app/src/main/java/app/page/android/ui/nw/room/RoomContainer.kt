@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -63,13 +64,16 @@ import app.page.android.model.RoomLens
 import app.page.android.model.RoomSend
 import app.page.android.model.RowAction
 import app.page.android.model.UsageCardModel
+import app.page.android.model.WorkflowMotion
 import app.page.android.model.WorkflowOrbit
 import app.page.android.model.AgentRoomModel
 import app.page.android.ui.nw.components.NWButton
 import app.page.android.ui.nw.components.NWSheetHost
+import app.page.android.ui.nw.components.nwClockSeconds
 import app.page.android.ui.nw.components.rememberNWNow
 import app.page.android.ui.nw.decision.DecisionContainer
 import app.page.android.ui.nw.decision.decisionBackground
+import app.page.android.ui.nw.theme.LocalAnimationsPaused
 import app.page.android.ui.nw.theme.NW
 import java.time.Instant
 import kotlinx.coroutines.delay
@@ -394,11 +398,14 @@ fun RoomContainer(sessionId: String, entry: RoomEntry, modifier: Modifier = Modi
     )
 
     Box(modifier.fillMaxSize()) {
-        NWSessionRoom(
-            data, actions, shownLens, { l -> lens = l; if (l == RoomLens.CHANGES && sessionState.diffs[sessionId] == null) requestChanges() },
-            draft, { draft = it; if (composerProblem != null) composerProblem = null }, runId, { runId = it },
-            focusComposer = entry.focusesComposer, stopHint = stopHint, photos = RoomPhotoTray(photoDraft, thumbs.toMap()),
-        )
+        // The room holds still while an agent's room or a decision covers it (the workflow orbit, the aurora).
+        CompositionLocalProvider(LocalAnimationsPaused provides (LocalAnimationsPaused.current || agent != null || presentedPage != null)) {
+            NWSessionRoom(
+                data, actions, shownLens, { l -> lens = l; if (l == RoomLens.CHANGES && sessionState.diffs[sessionId] == null) requestChanges() },
+                draft, { draft = it; if (composerProblem != null) composerProblem = null }, runId, { runId = it },
+                focusComposer = entry.focusesComposer, stopHint = stopHint, photos = RoomPhotoTray(photoDraft, thumbs.toMap()),
+            )
+        }
         // A decision opened from the room is a sheet over it; "Open session" there just comes back here.
         val pageId = presentedPage
         val pageRow = pageId?.let { id -> inbox.firstOrNull { it.id == id }?.let { NowRowBuilder.row(it, session, macName) } }
@@ -427,8 +434,9 @@ fun AgentRoomContainer(sessionId: String, runId: String, agentId: String, onBack
     val transcript = s.agentTranscript(sessionId, runId, agentId)
     val state = agent?.let { WorkflowOrbit.nodeState(it) } ?: WorkflowOrbit.NodeState.STOPPED
     androidx.activity.compose.BackHandler(onBack = onBack)
-    NWAgentRoomScreen(
-        run?.name ?: "Workflow", agent?.label ?: "Agent", state,
-        transcript?.let { AgentRoomModel.build(it.entries, state != WorkflowOrbit.NodeState.RUNNING, it.truncated) }, onBack,
-    )
+    val model = transcript?.let { AgentRoomModel.build(it.entries, state != WorkflowOrbit.NodeState.RUNNING, it.truncated) }
+    // The task card and the blocks rise in: those there as the screen opens staggered, later ones as they arrive.
+    val arrivals = remember(runId, agentId) { WorkflowMotion.Arrivals() }
+    val arrivedAt = arrivals.observe(listOfNotNull(model?.task?.let { "task" }) + (model?.blocks?.map { it.id } ?: emptyList()), nwClockSeconds())
+    NWAgentRoomScreen(run?.name ?: "Workflow", agent?.label ?: "Agent", state, model, onBack, arrivedAt = arrivedAt)
 }

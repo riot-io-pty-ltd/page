@@ -72,6 +72,7 @@ object Demo {
         "dispatch", "dispatch-sending", "dispatch-off",
         "runway", "settled", "gallery", "glow-compare",
         "room-story", "room-screen", "room-changes", "room-workflows", "room-waiting", "room-codex", "room-local", "room-agent",
+        "room-workflows-running", "room-workflows-finish", "room-workflows-complete", "room-workflows-done", "room-agent-live",
         "room-yesno", "room-yesno-busy", "room-ended", "room-blocked", "room-stop", "room-draft", "room-receipt", "room-receipt-refused",
         "room-choice", "room-choice-quiet", "room-codex-hold", "room-countdown", "room-held", "room-held-note", "room-yesno-arm",
         "room-photos", "room-photos-1", "room-photos-path", "room-photos-busy", "room-photos-blocked", "room-photos-uploading", "room-photos-sent",

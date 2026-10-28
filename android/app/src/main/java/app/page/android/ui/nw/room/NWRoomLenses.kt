@@ -38,40 +38,64 @@ import androidx.compose.material.icons.outlined.WrapText
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.GraphicsLayerScope
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import app.page.android.data.AppGraph
 import app.page.android.model.AgentRoomModel
 import app.page.android.model.ChangesModel
+import app.page.android.model.MotionCurve
+import app.page.android.model.OneShotBook
 import app.page.android.model.RelativeTime
 import app.page.android.model.ScreenFreshness
 import app.page.android.model.StoryBlock
 import app.page.android.model.TerminalRunLinks
 import app.page.android.model.TerminalTone
+import app.page.android.model.WorkflowMotion
 import app.page.android.model.WorkflowOrbit
 import app.page.android.model.WorkflowRun
 import app.page.android.ui.nw.components.NWAnswerHost
@@ -80,14 +104,22 @@ import app.page.android.ui.nw.components.NWButtonKind
 import app.page.android.ui.nw.components.NWBackdrop
 import app.page.android.ui.nw.components.NWDeliveryPreview
 import app.page.android.ui.nw.components.NWGlassCard
+import app.page.android.ui.nw.components.nwClockSeconds
+import app.page.android.ui.nw.components.nwClockSleepMillis
+import app.page.android.ui.nw.components.nwClockStepNanos
 import app.page.android.ui.nw.components.nwIcon
 import app.page.android.ui.nw.now.NWOutcomeStrip
 import app.page.android.ui.nw.now.RowStatus
+import app.page.android.ui.nw.theme.LocalAnimationsPaused
+import app.page.android.ui.nw.theme.LocalFixedPhase
+import app.page.android.ui.nw.theme.LocalReduceMotion
+import app.page.android.ui.nw.theme.LocalWorkflowScript
 import app.page.android.ui.nw.theme.NW
 import app.page.android.ui.nw.theme.Rgba
 import java.time.Instant
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlinx.coroutines.delay
 
 // The room's other three lenses: Screen (the Mac's mirror of the terminal), Changes (what the turn changed, with
 // the diff) and Workflows (a run as a ring of agent nodes). All of them are read-only; the only thing they can ask
@@ -348,40 +380,289 @@ private fun WorkflowOrbit.NodeState.spoken(): String = when (this) {
     WorkflowOrbit.NodeState.STOPPED -> "didn't finish"
 }
 
-/** The multi-agent run as a ring of nodes with "4/7 agents done" in the middle. Tap a node for that agent's transcript. */
+/** When each run's ring first closed with its pulse, so it plays once per run however often the lens is opened. */
+private val workflowPulseBook = OneShotBook()
+
+/**
+ * One timeline for a workflow view: seconds on the [nwClockSeconds] base, ticking at most 30 times a second and only
+ * while [animatingAt] says something moves, so a finished, settled run draws with no clock at all. It holds while the app
+ * is in the background or the room is covered ([LocalAnimationsPaused]); the render harness pins it ([LocalFixedPhase]).
+ * Read it in draw and layer lambdas, so a tick redraws without recomposing. [key] restarts it (a new change to play).
+ */
 @Composable
-fun NWWorkflowOrbit(orbit: WorkflowOrbit, onAgent: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun rememberMotionClock(key: Any?, animatingAt: (Double) -> Boolean): State<Double> {
+    val fixed = LocalFixedPhase.current
+    val covered = LocalAnimationsPaused.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val clock = remember { mutableStateOf(fixed ?: nwClockSeconds()) }
+    val animating by rememberUpdatedState(animatingAt)
+    if (fixed != null) {
+        clock.value = fixed
+        return clock
+    }
+    LaunchedEffect(key, covered, lifecycle) {
+        clock.value = nwClockSeconds()
+        if (covered) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            val step = nwClockStepNanos(30.0)
+            while (true) {
+                val now = withFrameNanos { nwClockSeconds() }
+                clock.value = now
+                if (!animating(now)) break
+                delay(nwClockSleepMillis(SystemClock.elapsedRealtimeNanos(), step))
+            }
+        }
+    }
+    return clock
+}
+
+/**
+ * The run as the lens has seen it since it appeared ([WorkflowMotion.Track]), each new snapshot observed as it arrives.
+ * Under the render harness it is the script's snapshots folded up to the pinned moment instead, the lens appearing at 0.
+ */
+@Composable
+private fun rememberWorkflowTrack(run: WorkflowRun, now: Instant): WorkflowMotion.Track {
+    val pinned = LocalFixedPhase.current
+    if (pinned != null) {
+        val steps = LocalWorkflowScript.current?.takeIf { it.isNotEmpty() } ?: listOf(0.0 to run)
+        return remember(steps, pinned, now) {
+            // A book of its own, as iOS's replay has none: every pinned frame is the run's first look, and the live lens's book never hears of it.
+            val book = OneShotBook()
+            steps.drop(1).filter { it.first <= pinned }.fold(WorkflowMotion.start(WorkflowOrbit.build(steps[0].second, now), 0.0, book)) { track, (at, r) ->
+                WorkflowMotion.observe(track, WorkflowOrbit.build(r, now), at, book)
+            }
+        }
+    }
+    val orbit = WorkflowOrbit.build(run, now)
+    val held = remember { mutableStateOf<WorkflowMotion.Track?>(null) }
+    val prev = held.value
+    val next = if (prev == null) WorkflowMotion.start(orbit, nwClockSeconds(), workflowPulseBook) else WorkflowMotion.observe(prev, orbit, nwClockSeconds(), workflowPulseBook)
+    if (next !== prev) SideEffect { held.value = next }
+    return next
+}
+
+/** Rising in from [start] on the clock (8 dp and a fade, 0.25 s); under Reduce Motion a plain 0.2 s fade from [fadeFrom]. */
+private fun Modifier.rising(clock: State<Double>, start: Double, reduce: Boolean, fadeFrom: Double = start): Modifier = graphicsLayer {
+    if (reduce) {
+        alpha = MotionCurve.easeOut((clock.value - fadeFrom) / WorkflowMotion.reducedFade).toFloat()
+    } else {
+        val r = WorkflowMotion.rise(clock.value - start)
+        translationY = r.offset.dp.toPx()
+        alpha = r.opacity.toFloat()
+    }
+}
+
+/**
+ * Row [index] of the entrance rising in below the orbit ([WorkflowMotion.row]; every row fades in together under Reduce
+ * Motion). A row inside a card that fades with its first row, [within], measures its own fade against the card's, so
+ * what shows is the row's curve exactly.
+ */
+private fun Modifier.rowRise(clock: State<Double>, openedAt: Double, index: Int, reduce: Boolean, within: Int? = null): Modifier = graphicsLayer {
+    val t = clock.value - openedAt
+    val r = WorkflowMotion.row(t, index, reduce)
+    val card = within?.let { WorkflowMotion.row(t, it, reduce).opacity } ?: 1.0
+    translationY = r.offset.dp.toPx()
+    alpha = (if (card > 1e-3) r.opacity / card else 0.0).coerceIn(0.0, 1.0).toFloat()
+}
+
+/** A card of rows, fading in with its first row so no empty card shows before its rows arrive. */
+private fun Modifier.cardRise(clock: State<Double>, openedAt: Double, first: Int, reduce: Boolean): Modifier = graphicsLayer {
+    alpha = WorkflowMotion.row(clock.value - openedAt, first, reduce).opacity.toFloat()
+}
+
+/**
+ * A status dot that breathes in the nodes' 1.8 s rhythm while [live], all such dots together: the dot swells 1 → 1.12
+ * and a halo twice its size glows 0.25 → 0.5 round it, soft at its edge (iOS blurs it by 0.35 of the dot's size).
+ */
+@Composable
+private fun BreathingDot(color: Rgba, size: Dp, live: Boolean, clock: State<Double>) {
+    Box(
+        Modifier.size(size).drawBehind {
+            val r = this.size.minDimension / 2
+            if (live) {
+                val b = WorkflowMotion.breath(clock.value)
+                val halo = color.opacity(WorkflowMotion.haloFrom + (WorkflowMotion.haloTo - WorkflowMotion.haloFrom) * b).color
+                val soft = 0.7f * r
+                val glow = 2 * r + soft
+                drawCircle(Brush.radialGradient(0f to halo, (2 * r - soft) / glow to halo, 1f to Color.Transparent, center = center, radius = glow), glow)
+                drawCircle(color.color, r * (1 + WorkflowMotion.breathScale * b).toFloat())
+            } else {
+                drawCircle(color.color, r)
+            }
+        },
+    )
+}
+
+/**
+ * The multi-agent run as a ring of nodes with "4/7 agents done" in the middle, in motion ([WorkflowMotion]): nodes pop in
+ * clockwise and the arc sweeps as the lens opens; running nodes breathe and ripple under a comet; a finished agent fills
+ * in place and the ring closes with one soft pulse. One accessibility element sums it up; each node is its own button,
+ * and opens that agent's transcript.
+ */
+@Composable
+fun NWWorkflowOrbit(track: WorkflowMotion.Track, clock: State<Double>, reduce: Boolean, onAgent: (String) -> Unit, modifier: Modifier = Modifier) {
+    val orbit = track.orbit
     val size = 300.dp
     val radius = size / 2 - 18.dp
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Box(Modifier.size(size), contentAlignment = Alignment.Center) {
-            Canvas(Modifier.size(size).clearAndSetSemantics {}) {
-                val c = Offset(this.size.width / 2, this.size.height / 2)
-                val r = radius.toPx()
-                drawCircle(Color.White.copy(alpha = 0.07f), r, c, style = Stroke(1.dp.toPx()))
-                val rr = r * 0.55f
-                drawCircle(Color.White.copy(alpha = 0.07f), rr, c, style = Stroke(12.dp.toPx()))
-                val f = if (orbit.total > 0) orbit.done.toFloat() / orbit.total else 0f
-                drawArc(NW.Palette.teal.opacity(0.25).color, -90f, 360f * f, false, Offset(c.x - rr, c.y - rr), androidx.compose.ui.geometry.Size(rr * 2, rr * 2), style = Stroke(16.dp.toPx(), cap = StrokeCap.Round))
-                drawArc(NW.Palette.teal.color, -90f, 360f * f, false, Offset(c.x - rr, c.y - rr), androidx.compose.ui.geometry.Size(rr * 2, rr * 2), style = Stroke(12.dp.toPx(), cap = StrokeCap.Round))
+            Canvas(Modifier.size(size).clearAndSetSemantics { contentDescription = WorkflowMotion.summary(orbit) }) {
+                drawOrbit(track, clock.value, reduce, radius.toPx())
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clearAndSetSemantics {}) {
-                Text(orbit.centre, style = NW.Typo.hero.copy(fontFamily = FontFamily.Monospace, fontSize = 34.sp), color = NW.Palette.textPrimary.color)
-                Text(orbit.caption, style = NW.Typo.caption, color = NW.Palette.textTertiary.color)
-            }
-            for (n in orbit.nodes) {
-                val x = (sin(n.angle) * radius.value).dp
-                val y = (-cos(n.angle) * radius.value).dp
-                val running = n.state == WorkflowOrbit.NodeState.RUNNING
+            OrbitCentre(track, clock, reduce)
+            val n = track.slots.size
+            for ((i, id) in track.slots.withIndex()) {
+                val node = orbit.nodes.firstOrNull { it.id == id } ?: continue
+                val a = WorkflowMotion.slotAngle(i, n)
                 Box(
-                    Modifier.offset(x, y).size(48.dp).clip(CircleShape).clickable(role = Role.Button, onClickLabel = "Opens this agent's transcript") { onAgent(n.id) }.semantics { contentDescription = "${n.label}, ${n.state.spoken()}" },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Box(Modifier.size(if (running) 30.dp else 22.dp).clip(CircleShape).background(n.state.color.opacity(0.25).color))
-                    Box(Modifier.size(if (running) 20.dp else 15.dp).clip(CircleShape).background(n.state.color.color))
-                }
+                    Modifier.offset((sin(a) * radius.value).dp, (-cos(a) * radius.value).dp).size(48.dp).clip(CircleShape)
+                        .clickable(role = Role.Button, onClickLabel = "Opens this agent's transcript") { onAgent(node.id) }
+                        .semantics { contentDescription = "${node.label}, ${node.state.spoken()}" },
+                )
             }
+            // What just happened while the lens was open, said once, politely ("verify: iOS logic tests finished").
+            val said = track.events?.let { WorkflowMotion.announcement(orbit, it) }
+            Box(Modifier.size(1.dp).semantics { liveRegion = LiveRegionMode.Polite; if (said != null) contentDescription = said })
         }
+    }
+}
+
+private fun DrawScope.drawOrbit(track: WorkflowMotion.Track, now: Double, reduce: Boolean, r: Float) {
+    val c = center
+    val teal = NW.Palette.teal
+    val t = now - track.openedAt
+    val tracks = if (reduce) MotionCurve.easeOut(t / WorkflowMotion.reducedFade) else WorkflowMotion.trackOpacity(t)
+    val trackColor = Color.White.copy(alpha = (0.07 * tracks).toFloat())
+    val live = track.orbit.isRunning && !reduce
+    // A run that has just stopped lets its comet and head fade out with the chip instead of vanishing (as iOS does).
+    val mix = WorkflowMotion.statusMix(track, now, reduce)
+    val stopping = !reduce && !track.orbit.isRunning && track.statusFrom?.isRunning == true && mix < 1
+    val loops = if (live) 1.0 else if (stopping) 1 - mix else 0.0
+    drawCircle(trackColor, r, c, style = Stroke(1.dp.toPx()))
+    if (loops > 0) {
+        // The comet: a 40° tail of teal round the orbit track, once every 8 s, clockwise. Drawn ending at 3 o'clock and
+        // turned so its head sits where the clock says.
+        val span = WorkflowMotion.cometSpan.toFloat()
+        rotate(Math.toDegrees(WorkflowMotion.cometAngle(now)).toFloat() - 90f, c) {
+            val tail = Brush.sweepGradient(0f to Color.Transparent, (360f - span) / 360f to Color.Transparent, 1f to teal.opacity(WorkflowMotion.cometOpacity * tracks * loops).color, center = c)
+            val box = Size(r * 2, r * 2)
+            val at = Offset(c.x - r, c.y - r)
+            drawArc(tail, 360f - span, span, false, at, box, alpha = 0.35f, style = Stroke(6.dp.toPx()))
+            drawArc(tail, 360f - span, span, false, at, box, style = Stroke(2.dp.toPx()))
+        }
+    }
+    val rr = r * 0.55f
+    val ring = Size(rr * 2, rr * 2)
+    val ringAt = Offset(c.x - rr, c.y - rr)
+    drawCircle(trackColor, rr, c, style = Stroke(12.dp.toPx()))
+    val f = WorkflowMotion.arc(track, now, reduce).toFloat()
+    // The arc sweeps in on its own; under Reduce Motion it is there at once, fading in with everything else.
+    val content = if (reduce) tracks else 1.0
+    if (f > 0.0005f) {
+        // The thick teal arc on a soft glow (iOS: a 10 pt teal shadow).
+        drawRingGlow(teal, 0.55 * content, c, rr, 16.dp.toPx(), 360f * f)
+        drawArc(teal.opacity(content).color, -90f, 360f * f, false, ringAt, ring, style = Stroke(12.dp.toPx(), cap = StrokeCap.Round))
+        if (loops > 0) {
+            // The arc's leading end carries a small head that glows with the breath, fading with the comet as the run stops.
+            val b = WorkflowMotion.breath(now).toFloat()
+            val a = Math.toRadians(-90.0 + 360.0 * f)
+            val head = Offset(c.x + cos(a).toFloat() * rr, c.y + sin(a).toFloat() * rr)
+            val hr = (8f + 3f * b) * density
+            drawCircle(Brush.radialGradient(listOf(teal.opacity((0.3 + 0.4 * b) * content * loops).color, Color.Transparent), center = head, radius = hr), hr, head)
+            drawCircle(teal.mixed(NW.Palette.white, 0.6).opacity(content * loops).color, 3.5f * density, head)
+        }
+    }
+    // The ring closing: one soft glow grows off it and fades.
+    WorkflowMotion.pulse(track, now, reduce)?.let { p -> drawRingGlow(teal, p.ringOpacity, c, rr * p.ringScale.toFloat(), 9.dp.toPx(), 360f) }
+    for (nf in WorkflowMotion.nodes(track, now, reduce)) {
+        val p = Offset(c.x + sin(nf.angle).toFloat() * r, c.y - cos(nf.angle).toFloat() * r)
+        val to = nf.node.state
+        val col = nf.from.color.mixed(to.color, nf.mix)
+        fun sized(running: Float, other: Float, of: WorkflowOrbit.NodeState) = if (of == WorkflowOrbit.NodeState.RUNNING) running else other
+        val halo = (sized(15f, 11f, nf.from) + (sized(15f, 11f, to) - sized(15f, 11f, nf.from)) * nf.mix.toFloat()) * density * nf.scale.toFloat()
+        val core = (sized(10f, 7.5f, nf.from) + (sized(10f, 7.5f, to) - sized(10f, 7.5f, nf.from)) * nf.mix.toFloat()) * density * nf.scale.toFloat()
+        val o = nf.opacity
+        // Its rings grow with the node as it pops in (iOS scales the whole node).
+        val k = nf.scale.toFloat()
+        nf.ripple?.let { drawCircle(col.opacity(it.opacity * o).color, it.radius.toFloat() * density * k, p, style = Stroke(1.5.dp.toPx() * k)) }
+        nf.burst?.let { drawCircle(to.color.opacity(it.opacity).color, it.radius.toFloat() * density * k, p, style = Stroke(1.5.dp.toPx() * k)) }
+        val haloAlpha = if (to == WorkflowOrbit.NodeState.RUNNING) WorkflowMotion.haloFrom + (WorkflowMotion.haloTo - WorkflowMotion.haloFrom) * nf.breath else WorkflowMotion.haloFrom
+        // The halo glows: full strength to within 4 dp of its edge, then soft to 4 dp past it (iOS blurs it 4 pt).
+        val soft = 4 * density * nf.scale.toFloat()
+        val glow = halo + soft
+        if (glow > 0f) {
+            val haloColor = col.opacity(haloAlpha * o).color
+            drawCircle(Brush.radialGradient(0f to haloColor, (halo - soft).coerceAtLeast(0f) / glow to haloColor, 1f to Color.Transparent, center = p, radius = glow), glow, p)
+        }
+        drawCircle(col.opacity(o).color, core * (1 + WorkflowMotion.breathScale * nf.breath).toFloat(), p)
+        // An agent that has just finished: the done colour fills its disc from the middle.
+        nf.fill?.let { drawCircle(to.color.opacity(o).color, core * it.toFloat(), p) }
+    }
+}
+
+/**
+ * A soft glow along the ring of radius [rr], from 12 o'clock clockwise for [sweep] degrees: [peak] on the ring, fading to
+ * nothing [w] either side, and rounding off softly where an arc ends. Radial gradients, like the app's other glows (a
+ * blur is not drawn on every API level the app supports).
+ */
+private fun DrawScope.drawRingGlow(color: Rgba, peak: Double, c: Offset, rr: Float, w: Float, sweep: Float) {
+    if (peak <= 0 || w <= 0f || rr <= w / 2) return
+    val outer = rr + w
+    val on = color.opacity(peak).color
+    val half = color.opacity(peak * 0.35).color
+    val across = Brush.radialGradient(
+        (rr - w).coerceAtLeast(0f) / outer to Color.Transparent, (rr - w / 2) / outer to half, rr / outer to on, (rr + w / 2) / outer to half, 1f to Color.Transparent,
+        center = c, radius = outer,
+    )
+    if (sweep >= 359.9f) {
+        drawCircle(across, outer, c)
+        return
+    }
+    drawArc(across, -90f, sweep, false, Offset(c.x - rr, c.y - rr), Size(rr * 2, rr * 2), style = Stroke(w * 2))
+    // Each end: half a disc of the same falloff, facing away from the arc.
+    for ((end, from) in listOf(-90f to 90f, (sweep - 90f) to (sweep - 90f))) {
+        val a = Math.toRadians(end.toDouble())
+        val p = Offset(c.x + cos(a).toFloat() * rr, c.y + sin(a).toFloat() * rr)
+        drawArc(Brush.radialGradient(0f to on, 0.5f to half, 1f to Color.Transparent, center = p, radius = w), from, 180f, true, Offset(p.x - w, p.y - w), Size(w * 2, w * 2))
+    }
+}
+
+/** "4/7 agents done": the count climbs with the sweep, rolls up to each new count, and swells once as the ring closes. */
+@Composable
+private fun OrbitCentre(track: WorkflowMotion.Track, clock: State<Double>, reduce: Boolean) {
+    // Only the whole numbers recompose; the roll itself is read as the layer is drawn.
+    val shown by remember(track, reduce) { derivedStateOf { WorkflowMotion.count(track, clock.value, reduce).let { it.value to it.previous } } }
+    val style = NW.Typo.hero.copy(fontFamily = FontFamily.Monospace, fontSize = 34.sp)
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clearAndSetSemantics {}.graphicsLayer {
+            val now = clock.value
+            val s = (WorkflowMotion.pulse(track, now, reduce)?.textScale ?: 1.0).toFloat()
+            scaleX = s
+            scaleY = s
+            if (reduce) alpha = MotionCurve.easeOut((now - track.openedAt) / WorkflowMotion.reducedFade).toFloat()
+        },
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val (value, previous) = shown
+            Box(Modifier.clipToBounds(), contentAlignment = Alignment.Center) {
+                // The old count slides up and out as the new one comes up from below (a cross-fade under Reduce Motion).
+                if (previous != null) Text("$previous", style = style, color = NW.Palette.textPrimary.color, modifier = Modifier.graphicsLayer {
+                    val k = WorkflowMotion.count(track, clock.value, reduce).roll.toFloat()
+                    translationY = if (reduce) 0f else -size.height * k
+                    alpha = 1 - k
+                })
+                Text("$value", style = style, color = NW.Palette.textPrimary.color, modifier = Modifier.graphicsLayer {
+                    if (previous != null) {
+                        val k = WorkflowMotion.count(track, clock.value, reduce).roll.toFloat()
+                        translationY = if (reduce) 0f else size.height * (1 - k)
+                        alpha = k
+                    }
+                })
+            }
+            Text("/${track.orbit.total}", style = style, color = NW.Palette.textPrimary.color)
+        }
+        Text(track.orbit.caption, style = NW.Typo.caption, color = NW.Palette.textTertiary.color)
     }
 }
 
@@ -402,23 +683,8 @@ fun NWRoomWorkflowsLens(data: SessionRoomData, actions: SessionRoomActions, runI
                 }
             }
         }
-        if (run != null) {
-            val orbit = WorkflowOrbit.build(run, data.now)
-            NWGlassCard(radius = 28.dp, padding = PaddingValues(18.dp), tint = if (run.isRunning) NW.Palette.teal else null) {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(verticalAlignment = Alignment.Top) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(run.name, style = NW.Typo.title.copy(fontFamily = FontFamily.Monospace), color = NW.Palette.textPrimary.color, maxLines = 2)
-                            if (orbit.meta.isNotEmpty()) Text(orbit.meta, style = NW.Typo.subline, color = NW.Palette.textTertiary.color)
-                        }
-                        RunChip(run)
-                    }
-                    run.summary?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textSecondary.color, modifier = Modifier.padding(top = 2.dp)) }
-                    NWWorkflowOrbit(orbit, { actions.openAgent(run.id, it) }, Modifier.padding(top = 8.dp))
-                }
-            }
-            Agents(run, data.now, actions)
-        }
+        // Keyed by the run, so picking another one plays its entrance afresh.
+        if (run != null) key(run.id) { WorkflowRunView(run, data, actions) }
         WorkflowOrbit.finishedLine(data.runs, data.now)?.let { line ->
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Color.White.copy(alpha = 0.045f)).padding(14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(nwIcon("checkmark.circle"), null, tint = NW.Palette.teal.color, modifier = Modifier.size(20.dp))
@@ -429,36 +695,95 @@ fun NWRoomWorkflowsLens(data: SessionRoomData, actions: SessionRoomActions, runI
     }
 }
 
+/** One run: its card with the orbit, then its agents, on one timeline. */
 @Composable
-private fun RunChip(run: WorkflowRun) {
-    val c = if (run.isRunning) NW.Palette.teal else if (run.status == "failed" || run.status == "stalled") NW.Palette.amber else NW.Palette.textSecondary
-    Row(Modifier.heightIn(min = 34.dp).clip(CircleShape).background(c.opacity(0.14).color).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(c.color))
-        Text(run.statusLabel.uppercase(), style = NW.Typo.label, color = c.color)
+private fun WorkflowRunView(run: WorkflowRun, data: SessionRoomData, actions: SessionRoomActions) {
+    val reduce = LocalReduceMotion.current
+    val track = rememberWorkflowTrack(run, data.now)
+    val clock = rememberMotionClock(listOf(WorkflowMotion.settlesAt(track, reduce), track.orbit.isRunning, reduce)) { WorkflowMotion.animating(track, it, reduce) }
+    val orbit = track.orbit
+    // The card's teal wash fades with the status chip as the run ends: teal blending into the card's own surface, in
+    // twentieths, so the card recomposes a few times during the fade and never while it holds.
+    val wash by remember(track, reduce) {
+        derivedStateOf {
+            val k = WorkflowMotion.statusMix(track, clock.value, reduce)
+            val from = if (track.statusFrom?.isRunning == true) 1.0 else 0.0
+            val to = if (orbit.isRunning) 1.0 else 0.0
+            kotlin.math.round((from + (to - from) * k) * 20) / 20
+        }
+    }
+    val tint = when {
+        wash >= 1.0 -> NW.Palette.teal
+        wash <= 0.0 -> null
+        else -> NW.Palette.teal.mixed(NW.Palette.surface, 1 - wash)
+    }
+    NWGlassCard(radius = 28.dp, padding = PaddingValues(18.dp), tint = tint) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(run.name, style = NW.Typo.title.copy(fontFamily = FontFamily.Monospace), color = NW.Palette.textPrimary.color, maxLines = 2, modifier = Modifier.weight(1f).padding(end = 8.dp))
+                RunChip(track, clock, reduce)
+            }
+            // Its own line, clear of the chip, so a change of status never reflows the card.
+            if (orbit.meta.isNotEmpty()) Text(orbit.meta, style = NW.Typo.subline, color = NW.Palette.textTertiary.color)
+            run.summary?.let { Text(it, style = NW.Typo.caption, color = NW.Palette.textSecondary.color, modifier = Modifier.padding(top = 2.dp)) }
+            NWWorkflowOrbit(track, clock, reduce, { actions.openAgent(run.id, it) }, Modifier.padding(top = 8.dp))
+        }
+    }
+    Agents(run, data.now, actions, track, clock, reduce)
+}
+
+private fun runChipColor(o: WorkflowOrbit): Rgba =
+    if (o.isRunning) NW.Palette.teal else if (o.status == "failed" || o.status == "stalled") NW.Palette.amber else NW.Palette.textSecondary
+
+/** The run's status; its dot breathes while it runs, and RUNNING cross-fades to DONE or FAILED as it ends. */
+@Composable
+private fun RunChip(track: WorkflowMotion.Track, clock: State<Double>, reduce: Boolean) {
+    @Composable
+    fun face(o: WorkflowOrbit, alpha: GraphicsLayerScope.() -> Float) {
+        val c = runChipColor(o)
+        Row(
+            Modifier.graphicsLayer { this.alpha = alpha() }.heightIn(min = 34.dp).clip(CircleShape).background(c.opacity(0.14).color).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically,
+        ) {
+            BreathingDot(c, 8.dp, o.isRunning && !reduce, clock)
+            Text(o.statusLabel.uppercase(), style = NW.Typo.label, color = c.color)
+        }
+    }
+    Box(contentAlignment = Alignment.CenterEnd) {
+        // The status it is leaving only fades out of sight, so TalkBack never hears it: it reads the run as it is now.
+        track.statusFrom?.let { from -> Box(Modifier.clearAndSetSemantics {}) { face(from) { 1f - WorkflowMotion.statusMix(track, clock.value, reduce).toFloat() } } }
+        face(track.orbit) { WorkflowMotion.statusMix(track, clock.value, reduce).toFloat() }
     }
 }
 
 @Composable
-private fun Agents(run: WorkflowRun, now: Instant, actions: SessionRoomActions) {
+private fun Agents(run: WorkflowRun, now: Instant, actions: SessionRoomActions, track: WorkflowMotion.Track, clock: State<Double>, reduce: Boolean) {
+    // The rows rise in one after another below the orbit, counted down the whole list; a group's title with its first row.
+    val groups = WorkflowOrbit.groups(run)
+    val firstRow = groups.runningFold(0) { n, g -> n + g.second.size }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        for ((title, agents) in WorkflowOrbit.groups(run)) {
-            Text("${title.uppercase()} · ${agents.size}", style = NW.Typo.label, color = NW.Palette.textQuiet.color, modifier = Modifier.padding(top = 4.dp))
-            NWGlassCard(radius = 20.dp, padding = PaddingValues(0.dp)) {
+        for ((g, group) in groups.withIndex()) {
+            val (title, agents) = group
+            Text("${title.uppercase()} · ${agents.size}", style = NW.Typo.label, color = NW.Palette.textQuiet.color, modifier = Modifier.padding(top = 4.dp).rowRise(clock, track.openedAt, firstRow[g], reduce))
+            NWGlassCard(Modifier.cardRise(clock, track.openedAt, firstRow[g], reduce), radius = 20.dp, padding = PaddingValues(0.dp)) {
                 agents.forEachIndexed { i, a ->
                     val state = WorkflowOrbit.nodeState(a)
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 60.dp).clickable(role = Role.Button, onClickLabel = "Opens this agent's transcript") { actions.openAgent(run.id, a.id) }.padding(horizontal = 16.dp, vertical = 12.dp)
-                            .semantics(mergeDescendants = false) { contentDescription = "${a.label}, ${state.spoken()}" },
-                        horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(Modifier.size(10.dp).clip(CircleShape).background(state.color.color))
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                            Text(a.label, style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(agentMeta(a, state, now), style = NW.Typo.caption, color = (if (state == WorkflowOrbit.NodeState.FAILED) NW.Palette.amber else NW.Palette.textTertiary).color)
+                    Column(Modifier.rowRise(clock, track.openedAt, firstRow[g] + i, reduce, within = firstRow[g])) {
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 60.dp).clickable(role = Role.Button, onClickLabel = "Opens this agent's transcript") { actions.openAgent(run.id, a.id) }.padding(horizontal = 16.dp, vertical = 12.dp)
+                                .semantics(mergeDescendants = false) { contentDescription = "${a.label}, ${state.spoken()}" },
+                            horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            // Breathes in the run chip's rhythm.
+                            BreathingDot(state.color, 10.dp, state == WorkflowOrbit.NodeState.RUNNING && !reduce, clock)
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                                Text(a.label, style = NW.Typo.bodyStrong, color = NW.Palette.textPrimary.color, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Text(agentMeta(a, state, now), style = NW.Typo.caption, color = (if (state == WorkflowOrbit.NodeState.FAILED) NW.Palette.amber else NW.Palette.textTertiary).color)
+                            }
+                            Icon(Icons.Outlined.ChevronRight, null, tint = NW.Palette.textQuiet.color, modifier = Modifier.size(18.dp))
                         }
-                        Icon(Icons.Outlined.ChevronRight, null, tint = NW.Palette.textQuiet.color, modifier = Modifier.size(18.dp))
+                        if (i < agents.size - 1) Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.06f)))
                     }
-                    if (i < agents.size - 1) Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.06f)))
                 }
             }
         }
@@ -478,9 +803,28 @@ private fun agentMeta(a: WorkflowRun.Agent, state: WorkflowOrbit.NodeState, now:
 
 // MARK: - A workflow agent
 
-/** One workflow agent: what it was asked, what it did, what it said. Read only. It lives inside a run, so its header names the run it belongs to. */
+/**
+ * One workflow agent: what it was asked, what it did, what it said. Read only. It lives inside a run, so its header names
+ * the run it belongs to. Its status dot breathes while it runs, and its items rise in, staggered as it opens and then as
+ * they arrive ([arrivedAt]: "task" or a block id to the [nwClockSeconds] moment it starts rising, from
+ * [WorkflowMotion.Arrivals]).
+ */
 @Composable
-fun NWAgentRoomScreen(runName: String, agentLabel: String, state: WorkflowOrbit.NodeState, model: AgentRoomModel?, onBack: () -> Unit, modifier: Modifier = Modifier) {
+fun NWAgentRoomScreen(
+    runName: String,
+    agentLabel: String,
+    state: WorkflowOrbit.NodeState,
+    model: AgentRoomModel?,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    arrivedAt: Map<String, Double> = emptyMap(),
+) {
+    val reduce = LocalReduceMotion.current
+    val running = state == WorkflowOrbit.NodeState.RUNNING
+    val lastArrival = arrivedAt.values.maxOrNull()
+    val clock = rememberMotionClock(listOf(running, lastArrival, reduce)) { now ->
+        (running && !reduce) || (lastArrival != null && now < lastArrival + if (reduce) WorkflowMotion.reducedFade else WorkflowMotion.rowDuration)
+    }
     val top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     Box(modifier.fillMaxSize().background(NW.Palette.backgroundDeep.color)) {
         NWBackdrop()
@@ -495,7 +839,7 @@ fun NWAgentRoomScreen(runName: String, agentLabel: String, state: WorkflowOrbit.
                 }
                 val c = state.color
                 Row(Modifier.heightIn(min = 34.dp).clip(CircleShape).background(c.opacity(0.14).color).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).clip(CircleShape).background(c.color))
+                    BreathingDot(c, 8.dp, running && !reduce, clock)
                     Text(when (state) { WorkflowOrbit.NodeState.RUNNING -> "RUNNING"; WorkflowOrbit.NodeState.DONE -> "DONE"; WorkflowOrbit.NodeState.FAILED -> "FAILED"; else -> "STOPPED" }, style = NW.Typo.label, color = c.color)
                 }
             }
@@ -505,15 +849,19 @@ fun NWAgentRoomScreen(runName: String, agentLabel: String, state: WorkflowOrbit.
                 if (model != null) {
                     if (model.truncated) Text("Earlier steps aren't shown", style = NW.Typo.caption, color = NW.Palette.textQuiet.color, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                     model.task?.let { task ->
+                        val at = arrivedAt["task"]
                         Column(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(NW.Palette.surface.mixed(NW.Palette.violet.opacity(1.0), 0.06).opacity(0.95).color).padding(16.dp).semantics(mergeDescendants = true) {},
+                            (if (at == null) Modifier else Modifier.rising(clock, at, reduce)).fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(NW.Palette.surface.mixed(NW.Palette.violet.opacity(1.0), 0.06).opacity(0.95).color).padding(16.dp).semantics(mergeDescendants = true) {},
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             Text("TASK FROM THE WORKFLOW", style = NW.Typo.label, color = NW.Palette.violet.color)
                             SelectionContainer { Text(task, style = NW.Typo.subline, color = NW.Palette.textPrimary.color) }
                         }
                     }
-                    for (b in model.blocks) AgentBlock(b)
+                    for (b in model.blocks) {
+                        val at = arrivedAt[b.id]
+                        if (at == null) AgentBlock(b) else Box(Modifier.rising(clock, at, reduce)) { AgentBlock(b) }
+                    }
                     if (model.blocks.isEmpty() && model.task == null) Text("Nothing yet.", style = NW.Typo.body, color = NW.Palette.textTertiary.color)
                 } else {
                     Row(Modifier.fillMaxWidth().padding(top = 40.dp), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally), verticalAlignment = Alignment.CenterVertically) {

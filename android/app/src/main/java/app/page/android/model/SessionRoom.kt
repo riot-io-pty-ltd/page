@@ -701,6 +701,13 @@ data class WorkflowOrbit(
     val meta: String,
     val statusLabel: String,
     val isRunning: Boolean,
+    val runId: String = "",
+    /** running, completed, failed, killed, stalled: the chip's colour. */
+    val status: String = "",
+    /** Counted over all the run's agents, not only the drawn nodes. */
+    val running: Int = 0,
+    val failed: Int = 0,
+    val stopped: Int = 0,
 ) {
     enum class NodeState { RUNNING, DONE, FAILED, STOPPED }
 
@@ -738,7 +745,11 @@ data class WorkflowOrbit(
             run.phase?.let { meta.add("phase $it") }
             run.startedAt?.let { meta.add(WorkflowRun.duration(((run.endedAt ?: now).secondsSince(it)))) }
             run.tokens?.let { meta.add(WorkflowRun.tokens(it)) }
-            return WorkflowOrbit(run.name, nodes, run.done, run.total, "${run.done}/${run.total}", "agents done", meta.joinToString(" · "), run.statusLabel, run.isRunning)
+            val states = run.agents.map { nodeState(it) }
+            return WorkflowOrbit(
+                run.name, nodes, run.done, run.total, "${run.done}/${run.total}", "agents done", meta.joinToString(" · "), run.statusLabel, run.isRunning,
+                run.id, run.status, states.count { it == NodeState.RUNNING }, states.count { it == NodeState.FAILED }, states.count { it == NodeState.STOPPED },
+            )
         }
 
         /** "2 finished today · design-pass ✓ · port-android ✓", or null. */

@@ -70,6 +70,18 @@ object MotionCurve {
 }
 
 /**
+ * When each one-shot first played, by key (seconds on whatever clock the caller uses), so a motion plays once per key
+ * however often its view is rebuilt: the first [start] for a key records [now], later ones return that first time.
+ * (iOS OneShotBook.)
+ */
+class OneShotBook {
+    private val starts = HashMap<String, Double>()
+
+    @Synchronized
+    fun start(key: String, now: Double): Double = starts.getOrPut(key) { now }
+}
+
+/**
  * Colour blends for the exhale, through OKLCH (lightness, chroma, hue) the shorter way round the hue wheel.
  * A plain sRGB blend between two colours from opposite sides of the wheel, amber and teal, sinks through khaki
  * and grey half way; this one keeps its chroma, so amber turns to teal by way of an aurora green. Pure;
