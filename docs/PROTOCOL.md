@@ -213,7 +213,7 @@ any `intervention.*`.
 | `intervention.opened` | Intervention | A page opened, or a shadowed page was restored |
 | `intervention.closed` | `{id, reason}` | A page closed ([reasons](#13-close-reasons)) |
 | `heartbeat` | `{ts, activeSessions, battery, onAC?}` | Every Mac heartbeat, forwarded |
-| `reply.result` | `{interventionId, success, method, detail}` | v2. Delivery outcome of a reply (from the Mac, the hook's close, or the queue expiring) |
+| `reply.result` | `{interventionId, success, method, detail, cancelled?}` | v2. Delivery outcome of a reply (from the Mac, the hook's close, the queue expiring, or the phone deleting a queued reply). `cancelled: true` (with `method: "retracted"`, `success: false`) only after a [retract](#delete-replyid-reply-retract-v1) |
 | `mac.status` | `{macConnected, lastHeartbeatAt?}` | v2. A Mac socket connected, or the last one closed |
 | `relay.retired` | `{reason, why}` | v2. The token was retired: re-pair ([§10](#10-token-retirement)) |
 
@@ -233,6 +233,7 @@ limited to 256 KiB (`413 body_too_large`). Malformed JSON gets
 | `GET /history?limit=N&all=1` | phone, hook | `200 Intervention[]`, closed, newest first. `limit` 1–300 (default 100). `superseded`/`evicted` closes are hidden unless `all=1` | |
 | `GET /status` | phone | `200` [status object](#9-presence) | |
 | `POST /reply/:id` | phone | `200 {ok: true, queued}` | see [§8](#8-replies-and-delivery-confirmation) |
+| `DELETE /reply/:id` | phone | `200 {ok: true, retracted}` | `reply-retract-v1`; see [§8](#delete-replyid-reply-retract-v1) |
 | `POST /device/register` | phone | `200 {ok: true, apnsEnv}` (the environment the Worker will use) | `400 bad_request` / `missing_apnsToken` / `invalid_apnsToken` |
 | `POST /device/unregister` | phone | `200 {ok: true, removed}` | `400 invalid_apnsToken` |
 | `POST /intervention` | hook, older Macs | `200 {ok: true, …}` ([frame-specific extras](#post-intervention-responses)) | `400 bad_request` (not an envelope), `400 <validation code>` |
@@ -374,6 +375,49 @@ and `deliveryStatus: "pending"`, then does one of:
   after 1 h, or 10 min for closed-page replies ("Your Mac was offline too
   long — reply not delivered"). At most 200 are queued.
 
+The queued flag is not stored on the record. A phone that relaunches can tell
+a queued reply from a forwarded one by `deliveryStatus: "pending"` with no
+`deliveryForwardedAt`, on a page that isn't hook-blocking.
+
+### DELETE /reply/:id (reply-retract-v1)
+
+Takes back a reply that is still waiting in the queue for an offline Mac.
+Same bearer auth and id rules as `POST /reply/:id`. Any body is ignored. A
+relay that advertises `reply-retract-v1` in `GET /status` `features` has
+this route. An older relay answers `404 not_found` (unknown path), so phones
+offer Delete only when the feature is present and the reply is queued.
+
+| Status | Body | When |
+|---|---|---|
+| `200` | `{ok: true, retracted: true}` | A queue entry for the id existed and was deleted. That reply was never sent. (An earlier reply to the same page that was forwarded and then timed out unacked isn't tracked any more. The Mac may still type that one) |
+| `200` | `{ok: true, retracted: false, nothing: true}` | The relay holds no live reply: none was sent, it already failed (expired, dropped, Mac failure), it was already retracted, or the id is only tombstoned. This doesn't vouch for delivery. A reply flushed before its record was evicted or forgotten by a `stale` close also answers this (or `404`) |
+| `409` | `too_late` + `stage: "forwarded"`, `deliveryForwardedAt` | The queue already handed it to a Mac socket (or it went straight to a connected Mac). Also after the 20 min ack timeout, since the Mac may still type it |
+| `409` | `too_late` + `stage: "delivered"` | The Mac reported it delivered |
+| `409` | `too_late` + `stage: "not_held"` | Pending, but neither queued, forwarded nor hook-held. The relay doesn't hold it, so it can't vouch it wasn't sent |
+| `409` | `hook_held` | Stored for a blocking hook. The hook may already have read it from `GET /interventions` |
+| `404` | `no_such_intervention` | Not pending, archived or tombstoned. Phones tell this from an old relay's `404 not_found` by the `error` string, never by the status alone |
+| `400` | `bad_id` | Empty, > 200 chars or badly encoded id |
+| `410` | `token_retired` + `why` | The pairing was retired |
+
+On `retracted: true` the Worker:
+
+- deletes the `q:` entry (or entries) for the id;
+- if the record (pending or archived) is still `deliveryStatus: "pending"`,
+  sets `deliveryStatus: "failed"`, `deliveryMethod: "retracted"`,
+  `deliveryDetail: "Deleted — not sent"` and clears `repliedAt`,
+  `repliedAction` and `repliedText`, so a fresh reply is accepted rather
+  than refused with `409 already_replied`;
+- broadcasts `reply.result {interventionId, success: false, method:
+  "retracted", cancelled: true, detail: "Deleted — not sent"}` to phone
+  sockets. Phones that don't know `cancelled` show it as a failed delivery
+  with that detail. No APNs alert is sent: the user asked for it.
+
+The handler only awaits storage (no fetch), so the Durable Object's input
+gate serialises it against the queue flush: a reply is either still queued
+(and deleted, never sent) or already forwarded (`too_late`), never both. A
+queue entry past its TTL that the alarm hasn't swept yet counts as queued:
+it was never sent either.
+
 ### reply.injected → reply.result
 
 The Mac reports every delivery attempt:
@@ -406,6 +450,8 @@ The Mac reports every delivery attempt:
 | `battery` | Mac Coordinator, replies to low-battery pages |
 | `hook` | Hook (it also posts `reply.injected` before closing), and the Worker when a blocking-hook page closes |
 | `queue` | Worker, a queued reply expired or was dropped |
+| `retracted` | Worker, the phone deleted a queued reply (`DELETE /reply/:id`) |
+| `retracted` | Mac (`reply.injected`), the phone deleted a reply the Mac was holding (rate-limit or resume queue). The Worker frees the page like a retract, broadcasts `reply.result` with `cancelled: true`, and sends no failure alert |
 
 `detail` strings are shown to the user verbatim after "Delivered — " or
 "Failed: ". Keep them short, human and free of secrets.
@@ -419,8 +465,15 @@ The Mac reports every delivery attempt:
   "lastHeartbeatAt": "2026-10-24T12:00:00Z", "activeSessions": 3,
   "battery": 64, "onAC": false,
   "pendingCount": 1, "queuedReplies": 0, "devices": 1,
-  "apnsConfigured": true, "lastPushError": "…" }
+  "apnsConfigured": true, "lastPushError": "…",
+  "features": ["sessions-v1", "reply-retract-v1"] }
 ```
+
+- `features` lists optional relay capabilities. Phones gate features on it
+  and ignore names they don't know. `sessions-v1`: live sessions
+  ([§16](#16-live-sessions)). `reply-retract-v1`: `DELETE /reply/:id`
+  ([§8](#delete-replyid-reply-retract-v1)). A relay without `features` has
+  neither.
 
 - `macConnected` reflects whether a Mac socket is open right now.
 - `macEverSeen` is persisted. It becomes `true` the first time any Mac-side
@@ -649,6 +702,8 @@ generic label for anything new.
 - **Old phones** don't send `apnsEnv`. They get the legacy `PAGE` category
   and host learning. They ignore HTTP status codes, so refusals are silent
   drops on those builds, which is the safe failure.
+- **Old relays** answer `DELETE /reply/:id` with `404 not_found`. Phones
+  offer Delete only when `/status` `features` has `reply-retract-v1`.
 - **Old hooks** (`page-hook/1.x`) are handled by the `hookBlocking` rule.
   Their Notification pages still go to the Mac.
 - **Legacy storage.** A Durable Object written by the pre-v2 Worker
@@ -675,7 +730,7 @@ logs only their size.
 | Phone → Worker | `POST /sessions/command` `{e}` | `202 {ok:true}`: forwarded as `sessions.command` `{e}` to every Mac socket. `503 mac_offline` with no Mac socket (never queued), `400 invalid_envelope` (bad shape) / `invalid_json`, `413 too_large`, `429 rate_limited`, `410 token_retired` |
 | Worker → Mac (WS) | `sessions.command` `{e}` | Never sent to phones |
 | Worker → Mac (WS) | `phones.status` `{phones}` | When a Mac socket connects (or a legacy socket is tagged as the Mac), and when a phone socket opens, closes or errors. `phones` counts open, non-Mac sockets from `state.getWebSockets()`, so it's right after hibernation |
-| `GET /status` | `features: ["sessions-v1"]` | Lets the phone tell "relay too old" from "no sessions" |
+| `GET /status` | `features` includes `"sessions-v1"` | Lets the phone tell "relay too old" from "no sessions" |
 
 Check order for `POST /sessions/command`: size (413), JSON and shape (400),
 Mac online (503), rate (429). Oversized, malformed and Mac-offline commands

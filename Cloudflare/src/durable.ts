@@ -4,14 +4,14 @@ import type {
 import { apnsConfigured, sendApnsPush, type PushRequest } from "./apns.ts";
 import {
   type BuiltPush, type PendingRecord, type Tombstone, type HeartbeatForecast, type HeartbeatUsage,
-  buildAlertPush, buildClosePush, buildReplyFailedPush, decideOpenPush, decideReply, idFromTimeKey,
+  buildAlertPush, buildClosePush, buildReplyFailedPush, decideOpenPush, decideReply, decideRetract, idFromTimeKey,
   hookCloseResolvedPrompt, hookHoldMs, hookPageExpiresAt, isExpiredHookPage, isHookBlocking,
   isHookPreId, keys, MAX_ID_LENGTH, normalizeApnsToken, normalizeCloseReason,
   normalizeIntervention, parseDeviceRegistration, parseHeartbeat, parseReplyBody,
   parseReplyInjected, parseSync, prefixes, queueEntryExpired, selectStaleForSync,
   TOMBSTONE_TTL_MS, CLOSED_REPLY_WINDOW_MS, QUEUE_TTL_MS, HOOK_EXPIRY_MARGIN_MS, HOOK_MAX_HOLD_MS,
   isoSeconds, type TokenBucket, MAX_SESSIONS_COMMAND_BYTES, SESSIONS_FEATURE, parseSessionsCommand,
-  parseSessionsUpdate, takeToken, utf8Length
+  parseSessionsUpdate, takeToken, utf8Length, REPLY_RETRACT_FEATURE, RETRACTED_DETAIL, RETRACTED_METHOD
 } from "./logic.ts";
 
 /// Storage layout (one Durable Object per relay token). Every record has its
@@ -312,10 +312,12 @@ export class UserRelay {
         return jsonResponse(await this.status());
       }
 
-      if (req.method === "POST" && path.startsWith("/reply/")) {
+      if ((req.method === "POST" || req.method === "DELETE") && path.startsWith("/reply/")) {
         let id: string;
         try { id = decodeURIComponent(path.slice("/reply/".length)); } catch { return errorResponse("bad_id", 400); }
         if (!id || id.length > MAX_ID_LENGTH) return errorResponse("bad_id", 400);
+        // DELETE takes back a queued reply (reply-retract-v1); any body is ignored.
+        if (req.method === "DELETE") return await this.retractReply(id);
         const body = await readJson(req);
         if ("error" in body) return errorResponse(body.error, body.status);
         return await this.handlePhoneReply(id, body.value);
@@ -980,6 +982,47 @@ export class UserRelay {
     return iv;
   }
 
+  /// DELETE /reply/<id>: takes back a reply still waiting in the queue for an
+  /// offline Mac (see decideRetract). Storage awaits only — no fetch, no
+  /// push — so the input gate keeps flushReplyQueue out until it's done: a
+  /// queue entry is either still here (deleted, never sent) or already gone
+  /// to the Mac (too_late), never both. The phones hear reply.result with
+  /// method "retracted" and `cancelled`; there is no APNs alert, since the
+  /// user asked for this.
+  private async retractReply(id: string): Promise<Response> {
+    const queued: string[] = [];
+    for (const [key, entry] of await this.storage.list<QueuedReply>({ prefix: prefixes.queue })) {
+      if (entry?.interventionId === id) queued.push(key);
+    }
+    const loc = await this.locate(id);
+    const tomb = loc ? undefined : await this.getTomb(id, Date.now());
+    const decision = decideRetract({ queued: queued.length > 0, iv: loc?.iv, tomb });
+    if (decision.kind !== "deleted") {
+      console.log(`retract for ${id}: ${decision.kind} ${String(decision.body.stage ?? "")}`.trim());
+      return jsonResponse(decision.body, decision.status);
+    }
+
+    await this.deleteAll(queued);
+    if (this.queueHint !== undefined) this.queueHint = Math.max(0, this.queueHint - queued.length);
+    if (loc && loc.iv.deliveryStatus === "pending") {
+      // Freed like a failed delivery, so a fresh reply isn't refused with 409.
+      const iv: Intervention = {
+        ...loc.iv, deliveryStatus: "failed", deliveryMethod: RETRACTED_METHOD, deliveryDetail: RETRACTED_DETAIL
+      };
+      delete iv.repliedAt;
+      delete iv.repliedAction;
+      delete iv.repliedText;
+      delete iv.deliveryForwardedAt;
+      await loc.save(iv);
+    }
+    console.log(`retract for ${id}: deleted the queued reply`);
+    this.broadcastToPhones({
+      type: "reply.result",
+      payload: { interventionId: id, success: false, method: RETRACTED_METHOD, cancelled: true, detail: RETRACTED_DETAIL }
+    });
+    return jsonResponse(decision.body, decision.status);
+  }
+
   private async handleReplyInjected(raw: unknown): Promise<Outcome> {
     const p = parseReplyInjected(raw);
     if (!p) return fail("invalid_payload");
@@ -987,6 +1030,9 @@ export class UserRelay {
     console.log(`reply.injected ${p.interventionId} success=${p.success} method=${p.method}`);
 
     const loc = await this.locate(p.interventionId);
+    // The Mac deleted a reply it was holding (rate-limit or resume queue):
+    // the user asked for that, so no "not delivered" alert.
+    const retracted = !p.success && p.method === RETRACTED_METHOD;
     let failedIv: Intervention | undefined;
     if (loc) {
       const iv: Intervention = {
@@ -1001,13 +1047,21 @@ export class UserRelay {
         // reply (often from a lingering lock-screen banner) that didn't land.
         delete iv.repliedAt;
         delete iv.repliedAction;
-        failedIv = iv;
+        if (retracted) {
+          delete iv.repliedText;
+          delete iv.deliveryForwardedAt;
+        } else {
+          failedIv = iv;
+        }
       }
       await loc.save(iv);
     }
     this.broadcastToPhones({
       type: "reply.result",
-      payload: { interventionId: p.interventionId, success: p.success, method: p.method, detail: p.detail }
+      payload: {
+        interventionId: p.interventionId, success: p.success, method: p.method, detail: p.detail,
+        ...(retracted ? { cancelled: true } : {})
+      }
     });
     if (failedIv) await this.pushReplyFailures([failedIv]);
     return ok();
@@ -1184,7 +1238,7 @@ export class UserRelay {
       queuedReplies: queue.size,
       devices: devices.size,
       apnsConfigured: apnsConfigured(this.env),
-      features: [SESSIONS_FEATURE]
+      features: [SESSIONS_FEATURE, REPLY_RETRACT_FEATURE]
     };
     if (p.lastHeartbeatAt) out.lastHeartbeatAt = p.lastHeartbeatAt;
     if (typeof p.activeSessions === "number") out.activeSessions = p.activeSessions;

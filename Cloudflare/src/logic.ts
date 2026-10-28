@@ -457,6 +457,63 @@ function alreadyReplied(iv: Intervention): ReplyDecision {
   };
 }
 
+// MARK: retract (reply-retract-v1)
+
+/// GET /status feature: DELETE /reply/<id> takes back a reply that is still
+/// waiting in the queue for an offline Mac.
+export const REPLY_RETRACT_FEATURE = "reply-retract-v1";
+/// The record's deliveryDetail and the reply.result detail after a retract.
+export const RETRACTED_DETAIL = "Deleted — not sent";
+export const RETRACTED_METHOD = "retracted";
+
+export interface RetractContext {
+  /// A q: entry for this id exists (and will be deleted on "deleted").
+  queued: boolean;
+  /// The page wherever it lives (pending or archived).
+  iv?: Intervention;
+  /// Tombstone, looked up only when the page isn't stored at all.
+  tomb?: Tombstone;
+}
+
+export type RetractDecision = {
+  kind: "deleted" | "too_late" | "hook_held" | "nothing" | "not_found";
+  status: number;
+  body: Record<string, unknown>;
+};
+
+/// Decides a phone's DELETE /reply/<id>. Only a reply still sitting in the
+/// relay's queue can be taken back; anything else has left the relay (or,
+/// for a blocking hook, may have been read already) and can't be.
+/// Order matters:
+///  1. a queue entry exists: delete it (even when the page record is gone or
+///     the entry has expired but not been swept — either way nothing was sent);
+///  2. delivered: 409 too_late / delivered;
+///  3. pending and forwarded: 409 too_late / forwarded — also after the
+///     20-min ack timeout, since the Mac may still type it;
+///  4. pending on a blocking-hook page: 409 hook_held (the hook may already
+///     have polled it from GET /interventions);
+///  5. no live reply (none, or failed): 200 nothing;
+///  6. pending but neither queued, forwarded nor hook-held: 409 too_late /
+///     not_held (the relay doesn't hold it, so it can't vouch it wasn't sent);
+///  7. tombstoned only: 200 nothing; unknown: 404.
+export function decideRetract(ctx: RetractContext): RetractDecision {
+  const { queued, iv, tomb } = ctx;
+  if (queued) return { kind: "deleted", status: 200, body: { ok: true, retracted: true } };
+  const nothing: RetractDecision = { kind: "nothing", status: 200, body: { ok: true, retracted: false, nothing: true } };
+  if (!iv) {
+    return tomb ? nothing : { kind: "not_found", status: 404, body: { error: "no_such_intervention" } };
+  }
+  if (iv.deliveryStatus === "delivered") return tooLate("delivered");
+  if (!iv.repliedAt || iv.deliveryStatus !== "pending") return nothing;
+  if (iv.deliveryForwardedAt) return tooLate("forwarded", { deliveryForwardedAt: iv.deliveryForwardedAt });
+  if (isHookBlocking(iv)) return { kind: "hook_held", status: 409, body: { error: "hook_held" } };
+  return tooLate("not_held");
+}
+
+function tooLate(stage: "delivered" | "forwarded" | "not_held", extra: Record<string, unknown> = {}): RetractDecision {
+  return { kind: "too_late", status: 409, body: { error: "too_late", stage, ...extra } };
+}
+
 /// Whether a queued reply is still worth sending at `now`.
 export function queueEntryExpired(entry: { queuedAt: number; closed?: boolean }, now: number): boolean {
   const ttl = entry.closed ? CLOSED_REPLY_WINDOW_MS : QUEUE_TTL_MS;

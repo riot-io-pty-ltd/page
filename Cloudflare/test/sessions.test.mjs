@@ -188,6 +188,33 @@ test("bad command bodies: 400 invalid_envelope / invalid_json, 413 too_large", a
   assert.equal(mac.frames("sessions.command").length, 0);
 });
 
+/// A body of exactly `bytes` (ASCII, so chars == bytes) whose ciphertext is
+/// padding: the Worker never looks inside it.
+const sizedBody = bytes => {
+  const pad = bytes - JSON.stringify({ e: { ...E, c: "" } }).length;
+  const body = JSON.stringify({ e: { ...E, c: "A".repeat(pad) } });
+  assert.equal(body.length, bytes);
+  return body;
+};
+
+test("an image part's envelope (~59.5 KB) is forwarded whole; 64 KiB passes, 64 KiB + 1 is 413", async () => {
+  // Images design: a 32 KiB raw part with the longest ids the Mac accepts
+  // makes a body of about 59.5 KB, under the 64 KiB cap with room to spare.
+  const mac = connect(true);
+  const part = sizedBody(59_500);
+  assert.ok(part.length < MAX_SESSIONS_COMMAND_BYTES);
+  const r = await command(part);
+  assert.equal(r.status, 202);
+  const [frame] = mac.frames("sessions.command");
+  assert.equal(frame.payload.e.c, JSON.parse(part).e.c, "ciphertext forwarded intact");
+
+  assert.equal((await command(sizedBody(MAX_SESSIONS_COMMAND_BYTES))).status, 202, "exactly 64 KiB is allowed");
+  const over = await command(sizedBody(MAX_SESSIONS_COMMAND_BYTES + 1));
+  assert.equal(over.status, 413);
+  assert.equal(over.body.error, "too_large");
+  assert.equal(mac.frames("sessions.command").length, 2);
+});
+
 test("commands are rate limited to 120 a minute per relay", async () => {
   const mac = connect(true);
   for (let i = 0; i < SESSIONS_COMMAND_RATE; i++) assert.equal((await command({ e: E })).status, 202);
@@ -285,7 +312,7 @@ test("a legacy Mac tagged by its first frame stops counting as a phone", async (
 // MARK: /status
 
 test("/status advertises sessions-v1", async () => {
-  assert.deepEqual((await call(relay, "GET", "/status")).body.features, ["sessions-v1"]);
+  assert.deepEqual((await call(relay, "GET", "/status")).body.features, ["sessions-v1", "reply-retract-v1"]);
 });
 
 // MARK: pure logic
