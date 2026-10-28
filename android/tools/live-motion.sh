@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
 done
 out="${out:-$android/build/motion-live}"
 mkdir -p "$out"
-serial="$("$adb" devices | awk '/^emulator-[0-9]+[ \t]+device$/ {print $1; exit}')"
+serial="${ANDROID_SERIAL:-emulator-5560}"  # never "the first emulator": emulator-5554 is the PagePixel window
 [ -n "$serial" ] || { echo "no emulator running" >&2; exit 1; }
 export ANDROID_SERIAL="$serial"
 

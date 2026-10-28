@@ -9,7 +9,7 @@
 #   --font-scale 1.3         The system font scale to render at (restored afterwards). Default: leave as is.
 #   --time 2.0               The aurora phase the harness pins, in seconds (default 2.0).
 #   --no-build               Skip the Gradle build and install; reuse what is on the emulator.
-#   --avd NAME               The emulator to boot (default PagePixel).
+#   --avd NAME               The emulator to boot (default PageParity, headless, port 5560).
 #
 # out-dir defaults to android/build/screens (gitignored). Screens default to the one list in
 # app/src/debug/java/app/page/android/demo/Demo.kt (`val screens`), parsed here with `python3 -I`, so the script
@@ -34,7 +34,7 @@ screens=()
 font_scale=""
 phase="2.0"
 build=1
-avd="PagePixel"
+avd="PageParity"
 mode=opts
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -66,18 +66,21 @@ PY
 )
 fi
 
-# 1. An emulator: the first emulator-* serial already running, else boot PagePixel headless.
+# 1. The emulator: ANDROID_SERIAL when set, else the headless "PageParity" on port 5560, booted read-only when it isn't
+# running. Never any other emulator: emulator-5554 is the PagePixel window someone may be looking at, and a script that
+# picked "the first emulator running" used to render on it, or boot PagePixel itself and then kill it.
 started=0
-serial="$("$adb" devices | awk '/^emulator-[0-9]+[ \t]+device$/ {print $1; exit}')"
-if [ -z "$serial" ]; then
-  "$emulator" -avd "$avd" -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect >/dev/null 2>&1 &
+serial="${ANDROID_SERIAL:-emulator-5560}"
+[[ "$serial" == emulator-* ]] || { echo "ANDROID_SERIAL must name an emulator" >&2; exit 2; }
+[ "$serial" != emulator-5554 ] || { echo "emulator-5554 is the PagePixel window; render on a headless emulator" >&2; exit 2; }
+if ! "$adb" devices | grep -q "^$serial[[:space:]]*device$"; then
+  "$emulator" -avd "$avd" -read-only -port "${serial#emulator-}" -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect >/dev/null 2>&1 &
   started=1
   for _ in $(seq 1 90); do
-    serial="$("$adb" devices | awk '/^emulator-[0-9]+[ \t]+device$/ {print $1; exit}')"
-    [ -n "$serial" ] && break
+    "$adb" devices | grep -q "^$serial[[:space:]]*device$" && break
     sleep 2
   done
-  [ -n "$serial" ] || { echo "the emulator did not come up" >&2; exit 1; }
+  "$adb" devices | grep -q "^$serial[[:space:]]*device$" || { echo "the emulator did not come up" >&2; exit 1; }
 fi
 export ANDROID_SERIAL="$serial"
 for _ in $(seq 1 120); do

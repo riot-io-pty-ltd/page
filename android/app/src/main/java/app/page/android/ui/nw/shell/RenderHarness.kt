@@ -47,6 +47,12 @@ object RenderHarness {
          * emulator in any time zone draws the same sky. null is 01:12, nighttime, so every frame without it is unchanged.
          */
         val dayTime: Double? = null,
+        /** Now: the In flight section's script for a `motion-inflight-*` screen ([app.page.android.ui.nw.theme.LocalFlightScript]). */
+        val flightScript: List<Pair<Double, app.page.android.model.InFlightSection>>? = null,
+        /** Now: the rest of Now's script for a `motion-now-*` screen ([app.page.android.ui.nw.theme.LocalNowScript]). */
+        val nowScript: List<Pair<Double, app.page.android.model.NowMotion.Look>>? = null,
+        /** Drawn as under Reduce Motion (the demo's `page_reduce`), whatever the system says. */
+        val reduce: Boolean = false,
     )
 
     /**

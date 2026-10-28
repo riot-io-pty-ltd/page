@@ -1,5 +1,10 @@
 package app.page.android.ui.nw.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +39,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.page.android.model.MotionCurve
+import app.page.android.model.WorkflowMotion
 import app.page.android.model.ReceiptThread
 import app.page.android.model.ReceiptThreadInput
 import app.page.android.ui.nw.theme.LocalReduceMotion
@@ -78,12 +84,20 @@ fun NWReceiptThreadView(input: ReceiptThreadInput, modifier: Modifier = Modifier
         verticalArrangement = Arrangement.spacedBy(8.dp), horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Canvas(Modifier.fillMaxWidth().height(30.dp).clearAndSetSemantics {}) { drawThread(f, tone) }
-        Text(
-            if (arming && input.pending != null) input.pending!!.armLabel(now) else f.word,
-            style = if (arming) NW.Typo.bodyStrong else NW.Typo.captionStrong, color = (if (arming) NW.Palette.textPrimary else tone).color,
-            textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clearAndSetSemantics {},
-        )
+        // A new stage's word cross-fades in over the old (held to sending, sent to typed); the arm's countdown, which
+        // changes every tick, simply counts.
+        val ms = ((if (reduce) WorkflowMotion.reducedFade else WorkflowMotion.crossFade) * 1000).toInt()
+        AnimatedContent(
+            if (arming && input.pending != null) null to tone else f.word to tone,
+            transitionSpec = { fadeIn(tween(ms)) togetherWith fadeOut(tween(ms)) }, contentKey = { it.first }, label = "stage",
+        ) { (word, wordTone) ->
+            Text(
+                word ?: input.pending?.armLabel(now) ?: "",
+                style = if (word == null) NW.Typo.bodyStrong else NW.Typo.captionStrong, color = (if (word == null) NW.Palette.textPrimary else wordTone).color,
+                textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.clearAndSetSemantics {},
+            )
+        }
         if (arming) input.pending?.preview?.let {
             Text(it, style = NW.Typo.monoMicro, color = NW.Palette.textTertiary.color, textAlign = TextAlign.Center, maxLines = 2, modifier = Modifier.clearAndSetSemantics {})
         }

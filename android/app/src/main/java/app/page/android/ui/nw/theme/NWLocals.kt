@@ -47,6 +47,22 @@ val LocalFixedNow = staticCompositionLocalOf<Instant?> { null }
 val LocalWorkflowScript = staticCompositionLocalOf<List<Pair<Double, app.page.android.model.WorkflowRun>>?> { null }
 
 /**
+ * The render harness's script for Now's In flight section ([NWMotionPin.Kind.FLIGHT]): the section as it was at each
+ * moment (seconds after Now appeared, the first at 0), folded up to the pinned moment, so a frame can be drawn part-way
+ * through a line's entrance, a fraction springing on or a workflow finishing. Null in the app, where the section
+ * watches the live one.
+ */
+val LocalFlightScript = staticCompositionLocalOf<List<Pair<Double, app.page.android.model.InFlightSection>>?> { null }
+
+/**
+ * The render harness's script for the rest of Now ([NWMotionPin.Kind.NOW]): what Now's motion follows (the headline, the
+ * tab badges, Settled, the Runway) as it was at each moment, seconds after Now appeared, the first at 0. Each moving part
+ * folds it up to the pinned moment to find the change it is part-way through. Null in the app, where each part watches
+ * its own value.
+ */
+val LocalNowScript = staticCompositionLocalOf<List<Pair<Double, app.page.android.model.NowMotion.Look>>?> { null }
+
+/**
  * The time of day the Now and Lanes skies are drawn at. The root's ticker ([rememberDaypartTicker]) reads the local
  * clock every two minutes; anything without one (widgets, the gallery, previews) draws nighttime, today's aurora, and
  * the render harness pins it (`page_daytime`). Dynamic, so a tick recomposes only the skies that read it.
@@ -58,7 +74,7 @@ val LocalDaypart = compositionLocalOf { DaypartWeights.NIGHTTIME }
  * [time] seconds after it began instead of following the clock.
  */
 data class NWMotionPin(val kind: Kind, val time: Double) {
-    enum class Kind(val raw: String) { EXHALE("exhale"), APPROACH("approach"), RECEIPT("receipt"), HOLD("hold"), DUSK("dusk"), DAWN("dawn"), BRIEF("brief") }
+    enum class Kind(val raw: String) { EXHALE("exhale"), APPROACH("approach"), RECEIPT("receipt"), HOLD("hold"), DUSK("dusk"), DAWN("dawn"), BRIEF("brief"), FLIGHT("flight"), NOW("now") }
 }
 
 val LocalMotionPin = staticCompositionLocalOf<NWMotionPin?> { null }

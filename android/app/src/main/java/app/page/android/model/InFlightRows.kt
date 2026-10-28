@@ -102,12 +102,13 @@ data class InFlightSection(
         /**
          * Working sessions in a steady order (project, then title, then id), so a row never swaps places under a
          * finger between two refreshes: a Steer tap always lands on the session it was drawn beside. Only once
-         * the Mac's session list has arrived. Pure.
+         * the Mac's session list has arrived. [ended]: the workflow lines just seen to end, by session
+         * ([FlightGraceBook]). Pure.
          */
         fun build(
             sessions: List<LiveSession>, hasSessionList: Boolean, workflows: Map<String, List<WorkflowRun>> = emptyMap(),
             stuck: Set<String> = emptySet(), now: Instant, expanded: Boolean = false, limit: Int = collapsedLimit,
-            zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+            zone: java.time.ZoneId = java.time.ZoneId.systemDefault(), ended: Map<String, Set<String>> = emptyMap(),
         ): InFlightSection {
             if (!hasSessionList) return empty
             val active = sessions.filter { it.state == LiveSessionState.ACTIVE }.map { s ->
@@ -124,7 +125,7 @@ data class InFlightSection(
                     seed = StableHash.fnv1a(if (s.cwd.isEmpty()) s.id else s.cwd + "|" + s.id),
                     hue = ProjectHue.of(if (s.cwd.isEmpty()) s.title else s.cwd),
                     canType = s.canType, canStop = s.canInterrupt, canMirror = host in mirrorHosts,
-                    card = InFlightCard.build(s, workflows[s.id] ?: emptyList(), stuck.contains(s.id), now, zone),
+                    card = InFlightCard.build(s, workflows[s.id] ?: emptyList(), stuck.contains(s.id), now, zone, ended[s.id] ?: emptySet()),
                 )
                 Pair(row, s.title)
             }.sortedWith { a, b ->

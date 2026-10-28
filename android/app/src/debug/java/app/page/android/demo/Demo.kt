@@ -46,13 +46,14 @@ import kotlinx.coroutines.launch
  * Scriptable (android/tools/screens.sh does this for every screen in [screens]):
  * `adb shell am start -S -W -n app.page.android.debug/app.page.android.MainActivity --ez page_demo true
  *   --es page_render <screen> [--es page_glow off|subtle|full] [--ef page_time <seconds>] [--ez page_canvas true]
- *   [--es page_daytime <earlyMorning|morning|afternoon|nighttime|HH:MM|minute>]`
+ *   [--es page_daytime <earlyMorning|morning|afternoon|nighttime|HH:MM|minute>] [--ez page_reduce true]`
  * `page_render` pins the aurora phase (default 2.0 s, or `page_time`) and the clock (Tue 27 Oct 2026, 01:12 UTC)
  * so a screen is the same every time; without it the demo is live. `page_daytime` (or `page_daypart`) pins the time
  * of day the skies are drawn at, as a local minute ([RenderHarness.minuteOfDay]); without it they are drawn at 01:12. On a `motion-*` screen `page_time` is the
  * seconds into that signature motion ([DemoMotion]; android/tools/render-motion.sh builds the contact sheets).
  * `page_canvas` draws with the Canvas fallbacks a device below Android 13 gets, instead of the AGSL shaders, and
- * `page_noblur` the Canvas aurora as a device below Android 12 draws it (no blur).
+ * `page_noblur` the Canvas aurora as a device below Android 12 draws it (no blur). `page_reduce` draws as under Reduce
+ * Motion without touching the system's animator setting.
  */
 object Demo {
     const val available = true
@@ -88,6 +89,8 @@ object Demo {
         "motion-receipt-fold", "motion-receipt-failed", "motion-receipt-sheet",
         "motion-hold", "motion-hold-burst",
         "motion-dusk", "motion-dawn", "motion-dusk-now", "motion-dawn-now", "motion-brief",
+        "motion-inflight-enter", "motion-inflight-advance", "motion-inflight-complete", "motion-inflight-vanish", "motion-inflight-stuck",
+        "motion-now-enter", "motion-now-enter-review", "motion-now-change", "motion-now-change-settled", "motion-now-quiet",
         "history", "history-stats", "history-empty", "history-loading", "history-failed", "history-large", "history-stats-large",
         "gallery-lower",
     )
@@ -131,13 +134,17 @@ object Demo {
         @Suppress("MissingPermission") nm.notify(42, n)
     }
 
-    private fun seed(open: List<Intervention>, status: MacStatusSnapshot?, sessions: List<LiveSession>) {
+    private fun seed(
+        open: List<Intervention>, status: MacStatusSnapshot?, sessions: List<LiveSession>,
+        workflows: Map<String, List<app.page.android.model.WorkflowRun>> = DemoFixtures.workflows(),
+        history: List<Intervention> = DemoFixtures.history,
+    ) {
         PairingStore.adoptDemo(PairedMac(DemoFixtures.mac, DemoFixtures.now.minusSeconds(26 * 86_400)))
         RelayClient.seedDemoInbox(open)
-        RelayClient.seedDemoHistory(DemoFixtures.history)
+        RelayClient.seedDemoHistory(history)
         status?.let { RelayClient.seedDemoStatus(it) }
         // Sessions are seeded after the inbox, whose reset clears them.
-        SessionStore.seedDemo(DemoFixtures.mac, sessions, DemoFixtures.transcripts(), DemoFixtures.screens(), DemoFixtures.workflows())
+        SessionStore.seedDemo(DemoFixtures.mac, sessions, DemoFixtures.transcripts(), DemoFixtures.screens(), workflows)
         SessionStore.seedDemoExtras(sessions.associate { it.id to DemoFixtures.diff(it.id) }, DemoFixtures.folders)
     }
 
@@ -160,7 +167,11 @@ object Demo {
         if (extras.getBoolean("page_live_motion")) {
             // The signature motions on their real, unpinned paths (android/tools/render-motion.sh --live records it).
             start()
-            if (extras.getString("page_live_script") == "arrivals") liveArrivals() else liveMotion()
+            when (extras.getString("page_live_script")) {
+                "arrivals" -> liveArrivals()
+                "inflight" -> liveInFlight()
+                else -> liveMotion()
+            }
             // On Lanes instead, to see its power story (and that nothing redraws while a pause holds still).
             if (extras.getBoolean("page_live_lanes")) AppRouter.selectDestination(app.page.android.model.NWDestination.LANES)
             return
@@ -174,7 +185,7 @@ object Demo {
         app.page.android.ui.nw.components.NWShaders.forceNoBlur = extras.getBoolean("page_noblur")
         renderScreen(
             render, CardGlow.argument(extras.getString("page_glow")) ?: CardGlow.OFF, if (extras.containsKey("page_time")) extras.getFloat("page_time").toDouble() else null,
-            RenderHarness.minuteOfDay(extras.getString("page_daytime") ?: extras.getString("page_daypart")),
+            RenderHarness.minuteOfDay(extras.getString("page_daytime") ?: extras.getString("page_daypart")), reduce = extras.getBoolean("page_reduce"),
         )
     }
 
@@ -232,6 +243,27 @@ object Demo {
         }
     }
 
+    /**
+     * In flight on the real path (NowStore's grace book, the section's live track, the real clock): nothing needs you,
+     * so the section sits under the Runway; w1's 3/5 run becomes 4/5 with a new NOW step, its 1/4 run finishes, and
+     * later its other run vanishes with no word of how it ended (which must say nothing). Seconds after launch.
+     */
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun liveInFlight() {
+        fun beat() = RelayClient.seedDemoStatus(DemoFixtures.status.copy(macConnected = true, lastHeartbeatAt = Instant.now()))
+        beat()
+        RelayClient.replaceDemoInbox(emptyList())
+        fun at(t: Double) = SessionStore.seedDemoLive(DemoMotion.sessions("motion-inflight-live", t) ?: emptyList(), DemoMotion.workflows("motion-inflight-live", t) ?: emptyMap())
+        at(0.0)
+        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            for (t in listOf(4.0, 8.0, 14.0)) {
+                delay(if (t == 4.0) 4_000 else if (t == 8.0) 4_000 else 6_000)
+                beat()
+                at(t)
+            }
+        }
+    }
+
     // region The render harness
 
     private fun inboxFor(screen: String): List<Intervention> {
@@ -273,7 +305,7 @@ object Demo {
         else -> DemoFixtures.sessionsWithFlight
     }
 
-    private fun renderScreen(asked: String, glow: CardGlow, time: Double?, dayTime: Double?) {
+    private fun renderScreen(asked: String, glow: CardGlow, time: Double?, dayTime: Double?, reduce: Boolean = false) {
         // A motion screen is drawn on its base screen's fixtures, with the motion pinned (DemoMotion).
         val motion = asked
         val screen = if (DemoMotion.isMotion(asked)) DemoMotion.base(asked) else asked
@@ -298,13 +330,17 @@ object Demo {
                 dragDp = if (screen == "now-swipe") 84f else null, queuedNew = if (screen == "now-new") 1 else 0,
                 hold = if (screen == "now-hold" || screen == "decision-hold") 0.55 else null, dispatchSending = screen == "dispatch-sending",
                 lanesAvailability = if (screen == "lanes-problem") app.page.android.model.SessionAvailability.NeedsRepair(keyMismatch = false) else null,
-                dayTime = dayTime,
+                dayTime = dayTime, flightScript = DemoMotion.flightScript(motion), nowScript = DemoMotion.nowScript(motion), reduce = reduce,
             ),
         )
         if (isStandalone(motion) || isUnpaired(screen)) return
 
-        val open = DemoMotion.inbox(motion) ?: inboxFor(screen)
-        seed(open, statusFor(screen), DemoMotion.sessions(motion) ?: sessionsFor(screen))
+        val at = DemoMotion.time(motion, time)
+        val open = DemoMotion.inbox(motion, at) ?: inboxFor(screen)
+        seed(
+            open, DemoMotion.status(motion, at) ?: statusFor(screen), DemoMotion.sessions(motion, at) ?: sessionsFor(screen), DemoMotion.workflows(motion, at) ?: DemoFixtures.workflows(),
+            DemoMotion.history(motion, at) ?: DemoFixtures.history,
+        )
         ActivityStore.overridePowerForRender(DemoMotion.power(motion))
         val extra: Map<String, app.page.android.model.ReplyDelivery> = when (screen) {
             "decision-delivered" -> mapOf("p1" to app.page.android.model.ReplyDelivery.Delivered("typed into tmux pane %3"))

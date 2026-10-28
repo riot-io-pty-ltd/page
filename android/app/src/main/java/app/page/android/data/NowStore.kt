@@ -1,5 +1,6 @@
 package app.page.android.data
 
+import app.page.android.model.FlightGraceBook
 import app.page.android.model.FlightHealth
 import app.page.android.model.InFlightSection
 import app.page.android.model.Intervention
@@ -100,6 +101,9 @@ object NowStore {
 
     private var shownIds: List<String> = emptyList()
 
+    /** The workflow lines just seen to end, so In flight can close them instead of losing them ([FlightGraceBook]). */
+    private val flightGrace = FlightGraceBook()
+
     fun setFrozen(on: Boolean) {
         _frozen.value = on
     }
@@ -188,7 +192,9 @@ object NowStore {
         shownIds = merged.rows.map { it.id }
 
         val stuck = FlightHealth.stuckSessionIds(a.inbox)
-        val inFlight = InFlightSection.build(s.sessions, s.hasList, s.workflows, stuck, now, expanded = c.expanded, zone = zone)
+        // Stamped on the clock now, not the ticker's last reading (up to 15 s old), so a line ends when the phone saw it end.
+        val ended = flightGrace.observe(s.sessions, s.workflows, clock())
+        val inFlight = InFlightSection.build(s.sessions, s.hasList, s.workflows, stuck, now, expanded = c.expanded, zone = zone, ended = ended)
         val settled = SettledLog.build(a.history, now, zone)
         val presence = MacPresence.evaluate(a.status, now)
         val notifications = when (c.notif) {

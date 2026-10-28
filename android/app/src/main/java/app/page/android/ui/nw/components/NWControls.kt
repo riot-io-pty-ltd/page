@@ -68,7 +68,12 @@ import app.page.android.model.RingStat
 import app.page.android.model.RingSummary
 import app.page.android.model.RunwayMarker
 import app.page.android.model.StarState
+import app.page.android.model.NowMotion
+import app.page.android.model.WorkflowMotion
+import androidx.compose.animation.togetherWith
 import app.page.android.model.TurnChip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.text.drawText
 import app.page.android.ui.nw.theme.LocalCardGlow
 import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.NW
@@ -237,9 +242,13 @@ fun NWDeliveryPreview(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** One line of proof that a keystroke landed (or why it did not). */
+/**
+ * One line of proof that a keystroke landed (or why it did not). [crossfade]: new words cross-fade in over the old
+ * (0.35 s; 0.2 s under Reduce Motion), as a queued reply's line goes from held to sending to delivered; only the new
+ * words are read.
+ */
 @Composable
-fun NWReceiptLine(text: String, modifier: Modifier = Modifier, failed: Boolean = false) {
+fun NWReceiptLine(text: String, modifier: Modifier = Modifier, failed: Boolean = false, crossfade: Boolean = false) {
     val tone = if (failed) NW.Palette.amber else NW.Palette.teal
     Row(
         modifier
@@ -253,7 +262,19 @@ fun NWReceiptLine(text: String, modifier: Modifier = Modifier, failed: Boolean =
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(if (failed) Icons.Outlined.ErrorOutline else Icons.Outlined.CheckBox, null, tint = tone.opacity(0.95).color, modifier = Modifier.size(18.dp))
-        Text(text, style = NW.Typo.monoMicro, color = tone.opacity(0.95).color, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (!crossfade) {
+            Text(text, style = NW.Typo.monoMicro, color = tone.opacity(0.95).color, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        } else {
+            val ms = ((if (LocalReduceMotion.current) WorkflowMotion.reducedFade else WorkflowMotion.crossFade) * 1000).toInt()
+            androidx.compose.animation.AnimatedContent(
+                text, transitionSpec = { androidx.compose.animation.fadeIn(tween(ms)) togetherWith androidx.compose.animation.fadeOut(tween(ms)) }, label = "receipt",
+            ) { t ->
+                Text(
+                    t, style = NW.Typo.monoMicro, color = tone.opacity(0.95).color, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    modifier = if (t != text) Modifier.clearAndSetSemantics {} else Modifier,
+                )
+            }
+        }
     }
 }
 
@@ -484,9 +505,14 @@ fun NWNewPill(count: Int, modifier: Modifier = Modifier, onTap: () -> Unit) {
     }
 }
 
-/** A chip on a Review card, read from the Mac's turn-summary line. */
+/**
+ * A chip on a Review card, read from the Mac's turn-summary line. Given [countFrom] (when its card was first shown, on
+ * [clock]'s base), its number counts up from 0 in 0.38 s and then its ✓ draws (NowMotion.chipText, chipCheck). The
+ * final words set its size and are what is read; the counting words and the drawn ✓ are painted over them, so nothing
+ * reflows and nothing recomposes per frame. Reduce Motion: the final words at once.
+ */
 @Composable
-fun NWTurnChip(chip: TurnChip, modifier: Modifier = Modifier) {
+fun NWTurnChip(chip: TurnChip, modifier: Modifier = Modifier, countFrom: Double? = null, clock: androidx.compose.runtime.State<Double>? = null) {
     val c = when (chip.tone) {
         TurnChip.Tone.NEUTRAL -> NW.Palette.textPrimary
         TurnChip.Tone.ADDED, TurnChip.Tone.PASS -> NW.Palette.green
@@ -494,9 +520,28 @@ fun NWTurnChip(chip: TurnChip, modifier: Modifier = Modifier) {
         TurnChip.Tone.REMOVED -> NW.Palette.red
         TurnChip.Tone.FAIL -> NW.Palette.amber
     }
+    val box = modifier.clip(RoundedCornerShape(9.dp)).background(c.opacity(if (chip.tone == TurnChip.Tone.NEUTRAL) 0.09 else 0.14).color).padding(horizontal = 10.dp, vertical = 6.dp)
+    if (countFrom == null || clock == null) {
+        Text(chip.text, style = NW.Typo.monoSmall, color = c.opacity(0.95).color, modifier = box)
+        return
+    }
+    val reduce = LocalReduceMotion.current
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    val layout = remember { androidx.compose.runtime.mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
+    val style = NW.Typo.monoSmall.copy(color = c.opacity(0.95).color)
     Text(
-        chip.text, style = NW.Typo.monoSmall, color = c.opacity(0.95).color,
-        modifier = modifier.clip(RoundedCornerShape(9.dp)).background(c.opacity(if (chip.tone == TurnChip.Tone.NEUTRAL) 0.09 else 0.14).color).padding(horizontal = 10.dp, vertical = 6.dp),
+        hideChecks(chip.text), style = style,
+        modifier = box.drawWithContent {
+            val t = clock.value - countFrom
+            if (!reduce && t < NowMotion.countDuration) {
+                drawText(measurer.measure(hideChecks(NowMotion.chipText(chip.text, t)), style))
+            } else {
+                drawContent()
+            }
+            val check = layout.value?.checkBox() ?: return@drawWithContent
+            drawCheck(c.opacity(0.95).color, NowMotion.chipCheck(t, reduce).toFloat(), check, 1.4.dp.toPx())
+        },
+        onTextLayout = { layout.value = it },
     )
 }
 

@@ -39,6 +39,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.runtime.State
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
@@ -53,8 +55,12 @@ import app.page.android.model.HeaderJump
 import app.page.android.model.MotionCurve
 import app.page.android.model.NWDestination
 import app.page.android.model.NowModel
+import app.page.android.model.NowMotion
 import app.page.android.model.PulseModel
 import app.page.android.ui.nw.components.NWAnimated
+import app.page.android.ui.nw.components.NWRollingWords
+import app.page.android.ui.nw.components.rememberNowChange
+import app.page.android.ui.nw.components.rememberNowClock
 import app.page.android.ui.nw.components.NWDawnLight
 import app.page.android.ui.nw.components.NWHorizonBand
 import app.page.android.ui.nw.components.NWLivingAurora
@@ -203,6 +209,11 @@ fun NWHorizon(
     /** Seconds into a motion: pinned by the harness, or since it began here; null when it is not playing. */
     fun elapsed(kind: NWMotionPin.Kind, start: Double?): Double? = pin.pinned(kind) ?: start?.let { max(0.0, nwClockSeconds() - it) }
 
+    // The words: a count that moves rolls ("2 need you" → "3 need you"); new wording cross-fades as it rises.
+    val headlineChange = rememberNowChange(headline) { it.headline }
+    val sublineChange = rememberNowChange(subline)
+    val wordsClock = rememberNowClock(listOfNotNull(headlineChange.at, sublineChange.at).maxOrNull()?.plus(NowMotion.wordsLast(reduce)))
+
     val bandY = HorizonGeometry.bandY(height, topInset)
     val textRoom = HorizonGeometry.textRoom(LocalDensity.current.fontScale)
     Box(
@@ -303,11 +314,9 @@ fun NWHorizon(
             }
             Spacer(Modifier.weight(1f))
             NWCappedFontScale(1.3f) {
-                Text(
-                    headline, style = NW.Typo.hero, color = NW.Palette.textPrimary.color, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                )
+                NWRollingWords(AnnotatedString(headline), headlineChange, wordsClock, NW.Typo.hero, NW.Palette.textPrimary.color, textAlign = TextAlign.Center, maxLines = 2)
             }
-            NWCappedFontScale(1.3f) { Subline(subline, workingJump) }
+            NWCappedFontScale(1.3f) { Subline(subline, workingJump, sublineChange, wordsClock) }
             if (footnote != null) {
                 Text(footnote, style = NW.Typo.subline, color = NW.Palette.textTertiary.color, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 2.dp, bottom = 14.dp))
             } else {
@@ -317,22 +326,22 @@ fun NWHorizon(
     }
 }
 
-/** The Horizon's second line. With working sessions on screen its count is a button: it scrolls to the In flight cards. */
+/** The Horizon's second line. With working sessions on screen its count is a button: it scrolls to the In flight cards. Its count rolls as it changes. */
 @Composable
-private fun Subline(subline: String, jump: WorkingJump?) {
+private fun Subline(subline: String, jump: WorkingJump?, change: NowMotion.Change<String>, clock: State<Double>) {
     if (jump != null) {
         Row(horizontalArrangement = Arrangement.Center, modifier = Modifier.fillMaxWidth()) {
-            Text(
+            NWRollingWords(
                 buildAnnotatedString {
                     withStyle(SpanStyle(color = NW.Palette.teal.color, textDecoration = TextDecoration.Underline)) { append(jump.jump) }
                     withStyle(SpanStyle(color = NW.Palette.textSecondary.color)) { append(jump.rest) }
                 },
-                style = NW.Typo.subline, textAlign = TextAlign.Center, maxLines = 2,
+                change, clock, NW.Typo.subline, NW.Palette.textSecondary.color, textAlign = TextAlign.Center, maxLines = 2,
                 modifier = Modifier.heightIn(min = 44.dp).clickable(role = Role.Button, onClickLabel = HeaderJump.accessibilityName, onClick = jump.onClick),
             )
         }
     } else {
-        Text(subline, style = NW.Typo.subline, color = NW.Palette.textSecondary.color, textAlign = TextAlign.Center, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        NWRollingWords(AnnotatedString(subline), change, clock, NW.Typo.subline, NW.Palette.textSecondary.color, textAlign = TextAlign.Center, maxLines = 2)
     }
 }
 

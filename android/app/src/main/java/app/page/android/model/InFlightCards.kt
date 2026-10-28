@@ -292,6 +292,28 @@ enum class FlightHealth {
 
 // MARK: - Card
 
+/** How a workflow line stands: running, or just ended and how (kept on the card a moment, [FlightGraceBook]). */
+enum class FlightLineStatus {
+    RUNNING, DONE, FAILED, STOPPED;
+
+    companion object {
+        /**
+         * A run's status (the workflows kind): running, completed, failed, killed. `stalled` (no recent activity; it may
+         * go on) and anything unknown are neither running nor ended: null.
+         */
+        fun ofRun(status: String): FlightLineStatus? = when (status.lowercase()) {
+            "running" -> RUNNING
+            "completed", "done", "finished" -> DONE
+            "failed", "error" -> FAILED
+            "killed", "stopped", "cancelled", "canceled" -> STOPPED
+            else -> null
+        }
+
+        /** A list summary's status: running when the Mac leaves it out (it lists running workflows only). */
+        fun ofBrief(w: WorkflowBrief): FlightLineStatus? = if (w.running) RUNNING else ofRun(w.status ?: "")
+    }
+}
+
 /** One workflow line on a card: "Review changes · 3/5 agents". */
 data class FlightWorkflowLine(
     val id: String,
@@ -301,8 +323,15 @@ data class FlightWorkflowLine(
     val progress: String?,
     /** 0..1 for the thin bar; null with no total. */
     val fraction: Double?,
+    /** Who it is across snapshots: the run's id where the phone has the run, else its name (made unique on the card). */
+    val key: String = id,
+    /** Running, or how it has just ended (only for a moment, and only once the phone saw it run). */
+    val status: FlightLineStatus = FlightLineStatus.RUNNING,
 ) {
     val text: String get() = listOfNotNull(name, phase, progress).joinToString(" · ")
+
+    /** "Review changes · Reviewing · ": the words before the progress, which rolls on its own. */
+    val lead: String get() = listOfNotNull(name, phase).joinToString(" · ") + if (progress != null) " · " else ""
 }
 
 /** What a working session shows beyond its row: the step in words, the steps before it, the clocks, the workflows, the health. */
@@ -332,10 +361,13 @@ data class InFlightCard(
             return if (parts.isEmpty()) null else parts.joinToString(" · ")
         }
 
+    /** The lines still running (a line that has just ended stays in [workflows] a moment, for its card to close). */
+    val runningWorkflows: List<FlightWorkflowLine> get() = workflows.filter { it.status == FlightLineStatus.RUNNING }
+
     /** "2 workflows running", "1 workflow running"; null with none. Counts what the Mac says run in all, not just the lines it sent. */
     val workflowHeading: String?
         get() {
-            val n = maxOf(workflowTotal, workflows.size)
+            val n = maxOf(workflowTotal, runningWorkflows.size)
             return if (n == 0) null else "$n ${if (n == 1) "workflow" else "workflows"} running"
         }
 
@@ -343,13 +375,40 @@ data class InFlightCard(
         /** Earlier steps on a card: the same two as the Mac's. */
         const val earlierSteps = 2
 
+        /** Chosen: for this long after a run ended, the list's summary of the same name is taken as not yet caught up. */
+        const val staleSummary = 120.0
+
         private val modelPattern = Rx.compile("""^(opus|sonnet|haiku) \d+(\.\d+)*( |$)""")
+
+        /** A line before it is put into words: its key and how it stands. */
+        data class Candidate(val id: String, val key: String, val name: String, val phase: String?, val done: Int, val total: Int, val status: FlightLineStatus)
+
+        /**
+         * Every workflow line the phone knows for [session], running or ended, from both sources: its full runs (keyed
+         * by run id) and the list's summaries (keyed by name, a repeated name numbered). Unknown and stalled runs are
+         * left out. Pure.
+         */
+        fun candidates(session: LiveSession, runs: List<WorkflowRun>): Pair<List<Candidate>, List<Candidate>> {
+            val fromRuns = runs.mapNotNull { r -> FlightLineStatus.ofRun(r.status)?.let { Candidate(r.id, r.id, r.name, r.phase, r.done, r.total, it) } }
+            val seen = HashMap<String, Int>()
+            val fromBriefs = (session.flight?.workflows ?: emptyList()).mapNotNull { w ->
+                val st = FlightLineStatus.ofBrief(w) ?: return@mapNotNull null
+                val n = (seen[w.name] ?: 0) + 1
+                seen[w.name] = n
+                Candidate(w.name, if (n == 1) w.name else "${w.name}#$n", w.name, w.phase, w.done, w.total, st)
+            }
+            return fromRuns to fromBriefs
+        }
 
         /**
          * Pure. [runs] are the watched session's full workflow runs when the phone has them (richer than the
-         * list's summaries, so they win).
+         * list's summaries, so they win). [ended]: the keys of lines the phone has just seen end ([FlightGraceBook]),
+         * kept with how they ended; every other ended line is left out, so a run that finished an hour ago never shows.
          */
-        fun build(session: LiveSession, runs: List<WorkflowRun> = emptyList(), hasStuckPage: Boolean = false, now: Instant, zone: ZoneId = ZoneId.systemDefault()): InFlightCard {
+        fun build(
+            session: LiveSession, runs: List<WorkflowRun> = emptyList(), hasStuckPage: Boolean = false, now: Instant,
+            zone: ZoneId = ZoneId.systemDefault(), ended: Set<String> = emptySet(),
+        ): InFlightCard {
             val f = session.flight
             // The Mac's steps end with the current one, in its words: they are the whole story, so the card reads
             // the same here as on the Mac. An older Mac sends none, and the preview (a tool one-liner) is put into words here.
@@ -363,11 +422,22 @@ data class InFlightCard(
                 if (previous.size == earlierSteps) break
             }
             val health = FlightHealth.classify(session.state, f, hasStuckPage, session.lastActivityAt, now)
-            val running = runs.filter { it.isRunning }
-            val lines: List<FlightWorkflowLine> = if (running.isEmpty()) {
-                (f?.workflows ?: emptyList()).filter { it.running }.mapIndexed { i, w -> line("$i-${w.name}", w.name, w.phase, w.done, w.total) }
+            // The runs win while any is running or has just ended (so a run that ends never hands its card back to a
+            // stale summary of the same name); else the list's summaries.
+            val (fromRuns, fromBriefs) = candidates(session, runs)
+            fun kept(c: Candidate) = c.status == FlightLineStatus.RUNNING || c.key in ended
+            val runLines = fromRuns.filter(::kept)
+            // The list can lag the runs by a few seconds: a summary of a run the runs say has just ended is stale, and
+            // would bring a finished workflow back as running.
+            val justEnded = runs.filter { r ->
+                val st = FlightLineStatus.ofRun(r.status)
+                val at = r.endedAt
+                st != null && st != FlightLineStatus.RUNNING && at != null && now.secondsSince(at) < staleSummary
+            }.map { it.name }.toSet()
+            val lines: List<FlightWorkflowLine> = if (runLines.isEmpty()) {
+                fromBriefs.filter { kept(it) && it.name !in justEnded }.mapIndexed { i, c -> line("$i-${c.name}", c.name, c.phase, c.done, c.total, c.key, c.status) }
             } else {
-                running.map { r -> line(r.id, r.name, r.phase, r.done, r.total) }
+                runLines.map { c -> line(c.id, c.name, c.phase, c.done, c.total, c.key, c.status) }
             }
             val turn = FlightClock.turn(f?.busySince, now)
             val quietFor = (f?.stepSince ?: session.lastActivityAt)?.let { now.secondsSince(it) }
@@ -376,14 +446,14 @@ data class InFlightCard(
                 quiet = if (turn == null) FlightClock.quiet(session.lastActivityAt, now) else null,
                 model = f?.model?.let { modelName(it) }, health = health,
                 healthLine = healthLine(health, f?.healthNote, quietFor, f?.resetsAt, now, f?.stepSince != null, zone),
-                workflows = lines, workflowTotal = if (running.isEmpty()) (f?.workflowsRunning ?: 0) else 0,
+                workflows = lines, workflowTotal = if (runLines.isEmpty()) (f?.workflowsRunning ?: 0) else 0,
             )
         }
 
-        private fun line(id: String, name: String, phase: String?, done: Int, total: Int): FlightWorkflowLine =
+        private fun line(id: String, name: String, phase: String?, done: Int, total: Int, key: String, status: FlightLineStatus): FlightWorkflowLine =
             FlightWorkflowLine(
                 id, name, phase, if (total > 0) "${minOf(done, total)}/$total agents" else null,
-                if (total > 0) minOf(1.0, done.toDouble() / total) else null,
+                if (total > 0) minOf(1.0, done.toDouble() / total) else null, key, status,
             )
 
         /**
@@ -419,6 +489,39 @@ data class InFlightCard(
             }
             return raw
         }
+    }
+}
+
+// MARK: - Lines that have just ended
+
+/**
+ * Which workflow lines have just ended, so their cards can close them ("✓ done", amber for a failure) instead of
+ * losing them without a word. A line counts only when the phone saw it running in the build before and sees it done,
+ * failed or stopped now: a run that finished hours ago (the runs list keeps a day of them) never shows, and nothing is
+ * kept from the first look. Each is kept [grace] seconds from when the phone saw it end, on the phone's own clock (the
+ * Mac's end time can be several seconds behind, as it re-checks runs every 3 s). The one stateful piece; NowStore
+ * keeps it and feeds it every build.
+ */
+class FlightGraceBook(private val grace: Double = NowMotion.endedGrace) {
+    private var running: Map<String, Set<String>>? = null
+    private val ended = HashMap<String, HashMap<String, Instant>>()
+
+    /** The just-ended line keys by session id, after looking at [sessions] and their [workflows] at [now]. */
+    @Synchronized
+    fun observe(sessions: List<LiveSession>, workflows: Map<String, List<WorkflowRun>>, now: Instant): Map<String, Set<String>> {
+        val before = running
+        val next = HashMap<String, Set<String>>()
+        for (s in sessions) {
+            val (fromRuns, fromBriefs) = InFlightCard.candidates(s, workflows[s.id] ?: emptyList())
+            val all = fromRuns + fromBriefs
+            next[s.id] = all.filter { it.status == FlightLineStatus.RUNNING }.map { it.key }.toSet()
+            val was = before?.get(s.id) ?: continue
+            for (c in all) if (c.status != FlightLineStatus.RUNNING && c.key in was) ended.getOrPut(s.id) { HashMap() }.putIfAbsent(c.key, now)
+        }
+        for (m in ended.values) m.entries.removeIf { now.secondsSince(it.value) >= grace }
+        ended.entries.removeIf { it.value.isEmpty() }
+        running = next
+        return ended.mapValues { it.value.keys.toSet() }
     }
 }
 

@@ -14,7 +14,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import app.page.android.model.DaypartClock
 import app.page.android.model.DaypartWeights
+import app.page.android.ui.nw.theme.LocalAnimationsPaused
 import app.page.android.ui.nw.theme.LocalFixedNow
+import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.time.Instant
 import java.time.ZoneId
@@ -25,8 +27,10 @@ import androidx.lifecycle.repeatOnLifecycle
 
 /**
  * "Now" for a view, as state. Ticks every [fastMs] while [until] is in the future (an arm ring or a thread is
- * moving) and every [slowMs] otherwise, so a screen with nothing moving costs almost nothing. The render
- * harness pins it ([LocalFixedNow]). (iOS NWLiveClock.)
+ * moving) and every [slowMs] otherwise, so a screen with nothing moving costs almost nothing. The fast cadence runs
+ * only while the view is really in front: not while the app is inactive (a dialog, the shade, another window focused)
+ * nor under a sheet or the room ([LocalAnimationsPaused]), where it falls back to the slow one; it picks up again at
+ * once when the view comes back. The render harness pins it ([LocalFixedNow]). (iOS NWLiveClock.)
  */
 @Composable
 fun rememberNWNow(until: Instant? = null, fastMs: Long = 60, slowMs: Long = 5_000): State<Instant> {
@@ -37,13 +41,14 @@ fun rememberNWNow(until: Instant? = null, fastMs: Long = 60, slowMs: Long = 5_00
         return now
     }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(until, lifecycle) {
+    val inFront = lifecycle.currentStateAsState().value.isAtLeast(Lifecycle.State.RESUMED) && !LocalAnimationsPaused.current
+    LaunchedEffect(until, lifecycle, inFront) {
         // Nothing ticks while the app is in the background.
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 val n = Instant.now()
                 now.value = n
-                delay(if (until != null && n.isBefore(until.plusMillis(50))) fastMs else slowMs)
+                delay(if (inFront && until != null && n.isBefore(until.plusMillis(50))) fastMs else slowMs)
             }
         }
     }

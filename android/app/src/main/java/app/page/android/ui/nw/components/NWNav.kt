@@ -34,7 +34,10 @@ import androidx.compose.material.icons.outlined.TrackChanges
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -66,6 +69,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.page.android.model.HoldRingSpec
 import app.page.android.model.NWDestination
+import app.page.android.model.NowMotion
+import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.model.PulseModel
 import app.page.android.model.StopFlowPhase
 import app.page.android.model.StopPlan
@@ -141,17 +146,55 @@ private fun NavSide(
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Icon(icon, null, tint = if (on) badge.color else NW.Palette.textTertiary.color, modifier = Modifier.size(24.dp))
-            if (count > 0) {
-                Text(
-                    "$count", style = NW.Typo.captionStrong.copy(fontSize = 13.sp), color = NW.Palette.onBright.color, textAlign = TextAlign.Center,
-                    modifier = Modifier.clip(CircleShape).background(badge.color).padding(horizontal = 7.dp, vertical = 1.dp),
-                )
-            }
+            NavBadge(count, badge, if (destination == NWDestination.NOW) { l -> l.decide } else { l -> l.working })
         }
         Text(
             title, style = NW.Typo.captionStrong.copy(fontSize = 13.sp), color = if (on) NW.Palette.textPrimary.color else NW.Palette.textTertiary.color,
             modifier = Modifier.padding(top = 3.dp),
         )
+    }
+}
+
+/**
+ * A side's badge in motion ([NowMotion.badge]): a new count rolls in (the lens's roll) as the badge swells once to
+ * 1.22; appearing it scales in from 0.5, going it scales out to 0.5 and fades. Reduce Motion: a 0.2 s cross-fade. Its own
+ * clock, only while a change plays; the count is read from the side's own words, so the badge itself is not read.
+ */
+@Composable
+private fun NavBadge(count: Int, tone: Rgba, pick: (NowMotion.Look) -> Int) {
+    val reduce = LocalReduceMotion.current
+    val change = rememberNowChange(count, pick)
+    val clock = rememberNowClock(change.at?.plus(NowMotion.badgeLasts(reduce)))
+    // Only what is drawn recomposes (a count, the old one while it rolls out, a badge leaving); the motion is read as the layer is drawn.
+    val shown by remember(change, reduce) { derivedStateOf { NowMotion.badge(change, clock.value, reduce).let { Triple(it.count, it.previous, it.opacity > 0.001) } } }
+    val (value, previous, visible) = shown
+    if (!visible || value <= 0) return
+    fun frame() = NowMotion.badge(change, clock.value, reduce)
+    val style = NW.Typo.captionStrong.copy(fontSize = 13.sp)
+    Box(
+        Modifier.clearAndSetSemantics {}.graphicsLayer {
+            val f = frame()
+            scaleX = f.scale.toFloat()
+            scaleY = f.scale.toFloat()
+            alpha = f.opacity.toFloat()
+        }.clip(CircleShape).background(tone.color).padding(horizontal = 7.dp, vertical = 1.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(Modifier.clipToBounds(), contentAlignment = Alignment.Center) {
+            // The old count slides up and out as the new one comes up from below (a cross-fade under Reduce Motion).
+            if (previous != null) Text("$previous", style = style, color = NW.Palette.onBright.color, textAlign = TextAlign.Center, modifier = Modifier.graphicsLayer {
+                val k = frame().roll.toFloat()
+                translationY = if (reduce) 0f else -size.height * k
+                alpha = 1 - k
+            })
+            Text("$value", style = style, color = NW.Palette.onBright.color, textAlign = TextAlign.Center, modifier = Modifier.graphicsLayer {
+                if (previous != null) {
+                    val k = frame().roll.toFloat()
+                    translationY = if (reduce) 0f else size.height * (1 - k)
+                    alpha = k
+                }
+            })
+        }
     }
 }
 

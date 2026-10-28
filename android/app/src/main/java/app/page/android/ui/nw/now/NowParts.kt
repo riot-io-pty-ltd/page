@@ -32,6 +32,23 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.remember
 import app.page.android.model.DawnModel
+import app.page.android.model.NowMotion
+import app.page.android.model.secondsSince
+import app.page.android.ui.nw.components.drawCheck
+import app.page.android.ui.nw.components.hideChecks
+import app.page.android.ui.nw.components.checkBox
+import app.page.android.ui.nw.components.rememberNowClock
+import app.page.android.ui.nw.theme.LocalFixedPhase
+import app.page.android.ui.nw.theme.LocalNowScript
+import app.page.android.ui.nw.theme.LocalReduceMotion
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.drawText
+import java.time.Instant
+import kotlin.math.roundToInt
 import app.page.android.model.MotionCurve
 import app.page.android.ui.nw.components.NWAuroraCanvas
 import app.page.android.ui.nw.components.NWDawnLight
@@ -76,10 +93,22 @@ fun NWBriefCard(brief: ReturnBrief, expanded: Boolean, onToggle: () -> Unit, onD
         }
         return
     }
+    // The counts climb from 0 in under 400 ms as the Brief opens (once per absence, with its sunrise); the harness pins
+    // them with the sunrise, and any other pinned frame draws them counted. Remove animations: counted at once.
+    val reduce = LocalReduceMotion.current
+    val key = brief.window + " " + brief.awayText
+    val openedAt = remember(key) { BriefSunriseBook.start(key) }
+    val countFrom = when {
+        LocalMotionPin.current.pinned(NWMotionPin.Kind.BRIEF) != null -> 0.0
+        LocalFixedPhase.current != null || reduce -> null
+        else -> openedAt
+    }
+    val countClock = rememberNowClock(countFrom?.plus(NowMotion.countDuration))
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     NWGlassCard(modifier, padding = PaddingValues(0.dp)) {
         Box {
             // The sunrise: it rises once as the Brief opens, brighter the more finished.
-            BriefSunrise(brief.sunrise, key = brief.window + " " + brief.awayText)
+            BriefSunrise(brief.sunrise, key = key)
             Column(Modifier.padding(NW.Space.lg), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("WHILE YOU WERE AWAY", style = NW.Typo.label, color = NW.Palette.textTertiary.color)
@@ -97,7 +126,11 @@ fun NWBriefCard(brief: ReturnBrief, expanded: Boolean, onToggle: () -> Unit, onD
                             Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(Color.White.copy(alpha = 0.05f)).padding(12.dp).semantics(mergeDescendants = true) {},
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text("${c.value}", style = NW.Typo.hero, color = col.color)
+                            Text("${c.value}", style = NW.Typo.hero, color = col.color, modifier = Modifier.drawWithContent {
+                                val e = countFrom?.let { countClock.value - it }
+                                if (e == null || e >= NowMotion.countDuration) drawContent()
+                                else drawText(measurer.measure("${NowMotion.chipCount(e, c.value)}", NW.Typo.hero.copy(color = col.color)))
+                            })
                             Text(c.kind.raw.uppercase(), style = NW.Typo.label, color = NW.Palette.textTertiary.color, maxLines = 1)
                         }
                     }
@@ -170,12 +203,44 @@ private fun BriefSunrise(share: Double, key: String) {
     }
 }
 
+/** Settled's receipts as last seen, noticed on the [nwClockSeconds] base. A plain field: see [rememberSettledTrack]. */
+private class SettledHolder {
+    var track: NowMotion.SettledTrack? = null
+}
+
 /**
- * Settled: today's receipt lines, then a headline card per earlier day. This is where History went. "See all"
- * opens every settled page and the day stats. (iOS NWSettledList.)
+ * Today's receipts as Settled has seen them since it appeared ([NowMotion.SettledTrack]): a receipt that has just settled
+ * arrives; a first look, and the older lines a reload brings, simply show. Under the render harness, the script's
+ * receipts folded up to the pinned moment ([LocalNowScript]); any other pinned frame draws them all arrived.
  */
 @Composable
-fun NWSettledList(log: SettledLog, modifier: Modifier = Modifier, onSeeAll: (() -> Unit)? = null) {
+private fun rememberSettledTrack(lines: List<SettledLine>, wall: Instant): NowMotion.SettledTrack {
+    val reduce = LocalReduceMotion.current
+    if (LocalFixedPhase.current != null) {
+        val at = LocalMotionPin.current.pinned(NWMotionPin.Kind.NOW)
+        val script = LocalNowScript.current?.takeIf { it.isNotEmpty() }
+        return remember(lines, script, at, reduce) {
+            if (at == null || script == null) NowMotion.settledStart(lines)
+            else script.drop(1).filter { it.first <= at }.fold(NowMotion.settledStart(script[0].second.settled)) { t, (s, look) -> NowMotion.settledObserve(t, look.settled, wall, s, reduce) }
+        }
+    }
+    val held = remember { SettledHolder() }
+    val next = held.track?.let { NowMotion.settledObserve(it, lines, wall, nwClockSeconds(), reduce) } ?: NowMotion.settledStart(lines)
+    held.track = next
+    return next
+}
+
+/**
+ * Settled: today's receipt lines, then a headline card per earlier day. This is where History went. "See all"
+ * opens every settled page and the day stats. (iOS NWSettledList.) Given [now] (Now's own clock), it is in motion: a
+ * new receipt slides down into place as the lines under it make room, and its ✓ draws; each receipt fades with its
+ * age (1 under five minutes, down to 0.55 at two hours), recomputed as Now's clock ticks, with no animation loop.
+ */
+@Composable
+fun NWSettledList(log: SettledLog, modifier: Modifier = Modifier, onSeeAll: (() -> Unit)? = null, now: Instant? = null) {
+    val reduce = LocalReduceMotion.current
+    val track = now?.let { rememberSettledTrack(log.today, it) }
+    val clock = rememberNowClock(track?.arrivals?.values?.maxOrNull()?.plus(NowMotion.receiptLasts(reduce)))
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text("SETTLED", style = NW.Typo.labelLarge, color = NW.Palette.textTertiary.color, modifier = Modifier.weight(1f).semantics { heading() })
@@ -196,10 +261,30 @@ fun NWSettledList(log: SettledLog, modifier: Modifier = Modifier, onSeeAll: (() 
                 SettledLine.Tone.SENT -> NW.Palette.sky
                 SettledLine.Tone.NEUTRAL -> NW.Palette.textQuiet
             }
-            Row(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}, horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            val arrived = track?.arrivals?.get(line.id)
+            val age = now?.let { NowMotion.settledOpacity(maxOf(0.0, it.secondsSince(line.at)) / 60) } ?: 1.0
+            Row(
+                Modifier.fillMaxWidth().then(if (arrived != null) Modifier.receiptArrival(arrived, clock, reduce, age) else Modifier.alpha(age.toFloat())).semantics(mergeDescendants = true) {},
+                horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Box(Modifier.size(7.dp).clip(CircleShape).background(c.color))
                 Text(line.text, style = NW.Typo.monoSmall, color = NW.Palette.textSecondary.color, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Text(listOfNotNull(line.age, line.status).joinToString(" · "), style = NW.Typo.monoSmall, color = NW.Palette.textTertiary.color, maxLines = 1)
+                val status = listOfNotNull(line.age, line.status).joinToString(" · ")
+                if (now == null || '✓' !in status) {
+                    Text(status, style = NW.Typo.monoSmall, color = NW.Palette.textTertiary.color, maxLines = 1)
+                } else {
+                    // The ✓ is drawn, so a new receipt's can draw itself once it has slid in; the words read the same.
+                    val layout = remember { mutableStateOf<TextLayoutResult?>(null) }
+                    Text(
+                        hideChecks(status), style = NW.Typo.monoSmall, color = NW.Palette.textTertiary.color, maxLines = 1, onTextLayout = { layout.value = it },
+                        modifier = Modifier.drawWithContent {
+                            drawContent()
+                            val box = layout.value?.checkBox() ?: return@drawWithContent
+                            val trim = arrived?.let { NowMotion.receipt(clock.value - it, reduce).check } ?: 1.0
+                            drawCheck(NW.Palette.textTertiary.color, trim.toFloat(), box, 1.3.dp.toPx())
+                        },
+                    )
+                }
             }
         }
         for (day in log.days) {
@@ -209,6 +294,13 @@ fun NWSettledList(log: SettledLog, modifier: Modifier = Modifier, onSeeAll: (() 
             }
         }
     }
+}
+
+/** A receipt arriving ([NowMotion.receipt]): it slides down from 6 dp above as it fades in, its height opening so the lines under it make room. Read as it is laid out. */
+private fun Modifier.receiptArrival(at: Double, clock: State<Double>, reduce: Boolean, age: Double): Modifier = layout { m, c ->
+    val p = m.measure(c)
+    val r = NowMotion.receipt(clock.value - at, reduce)
+    layout(p.width, (p.height * r.height).roundToInt()) { p.placeWithLayer(0, r.offset.dp.roundToPx()) { alpha = (r.opacity * age).toFloat() } }
 }
 
 /** What is wrong, what it means, and the one obvious fix. It sits first in the Now stream under a Horizon that has gone hollow. (iOS NWProblemCard.) */

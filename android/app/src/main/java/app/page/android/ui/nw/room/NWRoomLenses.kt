@@ -38,7 +38,6 @@ import androidx.compose.material.icons.outlined.WrapText
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -48,9 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -82,9 +79,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.lifecycle.repeatOnLifecycle
 import app.page.android.data.AppGraph
 import app.page.android.model.AgentRoomModel
 import app.page.android.model.ChangesModel
@@ -105,12 +99,10 @@ import app.page.android.ui.nw.components.NWBackdrop
 import app.page.android.ui.nw.components.NWDeliveryPreview
 import app.page.android.ui.nw.components.NWGlassCard
 import app.page.android.ui.nw.components.nwClockSeconds
-import app.page.android.ui.nw.components.nwClockSleepMillis
-import app.page.android.ui.nw.components.nwClockStepNanos
+import app.page.android.ui.nw.components.rememberNWMotionClock
 import app.page.android.ui.nw.components.nwIcon
 import app.page.android.ui.nw.now.NWOutcomeStrip
 import app.page.android.ui.nw.now.RowStatus
-import app.page.android.ui.nw.theme.LocalAnimationsPaused
 import app.page.android.ui.nw.theme.LocalFixedPhase
 import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.LocalWorkflowScript
@@ -119,7 +111,6 @@ import app.page.android.ui.nw.theme.Rgba
 import java.time.Instant
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlinx.coroutines.delay
 
 // The room's other three lenses: Screen (the Mac's mirror of the terminal), Changes (what the turn changed, with
 // the diff) and Workflows (a run as a ring of agent nodes). All of them are read-only; the only thing they can ask
@@ -383,38 +374,9 @@ private fun WorkflowOrbit.NodeState.spoken(): String = when (this) {
 /** When each run's ring first closed with its pulse, so it plays once per run however often the lens is opened. */
 private val workflowPulseBook = OneShotBook()
 
-/**
- * One timeline for a workflow view: seconds on the [nwClockSeconds] base, ticking at most 30 times a second and only
- * while [animatingAt] says something moves, so a finished, settled run draws with no clock at all. It holds while the app
- * is in the background or the room is covered ([LocalAnimationsPaused]); the render harness pins it ([LocalFixedPhase]).
- * Read it in draw and layer lambdas, so a tick redraws without recomposing. [key] restarts it (a new change to play).
- */
+/** One timeline for a workflow view, ticking only while [animatingAt] says something moves ([rememberNWMotionClock]). */
 @Composable
-private fun rememberMotionClock(key: Any?, animatingAt: (Double) -> Boolean): State<Double> {
-    val fixed = LocalFixedPhase.current
-    val covered = LocalAnimationsPaused.current
-    val lifecycle = LocalLifecycleOwner.current.lifecycle
-    val clock = remember { mutableStateOf(fixed ?: nwClockSeconds()) }
-    val animating by rememberUpdatedState(animatingAt)
-    if (fixed != null) {
-        clock.value = fixed
-        return clock
-    }
-    LaunchedEffect(key, covered, lifecycle) {
-        clock.value = nwClockSeconds()
-        if (covered) return@LaunchedEffect
-        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            val step = nwClockStepNanos(30.0)
-            while (true) {
-                val now = withFrameNanos { nwClockSeconds() }
-                clock.value = now
-                if (!animating(now)) break
-                delay(nwClockSleepMillis(SystemClock.elapsedRealtimeNanos(), step))
-            }
-        }
-    }
-    return clock
-}
+private fun rememberMotionClock(key: Any?, animatingAt: (Double) -> Boolean): State<Double> = rememberNWMotionClock(key, animatingAt = animatingAt)
 
 /**
  * The run as the lens has seen it since it appeared ([WorkflowMotion.Track]), each new snapshot observed as it arrives.

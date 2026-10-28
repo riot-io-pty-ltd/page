@@ -70,6 +70,7 @@ import app.page.android.model.CardOutcome
 import app.page.android.model.ChipKind
 import app.page.android.model.DepartingRows
 import app.page.android.model.NowModel
+import app.page.android.model.NowMotion
 import app.page.android.model.HeaderJump
 import app.page.android.model.NWDestination
 import app.page.android.model.NWTip
@@ -93,6 +94,9 @@ import app.page.android.ui.nw.components.NWNewPill
 import app.page.android.ui.nw.components.NWPulseStyle
 import app.page.android.ui.nw.components.NWReceiptLine
 import app.page.android.ui.nw.components.NWRunwayBar
+import app.page.android.ui.nw.components.rememberRunwayMotion
+import app.page.android.ui.nw.components.rememberNowChange
+import app.page.android.ui.nw.components.rememberNowClock
 import app.page.android.ui.nw.components.NWSectionHeader
 import app.page.android.ui.nw.components.NWTipCallout
 import app.page.android.ui.nw.components.NWTonightCard
@@ -131,6 +135,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
     val inbox by RelayClient.inbox.collectAsStateWithLifecycle()
     val sessionState by SessionStore.state.collectAsStateWithLifecycle()
     val retractNotes by RelayClient.retractNotes.collectAsStateWithLifecycle()
+    val connection by RelayClient.connection.collectAsStateWithLifecycle()
     val book by TipStore.book.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val biometry = remember { BiometricGate.methodName(context) }
@@ -222,6 +227,11 @@ fun NowScreen(modifier: Modifier = Modifier) {
     // The Horizon gives up its room at once when the first item arrives (or takes it back when the last goes): the
     // stream jumps with it in that one frame, so the only thing moving is the arrival, not the Runway sliding up
     // through it.
+    // Each reconnect starts In flight's motion afresh: the first snapshot after it carries old changes, never news.
+    val reconnects = remember { object { var last: RelayClient.ConnectionState? = null; var count = 0 } }
+    if (connection == RelayClient.ConnectionState.CONNECTED && reconnects.last != null && reconnects.last != connection) reconnects.count++
+    reconnects.last = connection
+    val flightEpoch = reconnects.count
     val lastHorizon = remember { object { var height: Dp? = null } }
     val horizonJumped = lastHorizon.height != null && lastHorizon.height != horizonHeight
     lastHorizon.height = horizonHeight
@@ -244,6 +254,9 @@ fun NowScreen(modifier: Modifier = Modifier) {
             )
         }
     }
+    // The receipt line of a reply on its way: when it appeared (it rises in then; its words cross-fade as it goes on).
+    val receiptChange = rememberNowChange(m.receiptLine)
+    val receiptAt = receiptChange.at?.takeIf { receiptChange.from == null }
     // Every item's key in the order drawn, so a section can be scrolled to ("2 working" jumps to In flight).
     val keys = remember { ArrayList<String>() }
     keys.clear()
@@ -286,14 +299,21 @@ fun NowScreen(modifier: Modifier = Modifier) {
             },
             contentPadding = PaddingValues(bottom = 132.dp), verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            fun add(key: String, content: @Composable LazyItemScope.(Modifier) -> Unit) {
+            fun addItem(key: String, fade: Boolean, content: @Composable LazyItemScope.(Modifier) -> Unit) {
                 keys.add(key)
                 item(key = key) {
                     // The cards below a new arrival make room on its spring (response 0.5, damping 0.8: stiffness
-                    // (2π/0.5)²); nothing above moves. The arrival draws its own entrance; a departure fades.
-                    val placed = if (reduce) Modifier else Modifier.animateItem(
-                        fadeInSpec = null, placementSpec = if (horizonJumped) null else spring(dampingRatio = 0.8f, stiffness = 157.9f), fadeOutSpec = tween(220),
-                    )
+                    // (2π/0.5)²); nothing above moves. The arrival draws its own entrance; a departure fades. [fade]:
+                    // the queued receipt, which fades out over 0.3 s as the rows under it close up (a plain 0.2 s
+                    // cross-fade, in and out, under Reduce Motion).
+                    val placed = when {
+                        fade && reduce -> Modifier.animateItem(fadeInSpec = tween(200), placementSpec = null, fadeOutSpec = tween(200))
+                        reduce -> Modifier
+                        else -> Modifier.animateItem(
+                            fadeInSpec = null, placementSpec = if (horizonJumped) null else spring(dampingRatio = 0.8f, stiffness = 157.9f),
+                            fadeOutSpec = tween(if (fade) (NowMotion.queuedFade * 1000).toInt() else 220),
+                        )
+                    }
                     // The render harness pins the approach: the cards below are drawn part-way down.
                     val pushed = if (pinnedArrival != null && approachAt != null) Modifier.graphicsLayer {
                         val a = keys.indexOf("row-$pinnedArrival")
@@ -303,6 +323,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
                     content(placed.then(pushed))
                 }
             }
+            fun add(key: String, content: @Composable LazyItemScope.(Modifier) -> Unit) = addItem(key, false, content)
             fun pad(content: @Composable () -> Unit): @Composable LazyItemScope.(Modifier) -> Unit = { m -> Box(m.padding(horizontal = NW.Space.gutter)) { content() } }
 
             add("horizon") { im ->
@@ -338,7 +359,10 @@ fun NowScreen(modifier: Modifier = Modifier) {
                 NWGlassCard(
                     Modifier.clickable(role = Role.Button, onClickLabel = "Opens the Tower at Budget") { AppRouter.openTower(TowerSection.BUDGET) },
                     radius = 24.dp, padding = PaddingValues(6.dp),
-                ) { NWRunwayBar(m.runway) }
+                ) {
+                    // The NOW dot breathes with the pulse while agents work, never at dusk.
+                    NWRunwayBar(m.runway, motion = rememberRunwayMotion(m.runway, breathing = m.workingCount > 0 && !m.paused, period = screen.pulse.breathPeriod))
+                }
             })
             val brief = screen.brief
             if (brief != null && !brief.hasUrgent) add("brief", pad {
@@ -349,7 +373,7 @@ fun NowScreen(modifier: Modifier = Modifier) {
                 if (screen.inFlight.rows.isEmpty()) return
                 add(HeaderJump.sectionId, pad {
                     NWInFlightSection(
-                        screen.inFlight, tip = tip?.takeIf { it.tip == NWTip.IN_FLIGHT }, biometry = biometry,
+                        screen.inFlight, tip = tip?.takeIf { it.tip == NWTip.IN_FLIGHT }, biometry = biometry, epoch = flightEpoch,
                         onOpen = { id, entry -> TipStore.retire(NWTip.IN_FLIGHT); AppRouter.openSession(id, entry) },
                         onToggle = NowStore::toggleInFlightExpanded, onHeader = { AppRouter.selectDestination(NWDestination.LANES) }, onDismissTip = { TipStore.retire(it) },
                     )
@@ -394,9 +418,9 @@ fun NowScreen(modifier: Modifier = Modifier) {
             if (brief != null && brief.hasUrgent && lastUrgent == null) add("brief", pad {
                 NWBriefCard(brief, briefExpanded, { briefExpanded = !briefExpanded }, { AwayStore.dismissBrief(); briefExpanded = false }, { briefExpanded = false; jumpTo("section-review") })
             })
-            m.receiptLine?.let { line -> add("receipt", pad { NWReceiptLine(line, failed = m.receiptFailed) }) }
+            m.receiptLine?.let { line -> addItem("receipt", true, pad { QueuedReceipt(line, m.receiptFailed, receiptAt) }) }
             if (quiet && problem == null) add("tonight", pad { NWTonightCard(m.rings) })
-            add("settled", pad { NWSettledList(screen.settled, Modifier.padding(top = 6.dp), onSeeAll = AppRouter::openHistory) })
+            add("settled", pad { NWSettledList(screen.settled, Modifier.padding(top = 6.dp), onSeeAll = AppRouter::openHistory, now = screen.now) })
         }
         // The stream scrolls under the status bar: a soft scrim keeps the clock readable once the Horizon has gone.
         if (listState.firstVisibleItemIndex > 0) {
@@ -415,6 +439,23 @@ fun NowScreen(modifier: Modifier = Modifier) {
             Box(Modifier.fillMaxWidth().padding(top = topInset + 56.dp), contentAlignment = Alignment.TopCenter) { NWNewPill(queued) { NowStore.releaseNew() } }
         }
     }
+}
+
+/**
+ * The receipt line of the latest reply ("held until 15:00", "sending", "delivered"): it rises 6 dp as it fades in
+ * when it appears ([appearedAt], on the [nwClockSeconds] base), and its words cross-fade as the reply goes on. Its
+ * leaving is the list's: a 0.3 s fade as the rows under it close up.
+ */
+@Composable
+private fun QueuedReceipt(line: String, failed: Boolean, appearedAt: Double?) {
+    val reduce = LocalReduceMotion.current
+    val clock = rememberNowClock(appearedAt?.plus(NowMotion.queuedFade))
+    val rise = if (appearedAt == null) Modifier else Modifier.graphicsLayer {
+        val s = NowMotion.queuedIn(clock.value - appearedAt, reduce)
+        translationY = s.offset.dp.toPx()
+        alpha = s.opacity.toFloat()
+    }
+    NWReceiptLine(line, rise, failed = failed, crossfade = true)
 }
 
 @Composable

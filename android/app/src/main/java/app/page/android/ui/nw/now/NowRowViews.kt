@@ -55,7 +55,9 @@ import app.page.android.model.ArmSpec
 import app.page.android.model.CardOutcome
 import app.page.android.model.ChipKind
 import app.page.android.model.NWDestination
+import app.page.android.model.NowMotion
 import app.page.android.model.NowRow
+import app.page.android.model.OneShotBook
 import app.page.android.model.PendingAction
 import app.page.android.model.ReceiptThreadInput
 import app.page.android.model.RowAction
@@ -76,6 +78,8 @@ import app.page.android.ui.nw.components.color
 import app.page.android.ui.nw.components.nwIcon
 import app.page.android.ui.nw.components.rememberHaptics
 import app.page.android.ui.nw.components.rememberNWNow
+import app.page.android.ui.nw.components.rememberNowClock
+import app.page.android.ui.nw.components.rememberNowShown
 import app.page.android.ui.nw.components.symbol
 import app.page.android.ui.nw.components.tint
 import app.page.android.ui.nw.theme.LocalReduceMotion
@@ -401,6 +405,9 @@ fun NWLookCard(row: NowRow, now: Instant, status: RowStatus, actions: RowActions
     }
 }
 
+/** When each Review item's chips first counted up: once per process, however often Now is rebuilt or scrolled. */
+private val reviewChips = OneShotBook()
+
 /** A Review card: a finished turn, with what changed and Looks good. */
 @Composable
 fun NWReviewCard(row: NowRow, now: Instant, status: RowStatus, actions: RowActions, modifier: Modifier = Modifier) {
@@ -424,8 +431,14 @@ fun NWReviewCard(row: NowRow, now: Instant, status: RowStatus, actions: RowActio
                     Text(row.waitingText(now), style = NW.Typo.caption, color = NW.Palette.textTertiary.color, maxLines = 1)
                 }
                 val chips = TurnSummaryChips.parse(row.summary)
-                if (chips.isEmpty()) Text(row.summary, style = NW.Typo.body, color = NW.Palette.textSecondary.color, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                else FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { chips.forEach { NWTurnChip(it) } }
+                if (chips.isEmpty()) {
+                    Text(row.summary, style = NW.Typo.body, color = NW.Palette.textSecondary.color, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                } else {
+                    // The first time this item is shown, its counts climb from 0 and the ✓ draws after them.
+                    val shownAt = rememberNowShown(reviewChips, row.id)
+                    val clock = rememberNowClock(shownAt + NowMotion.chipsLast)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { chips.forEach { NWTurnChip(it, countFrom = shownAt, clock = clock) } }
+                }
             }
             if (busy) NWOutcomeStrip(status, now, actions.cancel)
             else Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {

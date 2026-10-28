@@ -1225,6 +1225,11 @@ object SessionStore {
         update { it.copy(commands = it.commands + commands.associateBy { c -> c.clientId }) }
     }
 
+    /** The demo's list and runs changing in place, as a live Mac's would (the In flight live script). */
+    fun seedDemoLive(sessions: List<LiveSession>, workflows: Map<String, List<WorkflowRun>>) {
+        update { it.copy(sessions = sessions, workflows = workflows, lastListAt = Instant.now()) }
+    }
+
     fun seedDemoExtras(diffs: Map<String, SessionDiff>, folders: StartFolders) {
         demoDiffs = diffs
         demoFolders = folders

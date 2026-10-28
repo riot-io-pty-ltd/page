@@ -45,10 +45,10 @@ fun NWStarGlyph(seed: ULong, color: Rgba, modifier: Modifier = Modifier, size: D
     }
 }
 
-/** Draws the star glyph centred in this scope at diameter [s]. */
-fun DrawScope.drawStar(seed: ULong, color: Rgba, brightness: Double, s: Float) {
+/** Draws the star glyph centred in this scope at diameter [s]; [glow] is its halo's strength (a working star's breathes, [app.page.android.model.NowMotion.starBreath]). */
+fun DrawScope.drawStar(seed: ULong, color: Rgba, brightness: Double, s: Float, glow: Double = 0.42) {
     val c = Offset(this.size.width / 2, this.size.height / 2)
-    drawCircle(Brush.radialGradient(listOf(color.opacity(0.42 * brightness).color, color.opacity(0.0).color), center = c, radius = s * 0.75f), radius = s * 0.75f, center = c)
+    drawCircle(Brush.radialGradient(listOf(color.opacity(glow * brightness).color, color.opacity(0.0).color), center = c, radius = s * 0.75f), radius = s * 0.75f, center = c)
     val shape = nwStarPath(seed, c, s * 0.7f / 2)
     drawPath(shape, Brush.radialGradient(listOf(Color.White.copy(alpha = (0.95 * brightness).toFloat()), color.opacity(0.9 * brightness).color), center = c, radius = s * 0.5f))
     drawPath(shape, color.opacity(0.9 * brightness).color, style = Stroke(1.dp.toPx()))

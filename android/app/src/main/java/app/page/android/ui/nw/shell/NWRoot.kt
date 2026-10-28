@@ -34,7 +34,10 @@ import app.page.android.ui.nw.theme.LocalAnimationsPaused
 import app.page.android.ui.nw.theme.LocalDaypart
 import app.page.android.ui.nw.theme.LocalFixedNow
 import app.page.android.ui.nw.theme.LocalFixedPhase
+import app.page.android.ui.nw.theme.LocalFlightScript
 import app.page.android.ui.nw.theme.LocalMotionPin
+import app.page.android.ui.nw.theme.LocalNowScript
+import app.page.android.ui.nw.theme.LocalReduceMotion
 import app.page.android.ui.nw.theme.NW
 import kotlinx.coroutines.delay
 
@@ -46,7 +49,8 @@ fun NWRoot(onRequestNotifications: () -> Unit) {
     val standalone = spec?.let { RenderHarness.standalone(it.screen) }
     val daypart by rememberDaypartTicker()
     CompositionLocalProvider(
-        LocalFixedPhase provides spec?.phase, LocalFixedNow provides spec?.now, LocalMotionPin provides spec?.pin,
+        LocalFixedPhase provides spec?.phase, LocalFixedNow provides spec?.now, LocalMotionPin provides spec?.pin, LocalFlightScript provides spec?.flightScript,
+        LocalNowScript provides spec?.nowScript, LocalReduceMotion provides (spec?.reduce == true || LocalReduceMotion.current),
         // A harness frame pins a local minute of the day, never an instant: 01:12 unless asked.
         LocalDaypart provides (spec?.let { DaypartWeights.at(it.dayTime ?: Daypart.NIGHTTIME.coreMinute) } ?: daypart),
     ) {

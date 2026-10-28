@@ -74,6 +74,40 @@ fun rememberNWClock(fps: Double = 30.0, active: Boolean = true): State<Double> {
     return seconds
 }
 
+/**
+ * One timeline for a view whose motion comes and goes (the Workflows lens, the In flight cards): seconds on the
+ * [nwClockSeconds] base, ticking at most [fps] times a second (30 at the most) and only while [animatingAt] says
+ * something moves, so a settled view draws with no clock at all. It holds while the app is in the background or the
+ * screen is covered ([LocalAnimationsPaused]); the render harness pins it ([LocalFixedPhase]). Read it in draw and
+ * layer lambdas, so a tick redraws without recomposing. [key] restarts it (a new change to play).
+ */
+@Composable
+fun rememberNWMotionClock(key: Any?, fps: Double = 30.0, animatingAt: (Double) -> Boolean): State<Double> {
+    val fixed = LocalFixedPhase.current
+    val covered = LocalAnimationsPaused.current
+    val lifecycle = LifecycleOwnerLocal.current.lifecycle
+    val clock = remember { mutableStateOf(fixed ?: nwClockSeconds()) }
+    val animating by androidx.compose.runtime.rememberUpdatedState(animatingAt)
+    if (fixed != null) {
+        clock.value = fixed
+        return clock
+    }
+    LaunchedEffect(key, covered, fps, lifecycle) {
+        clock.value = nwClockSeconds()
+        if (covered) return@LaunchedEffect
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            val step = nwClockStepNanos(fps)
+            while (true) {
+                val now = withFrameNanos { nwClockSeconds() }
+                clock.value = now
+                if (!animating(now)) break
+                delay(nwClockSleepMillis(SystemClock.elapsedRealtimeNanos(), step))
+            }
+        }
+    }
+    return clock
+}
+
 /** One tick of a clock that runs at [fps], capped at 30 (and at least 1). */
 internal fun nwClockStepNanos(fps: Double): Long = (1e9 / max(1.0, min(fps, 30.0))).toLong()
 

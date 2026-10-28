@@ -80,7 +80,55 @@ SHEETS = {
         ("motion-brief@1.2", "1.2 s"),
         ("motion-brief@2.6", "holds"),
     ]),
+    # In flight (the strip and the first card), Now scrolled to the section.
+    "6a-inflight-enter": ((0, 57, 411, 420), [
+        ("motion-inflight-enter@0.1", "100 ms · cards rise"),
+        ("motion-inflight-enter@0.35", "350 ms · arcs sweep"),
+        ("motion-inflight-enter@0.7", "700 ms"),
+        ("motion-inflight-enter@1.4", "landed"),
+        ("motion-inflight-enter@3.0", "live · glint, comet, breath"),
+    ]),
+    "6b-inflight-advance": ((0, 57, 411, 420), [
+        ("motion-inflight-advance@1.4", "3/5"),
+        ("motion-inflight-advance@2.2", "4/5 springs · flare · new step"),
+        ("motion-inflight-advance@2.5", "settling"),
+        ("motion-inflight-advance@3.6", "settled"),
+    ]),
+    "6c-inflight-complete": ((0, 57, 411, 420), [
+        ("motion-inflight-complete@1.4", "1/4 running"),
+        ("motion-inflight-complete@2.2", "done · closing"),
+        ("motion-inflight-complete@2.5", "one soft pulse"),
+        ("motion-inflight-complete@3.6", "folds away"),
+        ("motion-inflight-complete@4.5", "gone"),
+    ]),
+    "6d-inflight-vanish": ((0, 57, 411, 420), [
+        ("motion-inflight-vanish@1.4", "1/4 running"),
+        ("motion-inflight-vanish@2.2", "vanished · no word, no pulse"),
+        ("motion-inflight-vanish@3.6", "nothing celebrated"),
+    ]),
+    "6e-inflight-stuck": ((0, 57, 411, 420), [
+        ("motion-inflight-stuck@1.4", "stuck · still"),
+        ("motion-inflight-stuck@3.0", "still · amber ripple only"),
+    ]),
 }
+
+# The rest of Now (motion-now-*): every one of the shared moments, for the Horizon's words and the Runway, the nav bar's
+# badges, the Review chips and Settled. Long rows wrap.
+NOW_MOMENTS = ["0.0", "0.1", "0.2", "0.35", "0.5", "0.7", "1.0", "1.4", "2.0", "2.2", "2.5", "3.0", "3.6", "4.5"]
+
+
+def now_row(screen, notes):
+    return [(f"{screen}@{t}", f"{t} s" + (f" · {notes[t]}" if t in notes else "")) for t in NOW_MOMENTS]
+
+
+SHEETS.update({
+    "7a-now-enter-runway": ((0, 205, 411, 155), now_row("motion-now-enter", {"0.0": "first look", "0.35": "line draws, markers pop", "1.4": "landed", "3.6": "NOW dot breathes"})),
+    "7b-now-enter-chips": ((0, 385, 411, 100), now_row("motion-now-enter-review", {"0.0": "counts from 0", "0.2": "counting", "0.5": "✓ draws", "1.0": "landed"})),
+    "7c-now-change-words-runway": ((0, 205, 411, 155), now_row("motion-now-change", {"2.0": "3rd decision", "2.2": "2 → 3 rolls, cutoff glides", "3.0": "landed"})),
+    "7d-now-change-badge": ((0, -100, 411, 100), now_row("motion-now-change", {"2.0": "Now 2 → 3", "2.2": "rolls, swells", "3.0": "landed"})),
+    "7e-now-change-settled": ((0, 600, 411, 200), now_row("motion-now-change-settled", {"2.0": "a receipt settles", "2.2": "slides in", "2.5": "✓ draws", "3.0": "landed"})),
+    "7f-now-quiet": ((0, 205, 411, 155), now_row("motion-now-quiet", {"0.35": "draws", "1.4": "still: nothing works"})),
+})
 
 
 def font(size):
@@ -115,17 +163,24 @@ for name, (box, items) in SHEETS.items():
     if not tiles:
         continue
     th = 520 if box[3] <= 400 else 900
+    if box[3] <= 160:
+        th = 360
     tiles = [(t.resize((int(t.width * th / t.height), th), Image.LANCZOS), l) for t, l in tiles]
     pad, cap = 24, 54
-    width = sum(t.width for t, _ in tiles) + pad * (len(tiles) + 1)
-    sheet = Image.new("RGB", (width, th + cap + pad * 2), (7, 9, 13))
+    # The rest of Now's sheets (7*) hold every shared moment: seven to a row. The others stay one row.
+    per = 7 if name.startswith("7") else len(tiles)
+    rows = [tiles[i:i + per] for i in range(0, len(tiles), per)]
+    width = max(sum(t.width for t, _ in r) + pad * (len(r) + 1) for r in rows)
+    sheet = Image.new("RGB", (width, (th + cap + pad) * len(rows) + pad), (7, 9, 13))
     draw = ImageDraw.Draw(sheet)
-    x = pad
-    for t, label in tiles:
-        sheet.paste(t, (x, pad))
-        draw.rounded_rectangle((x - 1, pad - 1, x + t.width, pad + th), radius=18, outline=(40, 44, 52), width=2)
-        draw.text((x + 4, pad + th + 14), label, fill=(170, 178, 190), font=font(24))
-        x += t.width + pad
+    for ri, r in enumerate(rows):
+        x = pad
+        y = pad + ri * (th + cap + pad)
+        for t, label in r:
+            sheet.paste(t, (x, y))
+            draw.rounded_rectangle((x - 1, y - 1, x + t.width, y + th), radius=18, outline=(40, 44, 52), width=2)
+            draw.text((x + 4, y + th + 14), label, fill=(170, 178, 190), font=font(24))
+            x += t.width + pad
     dest = os.path.join(out, name + ".png")
     sheet.save(dest)
     made.append(dest)
